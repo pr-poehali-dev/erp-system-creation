@@ -4,7 +4,9 @@ ERP API — универсальный endpoint для всех операций
 """
 import json
 import os
+import base64
 import psycopg2
+import boto3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -949,6 +951,200 @@ def upsert_estimate_row(cur, table: str, body: dict):
     row = cur.fetchone()
     return {"id": row[0]} if row else {"id": None}
 
+# ─── S3 HELPER ───────────────────────────────────────────────────────────────
+
+def get_s3():
+    return boto3.client(
+        "s3",
+        endpoint_url="https://bucket.poehali.dev",
+        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+    )
+
+def upload_file_to_s3(file_b64: str, file_name: str, folder: str = "documents") -> tuple:
+    """Декодирует base64, заливает в S3, возвращает (cdn_url, size_kb)."""
+    s3 = get_s3()
+    data = base64.b64decode(file_b64)
+    # Определяем Content-Type по расширению
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    content_types = {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "doc": "application/msword",
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png",
+    }
+    ct = content_types.get(ext, "application/octet-stream")
+    key = f"{folder}/{file_name}"
+    s3.put_object(Bucket="files", Key=key, Body=data, ContentType=ct)
+    cdn_url = f"https://cdn.poehali.dev/projects/{os.environ['AWS_ACCESS_KEY_ID']}/bucket/{key}"
+    size_kb = len(data) // 1024
+    return cdn_url, size_kb
+
+# ─── DOC TEMPLATES (пакет документов по договору) ────────────────────────────
+
+def get_doc_templates(cur, active_only: bool = True):
+    """Список шаблонов документов (управляет директор)."""
+    where = "WHERE is_active = TRUE" if active_only else ""
+    cur.execute(f"""
+        SELECT id, name, description, is_required, sort_order,
+               file_url, file_name, file_size_kb, file_updated_at,
+               is_active, created_at
+        FROM {SCHEMA}.doc_templates
+        {where}
+        ORDER BY sort_order, id
+    """)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+def update_doc_template(cur, tpl_id: int, body: dict):
+    """Директор обновляет метаданные шаблона (или загружает новый файл)."""
+    sets, vals = [], []
+    for field in ["name", "description", "is_required", "sort_order", "is_active"]:
+        if field in body:
+            sets.append(f"{field}=%s"); vals.append(body[field])
+    # Если передан файл — заливаем в S3
+    file_b64 = body.get("file_b64")
+    file_name = body.get("file_name")
+    if file_b64 and file_name:
+        cdn_url, size_kb = upload_file_to_s3(file_b64, f"template_{tpl_id}_{file_name}", "doc_templates")
+        sets += ["file_url=%s", "file_name=%s", "file_size_kb=%s", "file_updated_at=now()"]
+        vals += [cdn_url, file_name, size_kb]
+    if not sets:
+        return False
+    sets.append("updated_at=now()")
+    vals.append(tpl_id)
+    cur.execute(f"UPDATE {SCHEMA}.doc_templates SET {', '.join(sets)} WHERE id=%s", vals)
+    return True
+
+def create_doc_template(cur, body: dict):
+    """Директор создаёт новый шаблон."""
+    name      = body["name"]
+    desc      = body.get("description", "")
+    required  = bool(body.get("is_required", True))
+    sort      = int(body.get("sort_order", 99))
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.doc_templates (name, description, is_required, sort_order)
+        VALUES (%s,%s,%s,%s) RETURNING id
+    """, (name, desc, required, sort))
+    tpl_id = cur.fetchone()[0]
+    # Если сразу передан файл
+    file_b64 = body.get("file_b64")
+    file_name = body.get("file_name")
+    if file_b64 and file_name:
+        cdn_url, size_kb = upload_file_to_s3(file_b64, f"template_{tpl_id}_{file_name}", "doc_templates")
+        cur.execute(f"""
+            UPDATE {SCHEMA}.doc_templates
+            SET file_url=%s, file_name=%s, file_size_kb=%s, file_updated_at=now()
+            WHERE id=%s
+        """, (cdn_url, file_name, size_kb, tpl_id))
+    return {"id": tpl_id, "name": name}
+
+# ─── CONTRACT DOCUMENTS (пакет по конкретной сделке) ─────────────────────────
+
+def get_contract_docs(cur, deal_id: int):
+    """
+    Возвращает статус пакета документов по сделке:
+    все шаблоны + загружены ли файлы менеджером.
+    """
+    # Все активные шаблоны
+    templates = get_doc_templates(cur, active_only=True)
+    # Уже загруженные для этой сделки
+    cur.execute(f"""
+        SELECT id, template_id, file_url, file_name, file_size_kb,
+               uploaded_at, status, notes
+        FROM {SCHEMA}.contract_documents
+        WHERE deal_id = %s
+    """, (deal_id,))
+    cols = [d[0] for d in cur.description]
+    uploaded = {r[1]: dict(zip(cols, r)) for r in cur.fetchall()}
+
+    result = []
+    for tpl in templates:
+        doc = uploaded.get(tpl["id"])
+        result.append({
+            "template_id":   tpl["id"],
+            "template_name": tpl["name"],
+            "description":   tpl["description"],
+            "is_required":   tpl["is_required"],
+            "sort_order":    tpl["sort_order"],
+            # Шаблон для скачивания
+            "template_file_url":  tpl["file_url"],
+            "template_file_name": tpl["file_name"],
+            # Загруженный менеджером файл
+            "doc_id":     doc["id"]        if doc else None,
+            "file_url":   doc["file_url"]  if doc else None,
+            "file_name":  doc["file_name"] if doc else None,
+            "status":     doc["status"]    if doc else "pending",
+            "uploaded_at":doc["uploaded_at"] if doc else None,
+        })
+
+    all_required_uploaded = all(
+        r["status"] in ("uploaded", "approved")
+        for r in result if r["is_required"]
+    )
+    return {
+        "items": result,
+        "all_required_done": all_required_uploaded,
+        "total": len(result),
+        "uploaded_count": sum(1 for r in result if r["status"] != "pending"),
+    }
+
+def upload_contract_doc(cur, deal_id: int, template_id: int, body: dict):
+    """Менеджер загружает подписанный скан документа."""
+    file_b64  = body["file_b64"]
+    file_name = body["file_name"]
+    notes     = body.get("notes", "")
+
+    cdn_url, size_kb = upload_file_to_s3(
+        file_b64,
+        f"deal_{deal_id}_tpl_{template_id}_{file_name}",
+        "contract_docs"
+    )
+
+    # Upsert — если уже было, обновляем
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.contract_documents
+            (deal_id, template_id, file_url, file_name, file_size_kb, uploaded_at, status, notes)
+        VALUES (%s, %s, %s, %s, %s, now(), 'uploaded', %s)
+        ON CONFLICT (deal_id, template_id) DO UPDATE SET
+            file_url = EXCLUDED.file_url,
+            file_name = EXCLUDED.file_name,
+            file_size_kb = EXCLUDED.file_size_kb,
+            uploaded_at = now(),
+            status = 'uploaded',
+            notes = EXCLUDED.notes
+        RETURNING id
+    """, (deal_id, template_id, cdn_url, file_name, size_kb, notes))
+    doc_id = cur.fetchone()[0]
+
+    # Автоматически создаём/обновляем запись в таблице documents
+    cur.execute(f"""
+        SELECT name FROM {SCHEMA}.doc_templates WHERE id=%s
+    """, (template_id,))
+    tpl_row = cur.fetchone()
+    tpl_name = tpl_row[0] if tpl_row else "Документ"
+
+    cur.execute(f"""
+        SELECT d.code, c.name FROM {SCHEMA}.deals d
+        LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
+        WHERE d.id = %s
+    """, (deal_id,))
+    deal_row = cur.fetchone()
+    deal_code   = deal_row[0] if deal_row else ""
+    client_name = deal_row[1] if deal_row else ""
+
+    # Обновляем или создаём запись в общем архиве документов
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.documents
+            (doc_type, category, title, status, deal_id, file_url, file_name, file_size_kb)
+        VALUES ('deal_contract', 'deal', %s, 'signed', %s, %s, %s, %s)
+        ON CONFLICT DO NOTHING
+    """, (f"{tpl_name} — {client_name} ({deal_code})",
+          deal_id, cdn_url, file_name, size_kb))
+
+    return {"doc_id": doc_id, "file_url": cdn_url, "file_name": file_name}
+
 # ─── CONTRACTORS ─────────────────────────────────────────────────────────────
 
 CONTRACTOR_TYPES = {
@@ -1376,7 +1572,7 @@ def handler(event: dict, context) -> dict:
     ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff",
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
               "stage_durations", "estimate_works", "estimate_materials", "estimate",
-              "contractors", "documents"}
+              "contractors", "documents", "doc_templates", "contract_docs"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -1624,6 +1820,38 @@ def handler(event: dict, context) -> dict:
                     result = create_document(cur, body)
                     conn.commit()
                     return ok(result, 201)
+
+        # ── DOC TEMPLATES (директор управляет пакетом) ────────────────────────
+        elif resource == "doc_templates":
+            if method == "GET":
+                active_only = qs.get("all") != "1"
+                return ok(get_doc_templates(cur, active_only))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "update":
+                    tpl_id = int(body["id"])
+                    update_doc_template(cur, tpl_id, body)
+                    conn.commit()
+                    return ok({"id": tpl_id, "ok": True})
+                else:
+                    result = create_doc_template(cur, body)
+                    conn.commit()
+                    return ok(result, 201)
+
+        # ── CONTRACT DOCUMENTS (пакет по сделке) ──────────────────────────────
+        elif resource == "contract_docs":
+            if method == "GET":
+                deal_id = qs.get("deal_id")
+                if not deal_id:
+                    return err("deal_id required")
+                return ok(get_contract_docs(cur, int(deal_id)))
+            elif method == "POST":
+                # Менеджер загружает файл
+                deal_id     = int(body["deal_id"])
+                template_id = int(body["template_id"])
+                result = upload_contract_doc(cur, deal_id, template_id, body)
+                conn.commit()
+                return ok(result)
 
         return err("Маршрут не найден", 404)
 

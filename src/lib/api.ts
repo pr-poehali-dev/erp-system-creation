@@ -117,6 +117,20 @@ export const api = {
     updateStatus: (id: number, status: string, file_url?: string, file_name?: string) =>
       request<any>("documents", "POST", { action: "update_status", id, status, file_url, file_name }),
   },
+
+  doc_templates: {
+    list: (showAll?: boolean) => request<DocTemplate[]>("doc_templates", "GET", undefined, showAll ? { all: "1" } : {}),
+    create: (body: object) => request<any>("doc_templates", "POST", body),
+    update: (id: number, body: object) => request<any>("doc_templates", "POST", { action: "update", id, ...body }),
+  },
+
+  contract_docs: {
+    // Получить статус пакета по сделке
+    get: (deal_id: number) => request<ContractDocsPackage>("contract_docs", "GET", undefined, { deal_id: String(deal_id) }),
+    // Загрузить файл (base64)
+    upload: (deal_id: number, template_id: number, file_b64: string, file_name: string) =>
+      request<any>("contract_docs", "POST", { deal_id, template_id, file_b64, file_name }),
+  },
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -461,4 +475,40 @@ export interface Document {
   file_size_kb: number | null;
   notes: string | null;
   created_at: string;
+}
+
+export interface DocTemplate {
+  id: number;
+  name: string;
+  description: string | null;
+  is_required: boolean;
+  sort_order: number;
+  file_url: string | null;
+  file_name: string | null;
+  file_size_kb: number | null;
+  file_updated_at: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface ContractDocItem {
+  template_id: number;
+  template_name: string;
+  description: string | null;
+  is_required: boolean;
+  sort_order: number;
+  template_file_url: string | null;
+  template_file_name: string | null;
+  doc_id: number | null;
+  file_url: string | null;
+  file_name: string | null;
+  status: string; // pending | uploaded | approved
+  uploaded_at: string | null;
+}
+
+export interface ContractDocsPackage {
+  items: ContractDocItem[];
+  all_required_done: boolean;
+  total: number;
+  uploaded_count: number;
 }
