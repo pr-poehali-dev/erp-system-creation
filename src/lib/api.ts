@@ -102,6 +102,21 @@ export const api = {
     list: () => request<IndividualRequest[]>("individual_requests"),
     update: (body: object) => request<any>("individual_requests", "POST", body),
   },
+
+  contractors: {
+    list: (type?: string) => request<Contractor[]>("contractors", "GET", undefined, type ? { type } : {}),
+    create: (body: object) => request<any>("contractors", "POST", body),
+    update: (id: number, body: object) => request<any>("contractors", "POST", { action: "update", id, ...body }),
+  },
+
+  documents: {
+    list: (filters?: { category?: string; deal_id?: number; contractor_id?: number; project_id?: number }) =>
+      request<Document[]>("documents", "GET", undefined,
+        Object.fromEntries(Object.entries(filters || {}).filter(([,v]) => v != null).map(([k,v]) => [k, String(v)]))),
+    create: (body: object) => request<any>("documents", "POST", body),
+    updateStatus: (id: number, status: string, file_url?: string, file_name?: string) =>
+      request<any>("documents", "POST", { action: "update_status", id, status, file_url, file_name }),
+  },
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -402,4 +417,48 @@ export interface EstimateData {
   total_works: number;
   total_materials: number;
   grand_total: number;
+}
+
+export interface Contractor {
+  id: number;
+  contractor_type: string; // client | supplier | contractor | subcontractor | internal | general
+  type_label: string;
+  name: string;
+  inn: string | null;
+  kpp: string | null;
+  legal_address: string | null;
+  actual_address: string | null;
+  phone: string | null;
+  email: string | null;
+  contact_person: string | null;
+  bank_name: string | null;
+  bank_account: string | null;
+  bik: string | null;
+  corr_account: string | null;
+  notes: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface Document {
+  id: number;
+  doc_type: string;
+  doc_type_label: string;
+  category: string; // deal | supply | contractor | internal | general
+  title: string;
+  status: string; // draft | sent | signed | paid | cancelled | active
+  amount: number | null;
+  doc_date: string | null;
+  deal_id: number | null;
+  deal_code: string | null;
+  project_id: number | null;
+  project_code: string | null;
+  contractor_id: number | null;
+  contractor_name: string | null;
+  contractor_type: string | null;
+  file_url: string | null;
+  file_name: string | null;
+  file_size_kb: number | null;
+  notes: string | null;
+  created_at: string;
 }

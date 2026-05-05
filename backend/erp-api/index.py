@@ -257,10 +257,23 @@ def update_deal_kp(cur, deal_id, body):
     sets.append("updated_at=now()")
     vals.append(deal_id)
 
-    cur.execute(f"UPDATE {SCHEMA}.deals SET {', '.join(sets)} WHERE id=%s RETURNING id, stage", vals)
+    cur.execute(f"UPDATE {SCHEMA}.deals SET {', '.join(sets)} WHERE id=%s RETURNING id, stage, budget, contractor_id", vals)
     row = cur.fetchone()
     if not row:
         return None, "Сделка не найдена"
+    # Получаем имя клиента для заголовка документа
+    cur.execute(f"""
+        SELECT d.code, c.name as client_name, d.contractor_id
+        FROM {SCHEMA}.deals d
+        LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
+        WHERE d.id = %s
+    """, (deal_id,))
+    drow = cur.fetchone()
+    if drow:
+        auto_create_deal_documents(cur, deal_id, "kp", {
+            "code": drow[0], "client_name": drow[1],
+            "budget": row[2], "contractor_id": drow[2],
+        })
     return {"id": row[0], "stage": row[1]}, None
 
 def update_deal_contract(cur, deal_id, body):
@@ -326,6 +339,20 @@ def update_deal_contract(cur, deal_id, body):
     project_id, perr = create_project_from_deal(cur, deal_id, client_id, start_for_project, slot_id)
     if perr:
         return None, perr
+
+    # Автосоздание документа "Договор подряда"
+    cur.execute(f"""
+        SELECT d.code, c.name as client_name, d.budget, d.contractor_id
+        FROM {SCHEMA}.deals d
+        LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
+        WHERE d.id = %s
+    """, (deal_id,))
+    drow = cur.fetchone()
+    if drow:
+        auto_create_deal_documents(cur, deal_id, "contract", {
+            "code": drow[0], "client_name": drow[1],
+            "budget": drow[2], "contractor_id": drow[3],
+        })
 
     return {"id": deal_id, "stage": "contract", "project_id": project_id}, None
 
@@ -922,6 +949,238 @@ def upsert_estimate_row(cur, table: str, body: dict):
     row = cur.fetchone()
     return {"id": row[0]} if row else {"id": None}
 
+# ─── CONTRACTORS ─────────────────────────────────────────────────────────────
+
+CONTRACTOR_TYPES = {
+    "client":         "Заказчик",
+    "supplier":       "Поставщик",
+    "contractor":     "Подрядчик",
+    "subcontractor":  "Субподрядчик",
+    "internal":       "Внутренний",
+    "general":        "Общий",
+}
+
+def get_contractors(cur, ctype: str = None):
+    """Список контрагентов, опционально фильтр по типу."""
+    if ctype:
+        cur.execute(f"""
+            SELECT id, contractor_type, name, inn, phone, email, contact_person,
+                   legal_address, bank_name, bank_account, notes, is_active, created_at
+            FROM {SCHEMA}.contractors
+            WHERE contractor_type = %s AND is_active = TRUE
+            ORDER BY name
+        """, (ctype,))
+    else:
+        cur.execute(f"""
+            SELECT id, contractor_type, name, inn, phone, email, contact_person,
+                   legal_address, bank_name, bank_account, notes, is_active, created_at
+            FROM {SCHEMA}.contractors
+            WHERE is_active = TRUE
+            ORDER BY contractor_type, name
+        """)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        r["type_label"] = CONTRACTOR_TYPES.get(r["contractor_type"], r["contractor_type"])
+    return rows
+
+def create_contractor(cur, body: dict):
+    """Создание нового контрагента."""
+    ctype         = body.get("contractor_type", "client")
+    name          = body["name"]
+    inn           = body.get("inn", "")
+    kpp           = body.get("kpp", "")
+    legal_address = body.get("legal_address", "")
+    actual_address= body.get("actual_address", "")
+    phone         = body.get("phone", "")
+    email         = body.get("email", "")
+    contact       = body.get("contact_person", "")
+    bank_name     = body.get("bank_name", "")
+    bank_account  = body.get("bank_account", "")
+    bik           = body.get("bik", "")
+    corr_account  = body.get("corr_account", "")
+    notes         = body.get("notes", "")
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.contractors
+            (contractor_type, name, inn, kpp, legal_address, actual_address,
+             phone, email, contact_person, bank_name, bank_account, bik, corr_account, notes)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        RETURNING id, name, contractor_type
+    """, (ctype, name, inn, kpp, legal_address, actual_address,
+          phone, email, contact, bank_name, bank_account, bik, corr_account, notes))
+    row = cur.fetchone()
+    return {"id": row[0], "name": row[1], "contractor_type": row[2]}
+
+def update_contractor(cur, cid: int, body: dict):
+    """Обновление контрагента."""
+    sets, vals = [], []
+    for field in ["contractor_type","name","inn","kpp","legal_address","actual_address",
+                  "phone","email","contact_person","bank_name","bank_account","bik","corr_account","notes"]:
+        if field in body:
+            sets.append(f"{field}=%s"); vals.append(body[field])
+    if not sets:
+        return False
+    sets.append("updated_at=now()")
+    vals.append(cid)
+    cur.execute(f"UPDATE {SCHEMA}.contractors SET {', '.join(sets)} WHERE id=%s", vals)
+    return True
+
+# ─── DOCUMENTS ────────────────────────────────────────────────────────────────
+
+# Метки типов документов по категориям
+DOC_TYPE_LABELS = {
+    # Сделки
+    "deal_kp":             "КП",
+    "deal_contract":       "Договор подряда",
+    "deal_act":            "Акт приёмки",
+    "deal_supplement":     "Доп. соглашение",
+    # Поставщики
+    "supply_contract":     "Договор поставки",
+    "supply_invoice":      "Счёт",
+    "supply_upd":          "УПД",
+    "supply_waybill":      "Товарная накладная",
+    "supply_certificate":  "Сертификат",
+    # Подрядчики / субподрядчики
+    "contractor_contract": "Договор подряда",
+    "ks2":                 "Акт КС-2",
+    "ks3":                 "Справка КС-3",
+    "contractor_invoice":  "Счёт подрядчика",
+    "contractor_estimate": "Смета подрядчика",
+    # Внутренние
+    "internal_regulation": "Регламент",
+    "internal_order":      "Приказ",
+    "internal_hr":         "Должностная инструкция",
+    # Общие/компания
+    "company_license":     "Лицензия",
+    "company_certificate": "Сертификат компании",
+    "company_permit":      "Разрешение",
+}
+
+def get_documents(cur, category: str = None, deal_id: int = None,
+                  contractor_id: int = None, project_id: int = None):
+    """Получить документы с фильтрами."""
+    wheres, vals = ["1=1"], []
+    if category:
+        wheres.append("d.category=%s"); vals.append(category)
+    if deal_id:
+        wheres.append("d.deal_id=%s"); vals.append(deal_id)
+    if contractor_id:
+        wheres.append("d.contractor_id=%s"); vals.append(contractor_id)
+    if project_id:
+        wheres.append("d.project_id=%s"); vals.append(project_id)
+
+    cur.execute(f"""
+        SELECT d.id, d.doc_type, d.category, d.title, d.status, d.amount,
+               d.doc_date, d.deal_id, d.project_id, d.contractor_id,
+               d.file_url, d.file_name, d.file_size_kb, d.notes, d.created_at,
+               deal.code  AS deal_code,
+               proj.code  AS project_code,
+               cont.name  AS contractor_name,
+               cont.contractor_type
+        FROM {SCHEMA}.documents d
+        LEFT JOIN {SCHEMA}.deals     deal ON deal.id = d.deal_id
+        LEFT JOIN {SCHEMA}.projects  proj ON proj.id = d.project_id
+        LEFT JOIN {SCHEMA}.contractors cont ON cont.id = d.contractor_id
+        WHERE {' AND '.join(wheres)}
+        ORDER BY d.created_at DESC
+        LIMIT 200
+    """, vals)
+    cols = [x[0] for x in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        r["doc_type_label"] = DOC_TYPE_LABELS.get(r["doc_type"], r["doc_type"])
+    return rows
+
+def create_document(cur, body: dict):
+    """Создание документа вручную."""
+    doc_type    = body["doc_type"]
+    title       = body["title"]
+    category    = body.get("category", _infer_category(doc_type))
+    status      = body.get("status", "draft")
+    amount      = body.get("amount")
+    doc_date    = body.get("doc_date")
+    deal_id     = body.get("deal_id")
+    project_id  = body.get("project_id")
+    contractor_id = body.get("contractor_id")
+    file_url    = body.get("file_url")
+    file_name   = body.get("file_name")
+    file_size   = body.get("file_size_kb")
+    notes       = body.get("notes", "")
+    created_by  = body.get("created_by")
+
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.documents
+            (doc_type, category, title, status, amount, doc_date,
+             deal_id, project_id, contractor_id,
+             file_url, file_name, file_size_kb, notes, created_by)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        RETURNING id, title, doc_type, category
+    """, (doc_type, category, title, status,
+          float(amount) if amount else None,
+          doc_date, deal_id, project_id, contractor_id,
+          file_url, file_name, file_size, notes, created_by))
+    row = cur.fetchone()
+    return {"id": row[0], "title": row[1], "doc_type": row[2], "category": row[3]}
+
+def update_document_status(cur, doc_id: int, status: str, file_url: str = None, file_name: str = None):
+    cur.execute(f"""
+        UPDATE {SCHEMA}.documents
+        SET status=%s,
+            file_url=COALESCE(%s, file_url),
+            file_name=COALESCE(%s, file_name),
+            updated_at=now()
+        WHERE id=%s
+        RETURNING id, status
+    """, (status, file_url, file_name, doc_id))
+    row = cur.fetchone()
+    return {"id": row[0], "status": row[1]} if row else None
+
+def auto_create_deal_documents(cur, deal_id: int, stage: str, deal_data: dict):
+    """
+    Автоматически создаёт документы при переходе сделки на стадию.
+    stage='kp'       → создаёт КП
+    stage='contract' → создаёт Договор подряда
+    """
+    # Не создаём дубли
+    cur.execute(f"""
+        SELECT COUNT(*) FROM {SCHEMA}.documents
+        WHERE deal_id=%s AND doc_type=%s
+    """, (deal_id, "deal_kp" if stage == "kp" else "deal_contract"))
+    if cur.fetchone()[0] > 0:
+        return
+
+    client_name = deal_data.get("client_name", "")
+    deal_code   = deal_data.get("code", "")
+    budget      = deal_data.get("budget")
+    contractor_id = deal_data.get("contractor_id")
+
+    if stage == "kp":
+        cur.execute(f"""
+            INSERT INTO {SCHEMA}.documents
+                (doc_type, category, title, status, amount, deal_id, contractor_id)
+            VALUES ('deal_kp', 'deal', %s, 'draft', %s, %s, %s)
+        """, (f"КП — {client_name} ({deal_code})",
+              float(budget) if budget else None,
+              deal_id, contractor_id))
+
+    elif stage == "contract":
+        cur.execute(f"""
+            INSERT INTO {SCHEMA}.documents
+                (doc_type, category, title, status, amount, deal_id, contractor_id,
+                 doc_date)
+            VALUES ('deal_contract', 'deal', %s, 'signed', %s, %s, %s, CURRENT_DATE)
+        """, (f"Договор подряда — {client_name} ({deal_code})",
+              float(budget) if budget else None,
+              deal_id, contractor_id))
+
+def _infer_category(doc_type: str) -> str:
+    if doc_type.startswith("deal_"):       return "deal"
+    if doc_type.startswith("supply_"):     return "supply"
+    if doc_type.startswith("contractor_") or doc_type in ("ks2","ks3"): return "contractor"
+    if doc_type.startswith("internal_"):   return "internal"
+    if doc_type.startswith("company_"):    return "general"
+    return "general"
+
 # ─── CLIENTS / STAFF ─────────────────────────────────────────────────────────
 
 def get_clients(cur):
@@ -1116,7 +1375,8 @@ def handler(event: dict, context) -> dict:
     # Определяем роут: сначала из querystring ?r=, затем из path
     ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff",
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
-              "stage_durations", "estimate_works", "estimate_materials", "estimate"}
+              "stage_durations", "estimate_works", "estimate_materials", "estimate",
+              "contractors", "documents"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -1324,6 +1584,46 @@ def handler(event: dict, context) -> dict:
                 result = upsert_estimate_row(cur, "stage_materials", body)
                 conn.commit()
                 return ok(result, 201)
+
+        # ── CONTRACTORS ────────────────────────────────────────────────────────
+        elif resource == "contractors":
+            if method == "GET":
+                ctype = qs.get("type")
+                return ok(get_contractors(cur, ctype))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "update":
+                    cid = int(body["id"])
+                    update_contractor(cur, cid, body)
+                    conn.commit()
+                    return ok({"id": cid, "ok": True})
+                else:
+                    result = create_contractor(cur, body)
+                    conn.commit()
+                    return ok(result, 201)
+
+        # ── DOCUMENTS ──────────────────────────────────────────────────────────
+        elif resource == "documents":
+            if method == "GET":
+                category    = qs.get("category")
+                deal_id     = int(qs["deal_id"])    if qs.get("deal_id")     else None
+                contractor_id = int(qs["contractor_id"]) if qs.get("contractor_id") else None
+                project_id  = int(qs["project_id"]) if qs.get("project_id") else None
+                return ok(get_documents(cur, category, deal_id, contractor_id, project_id))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "update_status":
+                    doc_id = int(body["id"])
+                    result = update_document_status(
+                        cur, doc_id, body["status"],
+                        body.get("file_url"), body.get("file_name")
+                    )
+                    conn.commit()
+                    return ok(result)
+                else:
+                    result = create_document(cur, body)
+                    conn.commit()
+                    return ok(result, 201)
 
         return err("Маршрут не найден", 404)
 

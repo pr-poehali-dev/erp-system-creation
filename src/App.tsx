@@ -12,6 +12,7 @@ import Rental from "@/pages/Rental";
 import Procurement from "@/pages/Procurement";
 import Quality from "@/pages/Quality";
 import Documents from "@/pages/Documents";
+import Contractors from "@/pages/Contractors";
 import Finance from "@/pages/Finance";
 import Employees from "@/pages/Employees";
 import Reports from "@/pages/Reports";
@@ -115,11 +116,18 @@ function ERPApp() {
       roles: ["director", "construction_director", "foreman", "project_manager"],
     },
     {
+      id: "contractors",
+      label: "Контрагенты",
+      icon: "Building2",
+      component: <Contractors role={currentRole} />,
+      roles: ["director", "commercial", "supply_director", "finance_director", "accountant"],
+    },
+    {
       id: "documents",
       label: "Документы",
       icon: "FileText",
       component: <Documents role={currentRole} />,
-      roles: ["director", "commercial", "crm_manager", "accountant", "finance_director"],
+      roles: ["director", "commercial", "crm_manager", "accountant", "finance_director", "supply_director"],
     },
     {
       id: "finance",
