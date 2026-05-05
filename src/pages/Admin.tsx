@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 import AdminSlotPlan from "@/components/admin/AdminSlotPlan";
@@ -7,6 +8,29 @@ import AdminIntegrationsPanel from "@/components/admin/AdminIntegrationsPanel";
 import AdminDiscounts from "@/components/admin/AdminDiscounts";
 
 interface Props { role: Role; }
+
+// Аккордеон-секция
+function Section({ title, icon, defaultOpen = false, children }: {
+  title: string; icon: string; defaultOpen?: boolean; children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="bg-white rounded-xl border border-border overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        className="w-full flex items-center justify-between px-5 py-4 hover:bg-secondary/40 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <Icon name={icon as Parameters<typeof Icon>[0]["name"]} size={16} className="text-primary" />
+          <span className="font-semibold text-[14px]">{title}</span>
+        </div>
+        <Icon name={open ? "ChevronUp" : "ChevronDown"} size={16} className="text-muted-foreground" />
+      </button>
+      {open && <div className="border-t border-border">{children}</div>}
+    </div>
+  );
+}
 
 export default function Admin({ role }: Props) {
   const canView = role === "director" || role === "construction_director";
@@ -28,28 +52,58 @@ export default function Admin({ role }: Props) {
       <div>
         <h1 className="text-xl font-semibold">Администрирование</h1>
         <p className="text-hint mt-0.5">
-          {isDirector ? "Интеграции, нормативы, автоматизация, слот-план" : "Слот-план производства (только просмотр)"}
+          {isDirector ? "Производство, продажи, документы — всё под контролем" : "Слот-план производства (просмотр)"}
         </p>
       </div>
 
-      {/* Слот-план — доступен и директору и директору по строительству */}
-      <AdminSlotPlan readonly={!isDirector} />
+      {/* ═══ ПРОИЗВОДСТВО ════════════════════════════════════════════════════ */}
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 px-1">
+          <div className="w-1 h-5 bg-blue-500 rounded-full" />
+          <span className="text-[13px] font-bold text-foreground uppercase tracking-wide">Производство</span>
+        </div>
 
-      {/* Только директор */}
+        <Section title="Слот-план производства" icon="CalendarCheck" defaultOpen={true}>
+          <AdminSlotPlan readonly={!isDirector} />
+        </Section>
+
+        {isDirector && (
+          <Section title="Нормативы этапов (сроки)" icon="Clock">
+            <AdminStageDurations />
+          </Section>
+        )}
+      </div>
+
+      {/* ═══ ПРОДАЖИ ═════════════════════════════════════════════════════════ */}
       {isDirector && (
-        <>
-          {/* Пакет документов при подписании */}
-          <AdminDocTemplates />
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 px-1">
+            <div className="w-1 h-5 bg-emerald-500 rounded-full" />
+            <span className="text-[13px] font-bold text-foreground uppercase tracking-wide">Продажи и КП</span>
+          </div>
 
-          {/* Скидки и популярные комплектации */}
-          <AdminDiscounts />
+          <Section title="Скидки и популярные комплектации" icon="Tag">
+            <AdminDiscounts />
+          </Section>
 
-          {/* Нормативы этапов */}
-          <AdminStageDurations />
+          <Section title="Пакет документов при подписании договора" icon="FolderOpen">
+            <AdminDocTemplates />
+          </Section>
+        </div>
+      )}
 
-          {/* Интеграции, автоматизации, нормативы системы */}
-          <AdminIntegrationsPanel />
-        </>
+      {/* ═══ СИСТЕМА ══════════════════════════════════════════════════════════ */}
+      {isDirector && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 px-1">
+            <div className="w-1 h-5 bg-violet-500 rounded-full" />
+            <span className="text-[13px] font-bold text-foreground uppercase tracking-wide">Система и интеграции</span>
+          </div>
+
+          <Section title="Интеграции и автоматизация" icon="Zap">
+            <AdminIntegrationsPanel />
+          </Section>
+        </div>
       )}
     </div>
   );

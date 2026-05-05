@@ -30,9 +30,6 @@ export default function PayoutTab({ role, managerId }: Props) {
   const [loading, setLoading]   = useState(true);
   const [submitting, setSubmitting] = useState<number | null>(null);
 
-  // Состояния формы менеджера (по deal.id)
-  const [amounts, setAmounts]   = useState<Record<number, string>>({});
-  const [notes, setNotes]       = useState<Record<number, string>>({});
   const [files, setFiles]       = useState<Record<number, File | null>>({});
   const [successId, setSuccessId] = useState<number | null>(null);
 
@@ -69,14 +66,11 @@ export default function PayoutTab({ role, managerId }: Props) {
           payout_id: deal.payout_id,
           invoice_file_b64: file_b64,
           invoice_file_name: file_name,
-          amount: amounts[deal.id] ? Number(amounts[deal.id]) : undefined,
         });
       } else {
         await api.payout_requests.create({
           deal_id:    deal.id,
           manager_id: managerId,
-          amount:     amounts[deal.id] ? Number(amounts[deal.id]) : undefined,
-          notes:      notes[deal.id] || "",
           invoice_file_b64:  file_b64,
           invoice_file_name: file_name,
         });
@@ -257,37 +251,19 @@ export default function PayoutTab({ role, managerId }: Props) {
 
             {/* Менеджер: форма загрузки счёта */}
             {showForm && (
-              <div className="space-y-2 pt-1 border-t border-border">
+              <div className="space-y-2 pt-2 border-t border-border">
                 {isRejected && (
-                  <div className="text-[12px] font-medium text-foreground">
-                    Загрузите исправленный счёт:
+                  <div className="text-[12px] font-medium text-amber-700 flex items-center gap-1.5">
+                    <Icon name="AlertTriangle" size={13} />
+                    Загрузите исправленный счёт и повторно отправьте
                   </div>
                 )}
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[11px] font-medium text-muted-foreground mb-1">
-                      Сумма вознаграждения (₽)
-                    </label>
-                    <input type="number" value={amounts[deal.id] || ""} min={0}
-                      onChange={e => setAmounts(p => ({ ...p, [deal.id]: e.target.value }))}
-                      placeholder="Укажите сумму"
-                      className="w-full border border-border rounded-lg px-3 py-1.5 text-[12px] outline-none focus:ring-1 focus:ring-primary" />
-                  </div>
-                  {!isRejected && (
-                    <div>
-                      <label className="block text-[11px] font-medium text-muted-foreground mb-1">Примечание</label>
-                      <input type="text" value={notes[deal.id] || ""}
-                        onChange={e => setNotes(p => ({ ...p, [deal.id]: e.target.value }))}
-                        placeholder="Необязательно"
-                        className="w-full border border-border rounded-lg px-3 py-1.5 text-[12px] outline-none focus:ring-1 focus:ring-primary" />
-                    </div>
-                  )}
-                </div>
 
                 {/* Загрузка файла */}
                 <div>
-                  <label className="block text-[11px] font-medium text-muted-foreground mb-1">
-                    Счёт на оплату (PDF, DOCX) <span className="text-red-500">*</span>
+                  <label className="block text-[12px] font-medium mb-1">
+                    Счёт на оплату <span className="text-red-500">*</span>
+                    <span className="text-muted-foreground font-normal ml-1">(PDF, DOCX)</span>
                   </label>
                   <label htmlFor={`invoice-file-${deal.id}`}
                     className={`flex items-center gap-2 px-3 py-2 border rounded-lg cursor-pointer transition-colors text-[12px] ${
