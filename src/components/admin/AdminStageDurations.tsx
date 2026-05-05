@@ -3,9 +3,10 @@ import Icon from "@/components/ui/icon";
 import { api, StageDuration } from "@/lib/api";
 
 export default function AdminStageDurations() {
-  const [stages, setStages] = useState<StageDuration[]>([]);
+  const [stages, setStages]   = useState<StageDuration[]>([]);
   const [editing, setEditing] = useState<{ num: number; val: string } | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving]   = useState(false);
+  const [lastRecalc, setLastRecalc] = useState<{ count: number; stageName: string } | null>(null);
 
   useEffect(() => { api.stage_durations.list().then(setStages); }, []);
 
@@ -21,10 +22,15 @@ export default function AdminStageDurations() {
     if (!editing) return;
     setSaving(true);
     try {
-      await api.stage_durations.update(editing.num, Number(editing.val));
+      const stageName = stages.find(s => s.stage_num === editing.num)?.name ?? "";
+      const res = await api.stage_durations.update(editing.num, Number(editing.val));
       const updated = await api.stage_durations.list();
       setStages(updated);
       setEditing(null);
+      // Показываем уведомление о пересчёте
+      const count = (res as { recalculated_projects?: number }).recalculated_projects ?? 0;
+      setLastRecalc({ count, stageName });
+      setTimeout(() => setLastRecalc(null), 6000);
     } finally { setSaving(false); }
   };
 
@@ -39,6 +45,20 @@ export default function AdminStageDurations() {
           Итого: <span className="font-bold text-foreground">{total} дней</span> (без буфера)
         </div>
       </div>
+
+      {/* Уведомление о пересчёте */}
+      {lastRecalc && (
+        <div className="px-5 py-3 bg-emerald-50 border-b border-emerald-200 flex items-center gap-2 animate-fade-in">
+          <Icon name="CheckCircle" size={14} className="text-emerald-600 shrink-0" />
+          <span className="text-[12px] text-emerald-800">
+            <strong>«{lastRecalc.stageName}»</strong> обновлён.
+            {lastRecalc.count > 0
+              ? ` Гант-планы пересчитаны в ${lastRecalc.count} активных проект${lastRecalc.count === 1 ? "е" : lastRecalc.count < 5 ? "ах" : "ах"}.`
+              : " Активных проектов для пересчёта нет."}
+          </span>
+        </div>
+      )}
+
       <div className="divide-y divide-border">
         {stages.map(s => {
           const isEditing = editing?.num === s.stage_num;
@@ -56,7 +76,7 @@ export default function AdminStageDurations() {
               </div>
               {isEditing ? (
                 <div className="flex items-center gap-2">
-                  <input type="number" min={1} max={90} value={editing.val}
+                  <input type="number" min={1} max={365} value={editing.val}
                     onChange={e => setEditing(prev => prev ? { ...prev, val: e.target.value } : null)}
                     className="w-16 border border-border rounded-lg px-2 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-primary text-center" />
                   <span className="text-hint text-[12px]">дн.</span>
@@ -81,10 +101,12 @@ export default function AdminStageDurations() {
           );
         })}
       </div>
+
       <div className="px-5 py-3 bg-blue-50 border-t border-blue-100">
         <div className="text-[12px] text-blue-700 flex items-center gap-2">
           <Icon name="Info" size={13} className="shrink-0" />
-          Изменения применяются ко всем новым проектам. Существующие Гант-планы не затрагиваются.
+          При изменении норматива Гант-планы всех активных проектов пересчитываются автоматически.
+          Этапы которые уже начаты — сдвигаются только по дате окончания.
         </div>
       </div>
     </div>

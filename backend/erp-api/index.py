@@ -158,6 +158,100 @@ def get_stage_durations(cur):
         })
     return result
 
+def recalc_active_projects_stages(cur) -> dict:
+    """
+    Пересчитывает planned_start / planned_end / duration_days во всех активных проектах
+    (status IN ('active', 'planning')) на основе актуальных нормативов из stage_durations.
+
+    Логика:
+    - берём start_date проекта как точку отсчёта
+    - для каждого этапа в project_stages обновляем duration_days из stage_durations
+    - пересчитываем planned_start / planned_end через _build_plan_from_norms
+    - этапы с actual_start (уже начаты) не сдвигаем по дате начала, но обновляем длительность
+    - обновляем deadline проекта по максимальной planned_end
+    """
+    stage_norms = get_stage_durations(cur)
+    norm_map = {s["stage_num"]: s for s in stage_norms}
+
+    # Находим все активные проекты
+    cur.execute(f"""
+        SELECT id, start_date, status
+        FROM {SCHEMA}.projects
+        WHERE status IN ('active', 'planning')
+        ORDER BY id
+    """)
+    projects = cur.fetchall()
+    updated_projects = 0
+
+    for proj_id, proj_start, _ in projects:
+        if proj_start is None:
+            continue
+        start_dt = proj_start if isinstance(proj_start, date) else date.fromisoformat(str(proj_start))
+
+        # Получаем этапы проекта
+        cur.execute(f"""
+            SELECT id, stage_num, order_num, actual_start, status
+            FROM {SCHEMA}.project_stages
+            WHERE project_id = %s
+            ORDER BY order_num
+        """, (proj_id,))
+        stages = cur.fetchall()
+        if not stages:
+            continue
+
+        # Собираем нормативы только для тех stage_num, которые есть в проекте
+        included_nums = [s[1] for s in stages if s[1] is not None]
+        if not included_nums:
+            continue
+
+        filtered_norms = [norm_map[n] for n in included_nums if n in norm_map]
+        if not filtered_norms:
+            continue
+
+        # Строим новый Гант-план
+        plan = _build_plan_from_norms(start_dt, filtered_norms)
+        plan_map = {p[0]: p for p in plan}  # stage_num -> (snum, name, duration, ps, pe, ...)
+
+        max_end = start_dt
+
+        for stage_row in stages:
+            stage_id, stage_num, order_num, actual_start, stage_status = stage_row
+            if stage_num not in plan_map:
+                continue
+
+            p = plan_map[stage_num]
+            new_duration = p[2]
+            new_ps = p[3]
+            new_pe = p[4]
+
+            # Если этап уже идёт — сдвигаем только дату окончания (не трогаем начало)
+            if actual_start is not None and stage_status in ('in_progress', 'done'):
+                actual_dt = actual_start if isinstance(actual_start, date) else date.fromisoformat(str(actual_start))
+                new_pe = actual_dt + timedelta(days=new_duration - 1)
+                new_ps = actual_dt
+
+            cur.execute(f"""
+                UPDATE {SCHEMA}.project_stages
+                SET duration_days = %s,
+                    planned_start = %s,
+                    planned_end   = %s,
+                    updated_at    = now()
+                WHERE id = %s
+            """, (new_duration, new_ps, new_pe, stage_id))
+
+            if new_pe > max_end:
+                max_end = new_pe
+
+        # Обновляем deadline проекта
+        cur.execute(f"""
+            UPDATE {SCHEMA}.projects
+            SET deadline = %s, updated_at = now()
+            WHERE id = %s
+        """, (max_end, proj_id))
+        updated_projects += 1
+
+    return {"recalculated_projects": updated_projects}
+
 def calc_duration_for_stages(stage_norms: list, included_nums: list, buffer_days: int = 7) -> int:
     """Считает итоговую длительность для выбранного набора этапов + буфер."""
     filtered = [s for s in stage_norms if s["stage_num"] in included_nums]
@@ -1747,8 +1841,15 @@ def handler(event: dict, context) -> dict:
                 row = cur.fetchone()
                 if not row:
                     return err("Этап не найден")
+                # Автоматически пересчитываем Гант-планы всех активных проектов
+                recalc = recalc_active_projects_stages(cur)
                 conn.commit()
-                return ok({"stage_num": row[0], "stage_name": row[1], "duration_days": row[2]})
+                return ok({
+                    "stage_num": row[0],
+                    "stage_name": row[1],
+                    "duration_days": row[2],
+                    "recalculated_projects": recalc["recalculated_projects"],
+                })
 
         # ── ESTIMATE (полная смета: работы + материалы) ────────────────────────
         elif resource == "estimate":
