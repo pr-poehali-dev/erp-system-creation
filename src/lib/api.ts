@@ -24,8 +24,21 @@ export const api = {
   deals: {
     list: () => request<Deal[]>("deals"),
     create: (body: object) => request<any>("deals", "POST", body),
-    updateStage: (deal_id: number, stage: string) =>
-      request<any>("deals", "POST", { action: "update_stage", deal_id, stage }),
+    // Переводим в КП — сохраняем серийный проект, комплектацию/этапы, бюджет
+    toKp: (deal_id: number, body: object) =>
+      request<any>("deals", "POST", { action: "kp", deal_id, ...body }),
+    // Подписание договора — слот, дата, адрес → автосоздание проекта
+    toContract: (deal_id: number, body: object) =>
+      request<any>("deals", "POST", { action: "contract", deal_id, ...body }),
+    // Простые переходы: lost, planning
+    updateStage: (deal_id: number, stage: string, extra?: object) =>
+      request<any>("deals", "POST", { action: "update_stage", deal_id, stage, ...extra }),
+  },
+
+  stage_durations: {
+    list: () => request<StageDuration[]>("stage_durations"),
+    update: (stage_num: number, duration_days: number) =>
+      request<any>("stage_durations", "POST", { stage_num, duration_days }),
   },
 
   projects: {
@@ -101,7 +114,7 @@ export interface Staff {
 export interface Deal {
   id: number;
   code: string;
-  stage: string;
+  stage: string; // lead | kp | contract | planning | lost
   budget: number;
   start_date: string;
   source: string;
@@ -111,10 +124,31 @@ export interface Deal {
   client_phone: string;
   manager_name: string;
   realtor_name: string | null;
-  slot_id: number;
-  slot_year: number;
-  slot_month: number;
+  slot_id: number | null;
+  slot_year: number | null;
+  slot_month: number | null;
   project_id: number | null;
+  project_type: string; // serial | individual
+  serial_project_id: number | null;
+  serial_project_name: string | null;
+  configuration_id: number | null;
+  configuration_name: string | null;
+  configuration_duration: number | null;
+  price_coefficient: number | null;
+  selected_stages: number[] | null;
+  signed_date: string | null;
+  buffer_days: number;
+  kp_notes: string | null;
+  address: string | null;
+  planned_start_date: string | null;
+}
+
+export interface StageDuration {
+  stage_num: number;
+  name: string;
+  duration: number;
+  parallel_group: number | null;
+  depends_on: number[];
 }
 
 export interface ProjectStage {

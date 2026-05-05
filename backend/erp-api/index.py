@@ -103,84 +103,106 @@ def get_deals(cur):
                sm.name as manager_name, sr.name as realtor_name,
                sl.id as slot_id, sl.year as slot_year, sl.month as slot_month,
                sl.start_date as slot_start_date,
-               d.project_id
+               d.project_id, d.project_type,
+               sp.name as serial_project_name,
+               cfg.name as configuration_name,
+               cfg.duration_days as configuration_duration,
+               cfg.price_coefficient,
+               d.selected_stages, d.signed_date, d.buffer_days,
+               d.kp_notes, d.address, d.planned_start_date,
+               d.serial_project_id, d.configuration_id
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id
         LEFT JOIN {SCHEMA}.staff sr ON sr.id = d.realtor_id
         LEFT JOIN {SCHEMA}.slots sl ON sl.id = d.slot_id
+        LEFT JOIN {SCHEMA}.serial_projects sp ON sp.id = d.serial_project_id
+        LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
         ORDER BY d.created_at DESC
-        LIMIT 50
+        LIMIT 100
     """)
     cols = [desc[0] for desc in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+def get_stage_durations(cur):
+    """Загружает нормативы этапов из БД (единый источник правды)."""
+    cur.execute(f"""
+        SELECT stage_num, stage_name, duration_days, parallel_group, depends_on
+        FROM {SCHEMA}.stage_durations ORDER BY sort_order
+    """)
+    result = []
+    for row in cur.fetchall():
+        result.append({
+            "stage_num": row[0],
+            "name": row[1],
+            "duration": row[2],
+            "parallel_group": row[3],
+            "depends_on": list(row[4]) if row[4] else [],
+        })
+    return result
+
+def calc_duration_for_stages(stage_norms: list, included_nums: list, buffer_days: int = 7) -> int:
+    """Считает итоговую длительность для выбранного набора этапов + буфер."""
+    filtered = [s for s in stage_norms if s["stage_num"] in included_nums]
+    if not filtered:
+        return buffer_days
+    # Строим план дат, берём максимальную дату завершения
+    start = date(2000, 1, 1)
+    plan = _build_plan_from_norms(start, filtered)
+    if not plan:
+        return buffer_days
+    max_end = max(p[4] for p in plan)
+    return (max_end - start).days + 1 + buffer_days
+
+def _build_plan_from_norms(start_date: date, stage_norms: list) -> list:
+    """Внутренняя: строит даты по нормативам из БД."""
+    stage_map = {s["stage_num"]: s for s in stage_norms}
+    end_dates = {}
+    result = []
+    for snum in sorted(stage_map.keys()):
+        s = stage_map[snum]
+        deps = [d for d in s["depends_on"] if d in end_dates]
+        if deps:
+            s_date = max(end_dates[d] for d in deps) + timedelta(days=1)
+        else:
+            s_date = start_date
+        # Параллельная группа — все стартуют вместе
+        if s["parallel_group"] is not None:
+            group_starts = [r[3] for r in result if r[5] == s["parallel_group"]]
+            if group_starts:
+                s_date = min(group_starts)
+        e_date = s_date + timedelta(days=s["duration"] - 1)
+        end_dates[snum] = e_date
+        result.append((snum, s["name"], s["duration"], s_date, e_date, s["parallel_group"], s["depends_on"]))
+    return result
+
 def create_deal(cur, body):
-    client_id       = int(body["client_id"])
-    manager_id      = int(body.get("manager_id", 1))
-    realtor_id      = body.get("realtor_id")
-    source          = body.get("source", "")
-    budget          = float(body.get("budget", 0))
-    notes           = body.get("notes", "")
-    project_type    = body.get("project_type", "serial")
-    sp_id           = body.get("serial_project_id")
-    cfg_id          = body.get("configuration_id")
-    planned_start   = body.get("planned_start_date")
-
-    # Для индивидуального проекта слот не обязателен
-    slot_id = body.get("slot_id")
-    start_date = None
-
-    if project_type == "serial":
-        if not slot_id:
-            return None, "Выберите слот из доступных"
-        slot_id = int(slot_id)
-
-        cur.execute(f"""
-            SELECT id, year, month, start_date, status, monthly_limit FROM {SCHEMA}.slots WHERE id=%s
-        """, (slot_id,))
-        slot_row = cur.fetchone()
-        if not slot_row:
-            return None, "Слот не найден"
-        s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
-        if s_status != 'free':
-            return None, "Выбранный слот уже занят. Выберите другой"
-
-        cur.execute(f"""
-            SELECT COUNT(*) FROM {SCHEMA}.slots
-            WHERE year=%s AND month=%s AND status IN ('booked','busy')
-        """, (s_year, s_month))
-        occupied = int(cur.fetchone()[0])
-        if occupied + 1 > s_limit:
-            return None, f"Месяц перегружен: {occupied}/{s_limit} слотов занято. Выберите другой месяц"
-
-        start_date = s_start_date.isoformat() if hasattr(s_start_date, 'isoformat') else str(s_start_date)
-    else:
-        slot_id = None
-        start_date = planned_start or date.today().isoformat()
+    """Создание нового лида — только базовые данные: клиент, тип проекта, источник."""
+    client_id    = int(body["client_id"])
+    manager_id   = int(body.get("manager_id", 1))
+    realtor_id   = body.get("realtor_id")
+    source       = body.get("source", "")
+    notes        = body.get("notes", "")
+    project_type = body.get("project_type", "serial")
+    sp_id        = body.get("serial_project_id")
+    address      = body.get("address", "")
 
     code = next_code(cur, "deals", "ЛД")
-    realtor_val  = int(realtor_id) if realtor_id else None
-    sp_val       = int(sp_id) if sp_id else None
-    cfg_val      = int(cfg_id) if cfg_id else None
-    ps_val       = planned_start if planned_start else None
+    realtor_val = int(realtor_id) if realtor_id else None
+    sp_val      = int(sp_id) if sp_id else None
 
     cur.execute(f"""
         INSERT INTO {SCHEMA}.deals
-            (code, client_id, manager_id, realtor_id, source, budget, start_date, notes,
-             slot_id, stage, project_type, serial_project_id, configuration_id, planned_start_date)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s, %s, %s, %s)
+            (code, client_id, manager_id, realtor_id, source, notes,
+             stage, project_type, serial_project_id, address, start_date)
+        VALUES (%s, %s, %s, %s, %s, %s, 'lead', %s, %s, %s, CURRENT_DATE)
         RETURNING id, code
-    """, (code, client_id, manager_id, realtor_val, source, budget, start_date, notes,
-          slot_id, project_type, sp_val, cfg_val, ps_val))
+    """, (code, client_id, manager_id, realtor_val, source, notes,
+          project_type, sp_val, address))
 
     deal_id, deal_code = cur.fetchone()
 
-    # Бронируем слот (только для серийного)
-    if slot_id:
-        cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, slot_id))
-
-    # Для индивидуального — создаём карточку
+    # Для индивидуального — сразу создаём карточку проектирования
     if project_type == 'individual':
         desired_area = float(body.get("desired_area", 0))
         spec_req = body.get("special_requests", "")
@@ -190,86 +212,130 @@ def create_deal(cur, body):
             VALUES (%s, %s, %s, %s, 'awaiting_design')
         """, (deal_id, client_id, desired_area, spec_req))
 
-    return {"id": deal_id, "code": deal_code, "slot_id": slot_id, "start_date": start_date,
-            "project_type": project_type}, None
+    return {"id": deal_id, "code": deal_code, "project_type": project_type}, None
 
-def update_deal_stage(cur, deal_id, new_stage):
+def update_deal_kp(cur, deal_id, body):
+    """
+    Заполнение данных на стадии КП:
+    - серийный проект, комплектация / выбранные этапы, бюджет, буфер
+    """
+    cfg_id          = body.get("configuration_id")
+    selected_stages = body.get("selected_stages")  # кастомный набор этапов
+    budget          = body.get("budget")
+    kp_notes        = body.get("kp_notes", "")
+    buffer_days     = int(body.get("buffer_days", 7))
+    sp_id           = body.get("serial_project_id")
+
+    sets, vals = [], []
+    if cfg_id is not None:
+        sets.append("configuration_id=%s"); vals.append(int(cfg_id))
+    if sp_id is not None:
+        sets.append("serial_project_id=%s"); vals.append(int(sp_id))
+    if selected_stages is not None:
+        sets.append("selected_stages=%s"); vals.append(selected_stages)
+    if budget is not None:
+        sets.append("budget=%s"); vals.append(float(budget))
+    if kp_notes:
+        sets.append("kp_notes=%s"); vals.append(kp_notes)
+    sets.append("buffer_days=%s"); vals.append(buffer_days)
+    sets.append("stage='kp'")
+    sets.append("updated_at=now()")
+    vals.append(deal_id)
+
+    cur.execute(f"UPDATE {SCHEMA}.deals SET {', '.join(sets)} WHERE id=%s RETURNING id, stage", vals)
+    row = cur.fetchone()
+    if not row:
+        return None, "Сделка не найдена"
+    return {"id": row[0], "stage": row[1]}, None
+
+def update_deal_contract(cur, deal_id, body):
+    """
+    Подписание договора:
+    - слот, плановая дата начала, адрес, подтверждение бюджета
+    - автоматически создаёт проект с этапами
+    """
+    slot_id         = body.get("slot_id")
+    planned_start   = body.get("planned_start_date")
+    address         = body.get("address", "")
+    budget          = body.get("budget")
+    signed_date     = body.get("signed_date") or date.today().isoformat()
+
+    # Получаем сделку
+    cur.execute(f"""
+        SELECT id, client_id, project_type, configuration_id, selected_stages, buffer_days
+        FROM {SCHEMA}.deals WHERE id=%s
+    """, (deal_id,))
+    deal_row = cur.fetchone()
+    if not deal_row:
+        return None, "Сделка не найдена"
+    did, client_id, project_type, cfg_id, sel_stages, buf_days = deal_row
+    buf_days = buf_days or 7
+
+    sets, vals = [], []
+
+    # Обрабатываем слот (только для серийных)
+    actual_start = planned_start
+    if project_type == 'serial' and slot_id:
+        slot_id = int(slot_id)
+        cur.execute(f"SELECT id, year, month, start_date, status, monthly_limit FROM {SCHEMA}.slots WHERE id=%s", (slot_id,))
+        slot_row = cur.fetchone()
+        if not slot_row:
+            return None, "Слот не найден"
+        s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
+        if s_status != 'free':
+            return None, "Выбранный слот уже занят"
+        cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.slots WHERE year=%s AND month=%s AND status IN ('booked','busy')", (s_year, s_month))
+        if int(cur.fetchone()[0]) + 1 > s_limit:
+            return None, f"Месяц перегружен. Выберите другой"
+        # start_date = дата слота + буфер на подписание
+        slot_start = s_start_date if isinstance(s_start_date, date) else date.fromisoformat(str(s_start_date))
+        actual_start = (slot_start + timedelta(days=buf_days)).isoformat()
+        sets.append("slot_id=%s"); vals.append(slot_id)
+        cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, slot_id))
+
+    if actual_start:
+        sets.append("planned_start_date=%s"); vals.append(actual_start)
+    if address:
+        sets.append("address=%s"); vals.append(address)
+    if budget:
+        sets.append("budget=%s"); vals.append(float(budget))
+    sets.append("signed_date=%s");   vals.append(signed_date)
+    sets.append("stage='contract'")
+    sets.append("updated_at=now()")
+    vals.append(deal_id)
+
+    cur.execute(f"UPDATE {SCHEMA}.deals SET {', '.join(sets)} WHERE id=%s", vals)
+
+    # Автосоздание проекта
+    start_for_project = actual_start or date.today().isoformat()
+    project_id, perr = create_project_from_deal(cur, deal_id, client_id, start_for_project, slot_id)
+    if perr:
+        return None, perr
+
+    return {"id": deal_id, "stage": "contract", "project_id": project_id}, None
+
+def update_deal_stage(cur, deal_id, new_stage, body=None):
+    """Обобщённое изменение стадии (для lost и других простых переходов)."""
+    body = body or {}
+
+    if new_stage == "kp":
+        return update_deal_kp(cur, deal_id, body)
+    if new_stage == "contract":
+        return update_deal_contract(cur, deal_id, body)
+
     cur.execute(f"""
         UPDATE {SCHEMA}.deals SET stage=%s, updated_at=now() WHERE id=%s
-        RETURNING id, stage, client_id, start_date, slot_id
+        RETURNING id, stage
     """, (new_stage, deal_id))
     row = cur.fetchone()
     if not row:
         return None, "Сделка не найдена"
-    did, stage, client_id, start_date, slot_id = row
-
-    project_id = None
-    if new_stage == "contract":
-        # Автосоздание проекта
-        project_id, perr = create_project_from_deal(cur, did, client_id, start_date, slot_id)
-        if perr:
-            return None, perr
-
-    return {"id": did, "stage": stage, "project_id": project_id}, None
+    return {"id": row[0], "stage": row[1]}, None
 
 # ─── PROJECTS ────────────────────────────────────────────────────────────────
 
-# 11 этапов строительства. parallel_group: None = последовательный, число = параллельная группа.
-# depends_on: список stage_num от которых зависит этот этап.
-ALL_STAGES = [
-    # (stage_num, name, duration, parallel_group, depends_on)
-    (1,  "Подготовка основания", 5,  None, []),
-    (2,  "Фундамент",            10, None, [1]),
-    (3,  "Коробка",              8,  None, [2]),
-    (4,  "Кровля",               28, 1,   [3]),   # параллельная группа 1
-    (5,  "Окна",                 1,  1,   [3]),   # параллельная группа 1
-    (6,  "Фасад",                16, 1,   [3]),   # параллельная группа 1
-    (7,  "Электрика черновая",   7,  1,   [3]),   # параллельная группа 1
-    (8,  "Сантехника черновая",  7,  1,   [3]),   # параллельная группа 1
-    (9,  "Штукатурка+стяжка",    4,  None, [4,5,6,7,8]),  # после завершения всей группы 1
-    (10, "Чистовая отделка",     7,  None, [9]),
-    (11, "Отделка финиш",        1,  None, [9]),
-]
-
-def build_stage_plan(start_date: date, included_nums: list) -> list:
-    """
-    Строит план дат для выбранных этапов.
-    Параллельные этапы (одна группа) стартуют в одну дату.
-    Возвращает список (stage_num, name, duration, planned_start, planned_end, parallel_group, depends_on).
-    """
-    stage_map = {s[0]: s for s in ALL_STAGES if s[0] in included_nums}
-    end_dates = {}   # stage_num -> planned_end date
-    result = []
-
-    # Обрабатываем этапы по порядку stage_num
-    for stage_num in sorted(stage_map.keys()):
-        snum, name, duration, par_group, deps = stage_map[stage_num]
-
-        # Определяем дату старта
-        if not deps:
-            s_date = start_date
-        else:
-            # Берём максимальную дату окончания зависимостей (только включённых)
-            dep_ends = [end_dates[d] for d in deps if d in end_dates]
-            if dep_ends:
-                s_date = max(dep_ends) + timedelta(days=1)
-            else:
-                s_date = start_date
-
-        # Если параллельная группа — все этапы группы стартуют одновременно
-        if par_group is not None:
-            # Найти самую раннюю дату старта в этой группе (уже посчитанных)
-            group_starts = [r[3] for r in result if r[2] == par_group]
-            if group_starts:
-                s_date = min(group_starts)
-
-        e_date = s_date + timedelta(days=duration - 1)
-        end_dates[snum] = e_date
-        result.append((snum, name, duration, s_date, e_date, par_group, deps))
-
-    return result
-
 def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
+    """Создаёт проект и этапы из сделки. Нормативы берутся из stage_durations."""
     if isinstance(start_date, str):
         start_date = date.fromisoformat(start_date)
 
@@ -279,47 +345,62 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
     if ex:
         return ex[0], None
 
-    # Получаем конфигурацию сделки для правильных этапов и длительности
+    # Получаем данные сделки
     cur.execute(f"""
-        SELECT d.configuration_id, d.project_type, d.planned_start_date,
-               cfg.included_stages, cfg.duration_days, cfg.name as cfg_name
+        SELECT d.project_type, d.configuration_id, d.selected_stages,
+               d.buffer_days, d.planned_start_date, d.address,
+               cfg.included_stages as cfg_stages,
+               d.serial_project_id
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
         WHERE d.id = %s
     """, (deal_id,))
     deal_row = cur.fetchone()
+    if not deal_row:
+        return None, "Сделка не найдена"
 
-    # Определяем этапы и длительность
-    if deal_row and deal_row[3]:  # есть комплектация
-        project_type, planned_start, included_stages, total_duration, cfg_name = \
-            deal_row[1], deal_row[2], list(deal_row[3]), deal_row[4], deal_row[5]
-    else:
-        project_type = deal_row[1] if deal_row else 'serial'
-        planned_start = deal_row[2] if deal_row else None
-        included_stages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-        total_duration = 62
-        cfg_name = 'Под ключ'
+    project_type, cfg_id, sel_stages, buf_days, planned_start, address, cfg_stages, sp_id = deal_row
+    buf_days = buf_days or 7
 
-    # Для индивидуального проекта без сметы — не создаём проект автоматически
+    # Для индивидуального проекта без сметы — не создаём автоматически
     if project_type == 'individual':
         return None, None
 
-    # Плановая дата начала строительства (если задана в сделке)
+    # Определяем итоговый набор этапов
+    # Приоритет: кастомный выбор → комплектация → все этапы
+    if sel_stages:
+        included_nums = list(sel_stages)
+    elif cfg_stages:
+        included_nums = list(cfg_stages)
+    else:
+        included_nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+    # Нормативы из БД — единый источник правды
+    stage_norms = get_stage_durations(cur)
+    filtered_norms = [s for s in stage_norms if s["stage_num"] in included_nums]
+
+    # Плановая дата старта
     if planned_start:
         start_date = planned_start if isinstance(planned_start, date) else date.fromisoformat(str(planned_start))
 
-    code = next_code(cur, "projects", "ДОМ")
+    # Строим Гант-план
+    stage_plan = _build_plan_from_norms(start_date, filtered_norms)
+    if stage_plan:
+        total_duration = (max(p[4] for p in stage_plan) - start_date).days + 1 + buf_days
+    else:
+        total_duration = 62 + buf_days
+
     deadline = start_date + timedelta(days=total_duration)
+    code = next_code(cur, "projects", "ДОМ")
 
     cur.execute(f"""
-        INSERT INTO {SCHEMA}.projects (code, deal_id, client_id, start_date, deadline, status)
-        VALUES (%s, %s, %s, %s, %s, 'active')
+        INSERT INTO {SCHEMA}.projects (code, deal_id, client_id, start_date, deadline, status, address)
+        VALUES (%s, %s, %s, %s, %s, 'active', %s)
         RETURNING id
-    """, (code, deal_id, client_id, start_date, deadline))
+    """, (code, deal_id, client_id, start_date, deadline, address or ""))
     project_id = cur.fetchone()[0]
 
-    # Развернуть этапы по комплектации
-    stage_plan = build_stage_plan(start_date, included_stages)
+    # Разворачиваем этапы
     for order_num, (snum, name, duration, ps, pe, par_group, deps) in enumerate(stage_plan, 1):
         cur.execute(f"""
             INSERT INTO {SCHEMA}.project_stages
@@ -333,8 +414,11 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
     if slot_id:
         cur.execute(f"UPDATE {SCHEMA}.slots SET status='busy' WHERE id=%s", (slot_id,))
 
-    # Привязать project_id к сделке
-    cur.execute(f"UPDATE {SCHEMA}.deals SET project_id=%s WHERE id=%s", (project_id, deal_id))
+    # Привязать project_id к сделке + перевести в planning
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals SET project_id=%s, stage='planning', updated_at=now()
+        WHERE id=%s
+    """, (project_id, deal_id))
 
     return project_id, None
 
@@ -909,7 +993,8 @@ def handler(event: dict, context) -> dict:
 
     # Определяем роут: сначала из querystring ?r=, затем из path
     ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff",
-              "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests"}
+              "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
+              "stage_durations"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -926,10 +1011,10 @@ def handler(event: dict, context) -> dict:
                 return ok(data)
             elif method == "POST":
                 action = body.get("action", "create")
-                if action == "update_stage":
+                if action in ("update_stage", "kp", "contract", "lost", "planning"):
                     deal_id = int(body["deal_id"])
-                    stage = body["stage"]
-                    result, error = update_deal_stage(cur, deal_id, stage)
+                    stage = body.get("stage") or action
+                    result, error = update_deal_stage(cur, deal_id, stage, body)
                     if error:
                         return err(error)
                     conn.commit()
@@ -1065,6 +1150,26 @@ def handler(event: dict, context) -> dict:
                     conn.commit()
                     return ok({"ok": ok_res})
                 return err("id required")
+
+        # ── STAGE DURATIONS (нормативы директора) ──────────────────────────────
+        elif resource == "stage_durations":
+            if method == "GET":
+                return ok(get_stage_durations(cur))
+            elif method == "POST":
+                # Директор меняет длительность этапа
+                stage_num    = int(body["stage_num"])
+                dur          = int(body["duration_days"])
+                cur.execute(f"""
+                    UPDATE {SCHEMA}.stage_durations
+                    SET duration_days=%s, updated_at=now()
+                    WHERE stage_num=%s
+                    RETURNING stage_num, stage_name, duration_days
+                """, (dur, stage_num))
+                row = cur.fetchone()
+                if not row:
+                    return err("Этап не найден")
+                conn.commit()
+                return ok({"stage_num": row[0], "stage_name": row[1], "duration_days": row[2]})
 
         return err("Маршрут не найден", 404)
 
