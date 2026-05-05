@@ -875,14 +875,18 @@ def get_serial_projects(cur):
 def get_configurations(cur, serial_project_id):
     """Возвращает комплектации. duration_days пересчитывается из актуальных нормативов stage_durations."""
     cur.execute(f"""
-        SELECT id, name, description, price_coefficient, duration_days, included_stages
+        SELECT id, name, description, price_coefficient, duration_days, included_stages,
+               COALESCE(discount_pct, 0) as discount_pct,
+               discount_until,
+               COALESCE(is_popular, false) as is_popular
         FROM {SCHEMA}.configurations
         WHERE serial_project_id=%s AND is_active=TRUE
-        ORDER BY duration_days
+        ORDER BY price_coefficient
     """, (serial_project_id,))
     cols = [desc[0] for desc in cur.description]
     cfgs = [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    today = date.today()
     # Пересчитываем duration_days из актуальных нормативов (чтобы отражать изменения директора)
     stage_norms = get_stage_durations(cur)
     for cfg in cfgs:
@@ -894,6 +898,11 @@ def get_configurations(cur, serial_project_id):
                 if plan:
                     max_end = max(p[4] for p in plan)
                     cfg["duration_days"] = (max_end - date(2000, 1, 1)).days + 1
+        # Если скидка истекла — не показываем
+        du = cfg.get("discount_until")
+        if du and du < today:
+            cfg["discount_pct"] = 0
+            cfg["discount_until"] = None
     return cfgs
 
 def create_serial_project(cur, body):
@@ -921,6 +930,21 @@ def create_configuration(cur, body):
         VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
     """, (sp_id, name, desc, coeff, dur, stages))
     return {"id": cur.fetchone()[0]}
+
+def update_configuration(cur, cfg_id: int, body: dict):
+    """Директор устанавливает скидку и/или популярную метку."""
+    sets, vals = [], []
+    if "discount_pct" in body:
+        sets.append("discount_pct=%s"); vals.append(float(body["discount_pct"]))
+    if "discount_until" in body:
+        sets.append("discount_until=%s"); vals.append(body["discount_until"] or None)
+    if "is_popular" in body:
+        sets.append("is_popular=%s"); vals.append(bool(body["is_popular"]))
+    if not sets:
+        return {"ok": False}
+    vals.append(cfg_id)
+    cur.execute(f"UPDATE {SCHEMA}.configurations SET {', '.join(sets)} WHERE id=%s", vals)
+    return {"id": cfg_id, "ok": True}
 
 # ─── INDIVIDUAL PROJECT REQUESTS ─────────────────────────────────────────────
 
@@ -1521,7 +1545,8 @@ def get_payout_deals(cur, manager_id: int = None):
                s.name AS manager_name,
                sp.name AS serial_project_name,
                pr.id AS payout_id, pr.status AS payout_status,
-               pr.amount AS payout_amount, pr.requested_at, pr.notes
+               pr.amount AS payout_amount, pr.requested_at, pr.notes,
+               pr.invoice_file_url, pr.invoice_file_name, pr.reject_comment
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.staff s ON s.id = d.manager_id
@@ -1536,9 +1561,12 @@ def get_payout_deals(cur, manager_id: int = None):
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 def create_payout_request(cur, deal_id: int, manager_id: int, body: dict):
-    """Менеджер подаёт заявку на выплату вознаграждения."""
-    amount = body.get("amount")
-    notes  = body.get("notes", "")
+    """Менеджер подаёт заявку на выплату вознаграждения (со счётом)."""
+    amount    = body.get("amount")
+    notes     = body.get("notes", "")
+    file_b64  = body.get("invoice_file_b64")
+    file_name = body.get("invoice_file_name")
+
     # Проверяем что нет активной заявки
     cur.execute(f"""
         SELECT id FROM {SCHEMA}.payout_requests
@@ -1547,11 +1575,15 @@ def create_payout_request(cur, deal_id: int, manager_id: int, body: dict):
     if cur.fetchone():
         return None, "Заявка по этой сделке уже подана"
 
+    invoice_url = None
+    if file_b64 and file_name:
+        invoice_url, _ = upload_file_to_s3(file_b64, f"invoice_{deal_id}_{file_name}", "payouts")
+
     cur.execute(f"""
-        INSERT INTO {SCHEMA}.payout_requests (deal_id, manager_id, amount, notes, status)
-        VALUES (%s, %s, %s, %s, 'pending')
+        INSERT INTO {SCHEMA}.payout_requests (deal_id, manager_id, amount, notes, status, invoice_file_url, invoice_file_name)
+        VALUES (%s, %s, %s, %s, 'pending', %s, %s)
         RETURNING id
-    """, (deal_id, manager_id, amount, notes))
+    """, (deal_id, manager_id, amount, notes, invoice_url, file_name if file_b64 else None))
     payout_id = cur.fetchone()[0]
 
     # Уведомляем директора
@@ -1559,22 +1591,25 @@ def create_payout_request(cur, deal_id: int, manager_id: int, body: dict):
     deal_code = (cur.fetchone() or [""])[0]
     create_notification(cur,
         type_="payout_requested",
-        title=f"Заявка на выплату: {deal_code}",
-        body_text=f"Менеджер запрашивает вознаграждение{f' ₽{int(amount):,}' if amount else ''}.",
+        title=f"Счёт на оплату: {deal_code}",
+        body_text=f"Менеджер загрузил счёт на вознаграждение{f' ₽{int(amount):,}' if amount else ''}. Требует согласования.",
         role="director",
         deal_id=deal_id,
     )
-    return {"payout_id": payout_id, "ok": True}, None
+    return {"payout_id": payout_id, "invoice_url": invoice_url, "ok": True}, None
 
 def update_payout_request(cur, payout_id: int, body: dict):
-    """Директор одобряет/отклоняет заявку на выплату."""
-    status = body["status"]  # approved | rejected
+    """Директор одобряет/отклоняет заявку на выплату (с комментарием)."""
+    status  = body["status"]  # approved | rejected
+    comment = body.get("reject_comment", "")
+
     cur.execute(f"""
         UPDATE {SCHEMA}.payout_requests
-        SET status=%s, reviewed_at=now(), notes=COALESCE(%s, notes)
+        SET status=%s, reviewed_at=now(),
+            reject_comment=CASE WHEN %s != '' THEN %s ELSE reject_comment END
         WHERE id=%s
         RETURNING deal_id, manager_id
-    """, (status, body.get("notes"), payout_id))
+    """, (status, comment, comment, payout_id))
     row = cur.fetchone()
     if not row:
         return None, "Заявка не найдена"
@@ -1583,10 +1618,13 @@ def update_payout_request(cur, payout_id: int, body: dict):
     cur.execute(f"SELECT code FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
     deal_code = (cur.fetchone() or [""])[0]
     notif_type = "payout_approved" if status == "approved" else "payout_rejected"
-    notif_text = "Ваша заявка на выплату одобрена!" if status == "approved" else "Заявка на выплату отклонена. Уточните детали."
+    if status == "approved":
+        notif_text = "Ваш счёт согласован! Ожидайте поступления оплаты."
+    else:
+        notif_text = f"Счёт отклонён.{f' Причина: {comment}' if comment else ' Уточните детали у директора.'}"
     create_notification(cur,
         type_=notif_type,
-        title=f"Выплата {'одобрена' if status == 'approved' else 'отклонена'}: {deal_code}",
+        title=f"Счёт {'согласован' if status == 'approved' else 'отклонён'}: {deal_code}",
         body_text=notif_text,
         role="crm_manager",
         staff_id=manager_id,
@@ -2165,9 +2203,30 @@ def handler(event: dict, context) -> dict:
                     return err("serial_project_id required")
                 return ok(get_configurations(cur, int(sp_id)))
             elif method == "POST":
-                result = create_configuration(cur, body)
-                conn.commit()
-                return ok(result, 201)
+                action = body.get("action", "create")
+                if action == "update":
+                    cfg_id = int(body["id"])
+                    # Если устанавливаем скидку — уведомляем менеджеров
+                    is_new_discount = float(body.get("discount_pct", 0)) > 0
+                    result = update_configuration(cur, cfg_id, body)
+                    if is_new_discount:
+                        cur.execute(f"SELECT name FROM {SCHEMA}.configurations WHERE id=%s", (cfg_id,))
+                        cfg_name = (cur.fetchone() or [""])[0]
+                        pct = float(body.get("discount_pct", 0))
+                        until = body.get("discount_until", "")
+                        create_notification(cur,
+                            type_="discount_set",
+                            title=f"Новая скидка на «{cfg_name}»",
+                            body_text=f"Директор установил скидку {pct:.0f}%{f' до {until}' if until else ''}. Предложите клиентам!",
+                            role="crm_manager",
+                            deal_id=None,
+                        )
+                    conn.commit()
+                    return ok(result)
+                else:
+                    result = create_configuration(cur, body)
+                    conn.commit()
+                    return ok(result, 201)
 
         # ── INDIVIDUAL REQUESTS ────────────────────────────────────────────────
         elif resource == "individual_requests":
@@ -2378,6 +2437,31 @@ def handler(event: dict, context) -> dict:
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
+                elif action == "resubmit":
+                    # Менеджер повторно подаёт счёт после отклонения
+                    payout_id = int(body["payout_id"])
+                    file_b64  = body.get("invoice_file_b64")
+                    file_name = body.get("invoice_file_name")
+                    amount    = body.get("amount")
+                    invoice_url = None
+                    if file_b64 and file_name:
+                        invoice_url, _ = upload_file_to_s3(file_b64, f"invoice_resubmit_{payout_id}_{file_name}", "payouts")
+                    cur.execute(f"""
+                        UPDATE {SCHEMA}.payout_requests
+                        SET status='pending', invoice_file_url=COALESCE(%s, invoice_file_url),
+                            invoice_file_name=COALESCE(%s, invoice_file_name),
+                            amount=COALESCE(%s, amount), reject_comment=NULL
+                        WHERE id=%s RETURNING deal_id
+                    """, (invoice_url, file_name if file_b64 else None, amount, payout_id))
+                    row = cur.fetchone()
+                    if row:
+                        cur.execute(f"SELECT code FROM {SCHEMA}.deals WHERE id=%s", (row[0],))
+                        deal_code = (cur.fetchone() or [""])[0]
+                        create_notification(cur, type_="payout_requested",
+                            title=f"Новый счёт на оплату: {deal_code}",
+                            body_text="Менеджер загрузил исправленный счёт.", role="director", deal_id=row[0])
+                    conn.commit()
+                    return ok({"ok": True})
 
         # ── NOTIFICATIONS ──────────────────────────────────────────────────────
         elif resource == "notifications":

@@ -4,6 +4,7 @@ import AdminSlotPlan from "@/components/admin/AdminSlotPlan";
 import AdminDocTemplates from "@/components/admin/AdminDocTemplates";
 import AdminStageDurations from "@/components/admin/AdminStageDurations";
 import AdminIntegrationsPanel from "@/components/admin/AdminIntegrationsPanel";
+import AdminDiscounts from "@/components/admin/AdminDiscounts";
 
 interface Props { role: Role; }
 
@@ -39,6 +40,9 @@ export default function Admin({ role }: Props) {
         <>
           {/* Пакет документов при подписании */}
           <AdminDocTemplates />
+
+          {/* Скидки и популярные комплектации */}
+          <AdminDiscounts />
 
           {/* Нормативы этапов */}
           <AdminStageDurations />

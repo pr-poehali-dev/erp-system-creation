@@ -13,6 +13,7 @@ const TYPE_ICON: Record<string, string> = {
   payout_requested:     "Wallet",
   payout_approved:      "PartyPopper",
   payout_rejected:      "XCircle",
+  discount_set:         "Tag",
 };
 const TYPE_COLOR: Record<string, string> = {
   docs_for_review:      "text-blue-500",
@@ -24,6 +25,7 @@ const TYPE_COLOR: Record<string, string> = {
   payout_requested:     "text-blue-500",
   payout_approved:      "text-emerald-600",
   payout_rejected:      "text-red-500",
+  discount_set:         "text-red-500",
 };
 
 function timeAgo(iso: string) {

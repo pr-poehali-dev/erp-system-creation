@@ -96,6 +96,8 @@ export const api = {
   configurations: {
     list: (serial_project_id: number) =>
       request<Configuration[]>("configurations", "GET", undefined, { serial_project_id: String(serial_project_id) }),
+    update: (id: number, body: object) =>
+      request<any>("configurations", "POST", { action: "update", id, ...body }),
   },
 
   individual_requests: {
@@ -143,10 +145,12 @@ export const api = {
   payout_requests: {
     list: (manager_id?: number) =>
       request<{ deals: PayoutDeal[] }>("payout_requests", "GET", undefined, manager_id ? { manager_id: String(manager_id) } : {}),
-    create: (deal_id: number, manager_id: number, amount?: number, notes?: string) =>
-      request<any>("payout_requests", "POST", { action: "create", deal_id, manager_id, amount, notes }),
-    update: (payout_id: number, status: string, notes?: string) =>
-      request<any>("payout_requests", "POST", { action: "update", payout_id, status, notes }),
+    create: (body: object) =>
+      request<any>("payout_requests", "POST", { action: "create", ...body }),
+    update: (payout_id: number, status: string, reject_comment?: string) =>
+      request<any>("payout_requests", "POST", { action: "update", payout_id, status, reject_comment }),
+    resubmit: (body: object) =>
+      request<any>("payout_requests", "POST", { action: "resubmit", ...body }),
   },
 
   notifications: {
@@ -392,6 +396,9 @@ export interface Configuration {
   price_coefficient: number;
   duration_days: number;
   included_stages: number[];
+  discount_pct: number;
+  discount_until: string | null;
+  is_popular: boolean;
 }
 
 export interface SerialProject {
@@ -582,4 +589,7 @@ export interface PayoutDeal {
   payout_amount: number | null;
   requested_at: string | null;
   notes: string | null;
+  invoice_file_url: string | null;
+  invoice_file_name: string | null;
+  reject_comment: string | null;
 }

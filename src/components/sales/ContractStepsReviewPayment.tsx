@@ -130,72 +130,83 @@ export function StepReview({
         </span>
       </div>
 
-      {contractStatus === "docs_review" && (
+      {/* Статус для менеджера — ожидание */}
+      {!isDirector && contractStatus === "docs_review" && (
+        <div className="border border-blue-200 bg-blue-50 rounded-xl p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin shrink-0" />
+            <span className="text-[13px] font-semibold text-blue-900">Ожидание проверки директора</span>
+          </div>
+          <div className="text-[12px] text-blue-800">
+            Документы отправлены. Директор проверяет пакет в течение 2 рабочих дней.
+          </div>
+          <div className="text-[12px] text-blue-700 flex items-center gap-1.5">
+            <Icon name="Clock" size={12} className="shrink-0" />
+            Как только директор подпишет — вы получите уведомление и скачаете подписанные документы
+          </div>
+        </div>
+      )}
+
+      {/* Для директора — всегда показываем список документов и кнопки */}
+      {isDirector && !["docs_approved","payment_pending","payment_confirmed"].includes(contractStatus) && (
         <div className="space-y-3">
-          <div className="border border-blue-200 bg-blue-50 rounded-xl p-4 space-y-3">
+          <div className="border border-blue-200 bg-blue-50 rounded-xl p-4 space-y-2">
             <div className="flex items-center gap-2">
-              <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin shrink-0" />
-              <span className="text-[13px] font-semibold text-blue-900">Ожидание проверки директора</span>
+              <Icon name="FileSearch" size={16} className="text-blue-600 shrink-0" />
+              <span className="text-[13px] font-semibold text-blue-900">Проверьте и подпишите документы</span>
             </div>
             <div className="text-[12px] text-blue-800">
-              Документы отправлены. {isDirector
-                ? "Скачайте документы, подпишите со стороны компании и загрузите подписанные варианты ниже."
-                : "Директор получил уведомление и проверяет пакет в течение 2 рабочих дней."}
+              Скачайте документ от менеджера («От менеджера»), подпишите со стороны компании и загрузите подписанный вариант.
             </div>
-
-            {!isDirector && (
-              <div className="text-[12px] text-blue-700 flex items-center gap-1.5">
-                <Icon name="Clock" size={12} className="shrink-0" />
-                Ожидайте — директор проверяет документы
-              </div>
-            )}
           </div>
 
-          {/* Директор: список документов для подписи и загрузки */}
-          {isDirector && (
+          {/* Список документов */}
+          {items.length > 0 ? (
             <div className="space-y-2">
-              <div className="text-[12px] font-medium text-foreground">Подпишите и загрузите документы компании:</div>
+              <div className="text-[12px] font-medium text-foreground">Документы для подписания:</div>
               {items.map(item => (
                 <SignedDocRow key={item.template_id} item={item} dealId={dealId} isDirector={isDirector} onUploaded={onReload} />
               ))}
             </div>
-          )}
-
-          {/* Директор: кнопки одобрить/отклонить */}
-          {isDirector && (
-            <div className="pt-2 border-t border-blue-200 space-y-2">
-              <div className="text-[11px] text-blue-700 font-medium">
-                {allSigned ? "Все документы подписаны — отправьте менеджеру:" : "После загрузки всех подписанных вариантов:"}
-              </div>
-              <div className="flex gap-2">
-                <button type="button" onClick={onApprove} disabled={submitting || !allSigned}
-                  className="flex-1 px-3 py-2 bg-emerald-500 text-white rounded-lg text-[12px] font-medium hover:bg-emerald-600 disabled:opacity-50">
-                  {submitting ? "..." : "✓ Подтвердить и отправить менеджеру"}
-                </button>
-                <button type="button" onClick={onToggleReject}
-                  className="px-3 py-2 border border-red-200 text-red-600 rounded-lg text-[12px] hover:bg-red-50 transition-colors">
-                  Отклонить
-                </button>
-              </div>
-              {!allSigned && (
-                <div className="text-[11px] text-amber-700 flex items-center gap-1">
-                  <Icon name="AlertTriangle" size={11} className="shrink-0" />
-                  Загрузите подписанные варианты всех документов
-                </div>
-              )}
-              {showReject && (
-                <div className="space-y-2">
-                  <textarea value={rejReason} onChange={e => onRejReasonChange(e.target.value)} rows={2}
-                    placeholder="Причина отклонения..."
-                    className="w-full border border-red-200 rounded-lg px-3 py-2 text-[12px] outline-none focus:ring-1 focus:ring-red-400 resize-none" />
-                  <button type="button" onClick={onReject} disabled={!rejReason.trim() || submitting}
-                    className="w-full px-3 py-2 bg-red-500 text-white rounded-lg text-[12px] font-medium disabled:opacity-40">
-                    Отклонить и вернуть менеджеру
-                  </button>
-                </div>
-              )}
+          ) : (
+            <div className="text-center text-hint text-[13px] py-4">
+              Документы ещё не загружены менеджером
             </div>
           )}
+
+          {/* Кнопки одобрить/отклонить */}
+          <div className="pt-2 border-t border-border space-y-2">
+            <div className="text-[11px] text-foreground font-medium">
+              {allSigned ? "✓ Все подписаны — отправьте менеджеру:" : "После загрузки всех подписанных вариантов:"}
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={onApprove} disabled={submitting || !allSigned || items.length === 0}
+                className="flex-1 px-3 py-2 bg-emerald-500 text-white rounded-lg text-[12px] font-medium hover:bg-emerald-600 disabled:opacity-50">
+                {submitting ? "..." : "✓ Подтвердить и отправить менеджеру"}
+              </button>
+              <button type="button" onClick={onToggleReject}
+                className="px-3 py-2 border border-red-200 text-red-600 rounded-lg text-[12px] hover:bg-red-50 transition-colors">
+                Отклонить
+              </button>
+            </div>
+            {!allSigned && items.length > 0 && (
+              <div className="text-[11px] text-amber-700 flex items-center gap-1">
+                <Icon name="AlertTriangle" size={11} className="shrink-0" />
+                Загрузите подписанные варианты всех документов
+              </div>
+            )}
+            {showReject && (
+              <div className="space-y-2">
+                <textarea value={rejReason} onChange={e => onRejReasonChange(e.target.value)} rows={2}
+                  placeholder="Укажите причину отклонения..."
+                  className="w-full border border-red-200 rounded-lg px-3 py-2 text-[12px] outline-none focus:ring-1 focus:ring-red-400 resize-none" />
+                <button type="button" onClick={onReject} disabled={!rejReason.trim() || submitting}
+                  className="w-full px-3 py-2 bg-red-500 text-white rounded-lg text-[12px] font-medium disabled:opacity-40">
+                  Отклонить и вернуть менеджеру
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
