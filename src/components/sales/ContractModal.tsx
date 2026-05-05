@@ -239,14 +239,19 @@ function DirectorPanel({ deal, docPackage, submitting, showReject, rejReason, on
 // ─── Шаги менеджера ───────────────────────────────────────────────────────────
 type Step = "download" | "upload" | "payment" | "contract_data";
 
+// Определяет с какого шага открыть модалку при первом открытии
 function stepFromStatus(status: string): Step {
-  if (["docs_review","docs_approved","payment_pending","payment_confirmed"].includes(status)) return "payment";
+  // Документы отправлены на проверку / менеджер ждёт директора — остаёмся на загрузке
+  if (status === "docs_review") return "upload";
+  // Директор одобрил / ждём оплаты / оплата подтверждена — переходим к шагу оплаты
+  if (["docs_approved","payment_pending","payment_confirmed"].includes(status)) return "payment";
+  // Документы ещё не загружены / нет статуса
   return "download";
 }
 
 const MANAGER_STEPS = [
   { key: "download", num: 1, label: "Скачать пакет" },
-  { key: "upload",   num: 2, label: "Загрузить сканы" },
+  { key: "upload",   num: 2, label: "Документы" },
   { key: "payment",  num: 3, label: "Оплата" },
 ];
 
@@ -279,16 +284,14 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
   const cfgDur     = deal.configuration_duration || 115;
   const isDirector = role === "director";
 
+  // reloadDocs — только обновляет данные, НЕ сбрасывает шаг
   const reloadDocs = () => {
     api.contract_docs.get(deal.id).then(pkg => {
       setDocPackage(pkg);
-      if (!isDirector) {
-        const s = stepFromStatus(pkg.contract_status);
-        setStep(s);
-      }
     });
   };
 
+  // Первоначальная загрузка — определяем стартовый шаг
   useEffect(() => {
     api.contract_docs.get(deal.id).then(pkg => {
       setDocPackage(pkg);
@@ -352,7 +355,8 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
   // Шаг-индикатор для менеджера
   const doneSteps: Record<Step, boolean> = {
     download:      contractStatus !== "none",
-    upload:        ["docs_review","docs_approved","payment_pending","payment_confirmed"].includes(contractStatus),
+    // upload завершён когда директор одобрил (docs_approved+)
+    upload:        ["docs_approved","payment_pending","payment_confirmed"].includes(contractStatus),
     payment:       contractStatus === "payment_confirmed",
     contract_data: false,
   };
@@ -433,7 +437,8 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
               <StepUpload docsLoading={docsLoading} docPackage={docPackage}
                 contractStatus={contractStatus} requiredDone={requiredDone}
                 submitting={submitting} dealId={deal.id} onReload={reloadDocs}
-                onBack={() => setStep("download")} onSubmitReview={handleSubmitReview} />
+                onBack={() => setStep("download")} onNext={() => setStep("payment")}
+                onSubmitReview={handleSubmitReview} />
             )}
 
             {step === "payment" && (

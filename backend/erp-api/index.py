@@ -852,10 +852,13 @@ def get_serial_projects(cur):
     stage_norms = get_stage_durations(cur)
     for p in projects:
         cur.execute(f"""
-            SELECT id, name, description, price_coefficient, duration_days, included_stages
+            SELECT id, name, description, price_coefficient, duration_days, included_stages,
+                   COALESCE(discount_pct, 0) as discount_pct,
+                   discount_until,
+                   COALESCE(is_popular, false) as is_popular
             FROM {SCHEMA}.configurations
             WHERE serial_project_id=%s AND is_active=TRUE
-            ORDER BY duration_days
+            ORDER BY price_coefficient
         """, (p["id"],))
         ccols = [desc[0] for desc in cur.description]
         cfgs = [dict(zip(ccols, r)) for r in cur.fetchall()]
@@ -1489,7 +1492,7 @@ def confirm_payment(cur, deal_id: int):
     return {"deal_id": deal_id, "contract_status": "payment_confirmed", "stage": "planning"}, None
 
 def upload_signed_doc(cur, deal_id: int, template_id: int, body: dict):
-    """Директор загружает подписанный вариант документа и отправляет менеджеру."""
+    """Директор загружает подписанный вариант документа. UPSERT — создаёт запись если нет."""
     file_b64  = body["file_b64"]
     file_name = body["file_name"]
 
@@ -1499,17 +1502,23 @@ def upload_signed_doc(cur, deal_id: int, template_id: int, body: dict):
         "contract_docs"
     )
 
+    # UPSERT: если запись менеджера есть — обновляем signed_*, если нет — создаём новую
     cur.execute(f"""
-        UPDATE {SCHEMA}.contract_documents
-        SET signed_file_url=%s, signed_file_name=%s, signed_at=now(), manager_seen_signed=false
-        WHERE deal_id=%s AND template_id=%s
+        INSERT INTO {SCHEMA}.contract_documents
+            (deal_id, template_id, signed_file_url, signed_file_name, signed_at, status, manager_seen_signed)
+        VALUES (%s, %s, %s, %s, now(), 'review', false)
+        ON CONFLICT (deal_id, template_id) DO UPDATE SET
+            signed_file_url    = EXCLUDED.signed_file_url,
+            signed_file_name   = EXCLUDED.signed_file_name,
+            signed_at          = now(),
+            manager_seen_signed = false
         RETURNING id
-    """, (cdn_url, file_name, deal_id, template_id))
+    """, (deal_id, template_id, cdn_url, file_name))
     row = cur.fetchone()
     if not row:
-        return None, "Документ не найден"
+        return None, "Ошибка сохранения документа"
 
-    # Уведомляем менеджера о том, что подписанный документ готов
+    # Уведомляем менеджера
     cur.execute(f"SELECT code, manager_id FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
     deal_row = cur.fetchone()
     if deal_row:
@@ -1517,7 +1526,7 @@ def upload_signed_doc(cur, deal_id: int, template_id: int, body: dict):
         create_notification(cur,
             type_="docs_signed_returned",
             title=f"Подписанный документ готов: {deal_code}",
-            body_text="Директор подписал документ и отправил его вам. Скачайте подписанный вариант.",
+            body_text="Директор подписал документы. Скачайте подписанные варианты.",
             role="crm_manager",
             staff_id=manager_id,
             deal_id=deal_id,
