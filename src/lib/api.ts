@@ -73,10 +73,19 @@ export const api = {
   },
 
   slots: {
-    free: () => request<SlotItem[]>("slots"),
+    // signed_date: фильтрует только слоты >= signed_date + 15 дней
+    free: (signed_date?: string) => request<SlotItem[]>("slots", "GET", undefined,
+      signed_date ? { signed_date } : {}),
     plan: () => request<SlotMonth[]>("slots", "GET", undefined, { action: "plan" }),
     updateLimit: (year: number, month: number, monthly_limit: number) =>
       request<any>("slots", "POST", { year, month, monthly_limit }),
+  },
+
+  estimate: {
+    get: (serial_project_id: number) =>
+      request<EstimateData>("estimate", "GET", undefined, { serial_project_id: String(serial_project_id) }),
+    saveWork: (body: object) => request<any>("estimate_works", "POST", body),
+    saveMaterial: (body: object) => request<any>("estimate_materials", "POST", body),
   },
 
   serial_projects: {
@@ -353,4 +362,44 @@ export interface IndividualRequest {
   design_deadline: string | null;
   estimate_file_url: string | null;
   created_at: string;
+}
+
+export interface EstimateWork {
+  id: number;
+  stage_num: number;
+  work_name: string;
+  unit: string;
+  quantity: number;
+  unit_price: number;
+  notes: string;
+  sort_order: number;
+}
+
+export interface EstimateMaterial {
+  id: number;
+  stage_num: number;
+  material_name: string;
+  unit: string;
+  quantity: number;
+  unit_price: number;
+  supplier_hint: string;
+  notes: string;
+  sort_order: number;
+}
+
+export interface EstimateStage {
+  stage_num: number;
+  stage_name: string;
+  works: EstimateWork[];
+  materials: EstimateMaterial[];
+  works_total: number;
+  mats_total: number;
+  stage_total: number;
+}
+
+export interface EstimateData {
+  stages: EstimateStage[];
+  total_works: number;
+  total_materials: number;
+  grand_total: number;
 }

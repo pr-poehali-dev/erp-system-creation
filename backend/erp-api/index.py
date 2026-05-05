@@ -48,8 +48,20 @@ def next_code(cur, table, prefix, col="code"):
 
 # ─── DEALS ───────────────────────────────────────────────────────────────────
 
-def get_free_slots(cur):
-    """Возвращает свободные слоты с загрузкой месяца для слот-плана."""
+def get_free_slots(cur, signed_date_str: str = None):
+    """
+    Возвращает свободные слоты.
+    signed_date_str: если передана дата подписания — возвращает только слоты
+    с start_date >= signed_date + 15 дней (минимальный буфер между подписанием и производством).
+    """
+    min_start = date.today()
+    if signed_date_str:
+        try:
+            signed = date.fromisoformat(signed_date_str)
+            min_start = signed + timedelta(days=15)
+        except Exception:
+            pass
+
     cur.execute(f"""
         SELECT
             s.id, s.year, s.month, s.start_date, s.status, s.monthly_limit,
@@ -60,10 +72,10 @@ def get_free_slots(cur):
             AND occupied.month = s.month
             AND occupied.status IN ('booked', 'busy')
         WHERE s.status = 'free'
-          AND s.start_date >= CURRENT_DATE
+          AND s.start_date >= %s
         GROUP BY s.id, s.year, s.month, s.start_date, s.status, s.monthly_limit
         ORDER BY s.start_date
-    """)
+    """, (min_start,))
     cols = [desc[0] for desc in cur.description]
     slots = []
     for row in cur.fetchall():
@@ -125,10 +137,13 @@ def get_deals(cur):
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 def get_stage_durations(cur):
-    """Загружает нормативы этапов из БД (единый источник правды)."""
+    """Загружает нормативы этапов из БД (единый источник правды). Исключает деактивированные."""
     cur.execute(f"""
         SELECT stage_num, stage_name, duration_days, parallel_group, depends_on
-        FROM {SCHEMA}.stage_durations ORDER BY sort_order
+        FROM {SCHEMA}.stage_durations
+        WHERE stage_name NOT LIKE '_DISABLED_%%'
+          AND duration_days > 0
+        ORDER BY sort_order, stage_num
     """)
     result = []
     for row in cur.fetchall():
@@ -800,6 +815,113 @@ def update_slot_limit(cur, year, month, new_limit):
     """, (int(new_limit), int(year), int(month)))
     return {"year": year, "month": month, "monthly_limit": new_limit}
 
+# ─── ESTIMATE: WORKS & MATERIALS ─────────────────────────────────────────────
+
+def get_estimate(cur, serial_project_id: int):
+    """Возвращает полную смету проекта: работы + материалы по этапам."""
+    # Нормативы этапов
+    cur.execute(f"""
+        SELECT stage_num, stage_name FROM {SCHEMA}.stage_durations
+        WHERE stage_name NOT LIKE '_DISABLED_%%'
+        ORDER BY sort_order, stage_num
+    """)
+    stages = {r[0]: r[1] for r in cur.fetchall()}
+
+    # Работы
+    cur.execute(f"""
+        SELECT id, stage_num, work_name, unit, quantity, unit_price, notes, sort_order
+        FROM {SCHEMA}.stage_works
+        WHERE serial_project_id = %s
+        ORDER BY stage_num, sort_order, id
+    """, (serial_project_id,))
+    wcols = [d[0] for d in cur.description]
+    works = [dict(zip(wcols, r)) for r in cur.fetchall()]
+
+    # Материалы
+    cur.execute(f"""
+        SELECT id, stage_num, material_name, unit, quantity, unit_price, supplier_hint, notes, sort_order
+        FROM {SCHEMA}.stage_materials
+        WHERE serial_project_id = %s
+        ORDER BY stage_num, sort_order, id
+    """, (serial_project_id,))
+    mcols = [d[0] for d in cur.description]
+    materials = [dict(zip(mcols, r)) for r in cur.fetchall()]
+
+    # Группируем по этапам
+    result = []
+    for snum, sname in sorted(stages.items()):
+        stage_works = [w for w in works if w["stage_num"] == snum]
+        stage_mats  = [m for m in materials if m["stage_num"] == snum]
+        works_total = sum(float(w["quantity"]) * float(w["unit_price"]) for w in stage_works)
+        mats_total  = sum(float(m["quantity"]) * float(m["unit_price"]) for m in stage_mats)
+        result.append({
+            "stage_num":    snum,
+            "stage_name":   sname,
+            "works":        stage_works,
+            "materials":    stage_mats,
+            "works_total":  works_total,
+            "mats_total":   mats_total,
+            "stage_total":  works_total + mats_total,
+        })
+
+    grand_works = sum(float(w["unit_price"]) * float(w["quantity"]) for w in works)
+    grand_mats  = sum(float(m["unit_price"]) * float(m["quantity"]) for m in materials)
+    return {
+        "stages": result,
+        "total_works": grand_works,
+        "total_materials": grand_mats,
+        "grand_total": grand_works + grand_mats,
+    }
+
+def upsert_estimate_row(cur, table: str, body: dict):
+    """Создаёт или обновляет строку сметы (работа или материал)."""
+    row_id = body.get("id")
+    sp_id  = int(body["serial_project_id"])
+    snum   = int(body["stage_num"])
+    sort   = int(body.get("sort_order", 0))
+
+    if table == "stage_works":
+        name  = body["work_name"]
+        unit  = body.get("unit", "шт")
+        qty   = float(body.get("quantity", 0))
+        price = float(body.get("unit_price", 0))
+        notes = body.get("notes", "")
+        if row_id:
+            cur.execute(f"""
+                UPDATE {SCHEMA}.stage_works
+                SET work_name=%s, unit=%s, quantity=%s, unit_price=%s, notes=%s, sort_order=%s, updated_at=now()
+                WHERE id=%s AND serial_project_id=%s
+                RETURNING id
+            """, (name, unit, qty, price, notes, sort, int(row_id), sp_id))
+        else:
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.stage_works
+                    (serial_project_id, stage_num, work_name, unit, quantity, unit_price, notes, sort_order)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (sp_id, snum, name, unit, qty, price, notes, sort))
+    else:  # stage_materials
+        name     = body["material_name"]
+        unit     = body.get("unit", "шт")
+        qty      = float(body.get("quantity", 0))
+        price    = float(body.get("unit_price", 0))
+        supplier = body.get("supplier_hint", "")
+        notes    = body.get("notes", "")
+        if row_id:
+            cur.execute(f"""
+                UPDATE {SCHEMA}.stage_materials
+                SET material_name=%s, unit=%s, quantity=%s, unit_price=%s, supplier_hint=%s, notes=%s, sort_order=%s, updated_at=now()
+                WHERE id=%s AND serial_project_id=%s
+                RETURNING id
+            """, (name, unit, qty, price, supplier, notes, sort, int(row_id), sp_id))
+        else:
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.stage_materials
+                    (serial_project_id, stage_num, material_name, unit, quantity, unit_price, supplier_hint, notes, sort_order)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (sp_id, snum, name, unit, qty, price, supplier, notes, sort))
+    row = cur.fetchone()
+    return {"id": row[0]} if row else {"id": None}
+
 # ─── CLIENTS / STAFF ─────────────────────────────────────────────────────────
 
 def get_clients(cur):
@@ -994,7 +1116,7 @@ def handler(event: dict, context) -> dict:
     # Определяем роут: сначала из querystring ?r=, затем из path
     ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff",
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
-              "stage_durations"}
+              "stage_durations", "estimate_works", "estimate_materials", "estimate"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -1111,7 +1233,9 @@ def handler(event: dict, context) -> dict:
                 if action == "plan":
                     return ok(get_slot_plan(cur))
                 else:
-                    return ok(get_free_slots(cur))
+                    # Передаём дату подписания для фильтрации: только слоты >= signed_date + 15д
+                    signed_date = qs.get("signed_date")
+                    return ok(get_free_slots(cur, signed_date))
             elif method == "POST":
                 # Обновить лимит месяца
                 result = update_slot_limit(cur, body["year"], body["month"], body["monthly_limit"])
@@ -1156,7 +1280,6 @@ def handler(event: dict, context) -> dict:
             if method == "GET":
                 return ok(get_stage_durations(cur))
             elif method == "POST":
-                # Директор меняет длительность этапа
                 stage_num    = int(body["stage_num"])
                 dur          = int(body["duration_days"])
                 cur.execute(f"""
@@ -1170,6 +1293,37 @@ def handler(event: dict, context) -> dict:
                     return err("Этап не найден")
                 conn.commit()
                 return ok({"stage_num": row[0], "stage_name": row[1], "duration_days": row[2]})
+
+        # ── ESTIMATE (полная смета: работы + материалы) ────────────────────────
+        elif resource == "estimate":
+            sp_id = qs.get("serial_project_id") or body.get("serial_project_id")
+            if not sp_id:
+                return err("serial_project_id required")
+            return ok(get_estimate(cur, int(sp_id)))
+
+        elif resource == "estimate_works":
+            if method == "GET":
+                sp_id = qs.get("serial_project_id")
+                if not sp_id:
+                    return err("serial_project_id required")
+                est = get_estimate(cur, int(sp_id))
+                return ok([w for s in est["stages"] for w in s["works"]])
+            elif method == "POST":
+                result = upsert_estimate_row(cur, "stage_works", body)
+                conn.commit()
+                return ok(result, 201)
+
+        elif resource == "estimate_materials":
+            if method == "GET":
+                sp_id = qs.get("serial_project_id")
+                if not sp_id:
+                    return err("serial_project_id required")
+                est = get_estimate(cur, int(sp_id))
+                return ok([m for s in est["stages"] for m in s["materials"]])
+            elif method == "POST":
+                result = upsert_estimate_row(cur, "stage_materials", body)
+                conn.commit()
+                return ok(result, 201)
 
         return err("Маршрут не найден", 404)
 

@@ -12,7 +12,11 @@ function addDays(d: string, n: number) {
   const dt = new Date(d); dt.setDate(dt.getDate() + n);
   return dt.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
 }
+function daysBetween(d1: string, d2: string) {
+  return Math.round((new Date(d2).getTime() - new Date(d1).getTime()) / 86400000);
+}
 const fmt = (n: number) => `₽ ${n.toLocaleString("ru")}`;
+const MIN_BUFFER = 15; // минимум дней между подписанием и слотом
 
 interface Props {
   deal: Deal;
@@ -22,25 +26,26 @@ interface Props {
 }
 
 export default function ContractModal({ deal, saving, onClose, onSubmit }: Props) {
-  const [slots, setSlots]         = useState<SlotItem[]>([]);
-  const [sloading, setSloading]   = useState(true);
-  const [slotId, setSlotId]       = useState("");
-  const [address, setAddress]     = useState(deal.address || "");
-  const [budget, setBudget]       = useState(String(deal.budget || ""));
-  const [signedDate, setSignedDate] = useState(new Date().toISOString().slice(0, 10));
-  const [buffer, setBuffer]       = useState(deal.buffer_days || 7);
-  const [error, setError]         = useState("");
+  const today = new Date().toISOString().slice(0, 10);
+
+  const [slots, setSlots]           = useState<SlotItem[]>([]);
+  const [sloading, setSloading]     = useState(false);
+  const [slotId, setSlotId]         = useState("");
+  const [address, setAddress]       = useState(deal.address || "");
+  const [budget, setBudget]         = useState(String(deal.budget || ""));
+  const [signedDate, setSignedDate] = useState(today);
+  const [error, setError]           = useState("");
 
   const isSerial = deal.project_type === "serial" || !deal.project_type;
-  const cfgDur   = deal.configuration_duration || 62;
+  const cfgDur   = deal.configuration_duration || 115;
 
+  // Каждый раз когда меняется дата подписания — перезагружаем слоты
   useEffect(() => {
-    if (isSerial) {
-      api.slots.free().then(setSlots).finally(() => setSloading(false));
-    } else {
-      setSloading(false);
-    }
-  }, [isSerial]);
+    if (!isSerial) return;
+    setSloading(true);
+    setSlotId(""); // сбрасываем выбранный слот при смене даты
+    api.slots.free(signedDate).then(setSlots).finally(() => setSloading(false));
+  }, [isSerial, signedDate]);
 
   const slotsByMonth: Record<string, SlotItem[]> = {};
   slots.forEach(s => {
@@ -51,17 +56,33 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
 
   const selectedSlot = slots.find(s => String(s.id) === slotId);
 
+  // Минимальная допустимая дата слота = дата подписания + MIN_BUFFER
+  const minSlotDate = (() => {
+    const d = new Date(signedDate);
+    d.setDate(d.getDate() + MIN_BUFFER);
+    return d.toISOString().slice(0, 10);
+  })();
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (isSerial && !slotId) { setError("Выберите производственный слот"); return; }
     if (!budget) { setError("Подтвердите сумму договора"); return; }
+
+    // Дополнительная проверка — слот должен быть не раньше подписания + MIN_BUFFER
+    if (selectedSlot) {
+      const diff = daysBetween(signedDate, selectedSlot.start_date);
+      if (diff < MIN_BUFFER) {
+        setError(`Слот должен быть минимум через ${MIN_BUFFER} дней после подписания договора`);
+        return;
+      }
+    }
+
     setError("");
     onSubmit({
       slot_id:     slotId ? Number(slotId) : null,
       address,
       budget:      Number(budget),
       signed_date: signedDate,
-      buffer_days: buffer,
     });
   };
 
@@ -81,7 +102,7 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
           {/* Инфо о КП */}
           {deal.configuration_name && (
             <div className="bg-violet-50 border border-violet-200 rounded-xl p-3">
-              <div className="text-[13px] font-semibold text-violet-900 mb-1">Выбранная комплектация</div>
+              <div className="text-[13px] font-semibold text-violet-900 mb-1">Комплектация из КП</div>
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-[13px] text-violet-800">{deal.configuration_name}</div>
@@ -94,11 +115,18 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
             </div>
           )}
 
-          {/* Дата подписания */}
+          {/* Дата подписания — ключевой параметр */}
           <div>
-            <label className="block text-[13px] font-medium mb-1">Дата подписания</label>
-            <input type="date" value={signedDate} onChange={e => setSignedDate(e.target.value)}
+            <label className="block text-[13px] font-medium mb-1">
+              Дата подписания договора <span className="text-red-500">*</span>
+            </label>
+            <input type="date" value={signedDate}
+              onChange={e => setSignedDate(e.target.value)}
+              min={today}
               className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
+            <div className="text-hint text-[11px] mt-1">
+              Производственный слот будет доступен не ранее {fmtDate(minSlotDate)} (подписание + {MIN_BUFFER} дней)
+            </div>
           </div>
 
           {/* Адрес */}
@@ -119,20 +147,15 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
               className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
           </div>
 
-          {/* Слот производства — только серийный */}
+          {/* Слот производства */}
           {isSerial && (
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <label className="text-[13px] font-medium">
-                  Производственный слот <span className="text-red-500">*</span>
-                </label>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[11px] text-muted-foreground">Буфер документов:</span>
-                  <select value={buffer} onChange={e => setBuffer(Number(e.target.value))}
-                    className="border border-border rounded px-2 py-0.5 text-[12px]">
-                    {[5, 7, 10, 14].map(d => <option key={d} value={d}>{d} дн.</option>)}
-                  </select>
-                </div>
+              <label className="block text-[13px] font-medium mb-1">
+                Производственный слот <span className="text-red-500">*</span>
+              </label>
+              <div className="text-hint text-[11px] mb-2 flex items-center gap-1">
+                <Icon name="Info" size={11} className="shrink-0" />
+                Показаны слоты доступные после {fmtDate(minSlotDate)}
               </div>
 
               {sloading ? (
@@ -140,9 +163,15 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
                   {[1,2].map(i => <div key={i} className="h-12 bg-secondary rounded-xl animate-pulse" />)}
                 </div>
               ) : slots.length === 0 ? (
-                <div className="border border-red-200 bg-red-50 rounded-xl p-4 flex items-center gap-2">
-                  <Icon name="AlertTriangle" size={15} className="text-red-500 shrink-0" />
-                  <span className="text-[13px] text-red-700">Нет свободных слотов. Обратитесь к директору.</span>
+                <div className="border border-amber-200 bg-amber-50 rounded-xl p-4 flex items-start gap-2">
+                  <Icon name="AlertTriangle" size={15} className="text-amber-500 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="text-[13px] text-amber-800 font-medium">Нет доступных слотов</div>
+                    <div className="text-[11px] text-amber-700 mt-0.5">
+                      Нет свободных слотов позже {fmtDate(minSlotDate)}.
+                      Измените дату подписания или обратитесь к директору для увеличения лимита.
+                    </div>
+                  </div>
                 </div>
               ) : (
                 <div className="border border-border rounded-xl overflow-hidden">
@@ -165,21 +194,20 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
                         </div>
                         <div className="grid grid-cols-2 gap-2 p-3">
                           {monthSlots.map(slot => {
-                            const isSel = slotId === String(slot.id);
-                            const startStr = slot.start_date;
-                            const buildStart = addDays(startStr, buffer);
-                            const buildEnd   = addDays(startStr, buffer + cfgDur);
+                            const isSel      = slotId === String(slot.id);
+                            const diffDays   = daysBetween(signedDate, slot.start_date);
+                            const buildEnd   = addDays(slot.start_date, cfgDur);
                             return (
                               <button key={slot.id} type="button"
                                 onClick={() => setSlotId(String(slot.id))}
                                 className={`text-left px-3 py-2.5 rounded-lg border text-[12px] transition-all ${
                                   isSel
-                                    ? "border-primary bg-primary/5 text-primary ring-1 ring-primary"
+                                    ? "border-primary bg-primary/5 ring-1 ring-primary"
                                     : "border-border bg-white hover:border-primary/50"
                                 }`}>
-                                <div className="font-semibold">{fmtDate(startStr)}</div>
+                                <div className="font-semibold">{fmtDate(slot.start_date)}</div>
                                 <div className={`text-[10px] mt-0.5 ${isSel ? "text-primary/70" : "text-hint"}`}>
-                                  Старт строительства: {buildStart}
+                                  +{diffDays} дн. от подписания
                                 </div>
                                 <div className={`text-[10px] ${isSel ? "text-primary/70" : "text-hint"}`}>
                                   Сдача: ~{buildEnd}
@@ -197,7 +225,7 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
               {selectedSlot && (
                 <div className="mt-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 flex items-center gap-2 text-[12px] text-emerald-700">
                   <Icon name="CheckCircle" size={13} className="shrink-0" />
-                  Слот выбран · строительство начнётся {addDays(selectedSlot.start_date, buffer)}
+                  Слот {fmtDate(selectedSlot.start_date)} · через {daysBetween(signedDate, selectedSlot.start_date)} дн. после подписания
                 </div>
               )}
             </div>
@@ -208,24 +236,25 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2">
               <Icon name="Info" size={14} className="text-amber-600 shrink-0 mt-0.5" />
               <span className="text-[12px] text-amber-800">
-                Для индивидуального проекта проект создастся без привязки к производственному слоту.
-                Дата начала будет назначена после завершения проектирования.
+                Для индивидуального проекта слот назначается после завершения проектирования.
               </span>
             </div>
           )}
+
+          {/* Авто-действие */}
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-start gap-2">
+            <Icon name="Zap" size={13} className="text-blue-500 shrink-0 mt-0.5" />
+            <span className="text-[12px] text-blue-800">
+              Автоматически создастся проект <strong>ДОМ-XXXX</strong> с Гант-планом
+              на основе выбранных в КП этапов.
+            </span>
+          </div>
 
           {error && (
             <div className="flex items-center gap-2 text-red-600 text-[13px]">
               <Icon name="AlertCircle" size={14} />{error}
             </div>
           )}
-
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-start gap-2">
-            <Icon name="Zap" size={13} className="text-blue-500 shrink-0 mt-0.5" />
-            <span className="text-[12px] text-blue-800">
-              После сохранения автоматически создастся проект <strong>ДОМ-XXXX</strong> с {deal.selected_stages?.length || 11} этапами строительства и Гант-планом.
-            </span>
-          </div>
 
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose}

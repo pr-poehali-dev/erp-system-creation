@@ -16,6 +16,7 @@ import Finance from "@/pages/Finance";
 import Employees from "@/pages/Employees";
 import Reports from "@/pages/Reports";
 import Admin from "@/pages/Admin";
+import Estimate from "@/pages/Estimate";
 
 export type Role =
   | "director"
@@ -140,6 +141,13 @@ function ERPApp() {
       icon: "BarChart2",
       component: <Reports role={currentRole} />,
       roles: ["director", "finance_director", "commercial", "construction_director", "supply_director"],
+    },
+    {
+      id: "estimate",
+      label: "Смета",
+      icon: "ClipboardList",
+      component: <Estimate role={currentRole} />,
+      roles: ["director", "commercial", "supply_director", "construction_director"],
     },
     {
       id: "admin",
