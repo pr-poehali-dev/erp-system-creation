@@ -229,7 +229,7 @@ export default function Documents({ role }: Props) {
           <table className="w-full">
             <thead>
               <tr className="border-b border-border bg-background">
-                {["Категория", "Тип", "Название", "Контрагент", "Дата", "Сумма", "Статус", ""].map(h => (
+                {["Категория", "Тип", "Название", "Контрагент", "Дата", "Сумма", ""].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-hint text-[12px] font-medium">{h}</th>
                 ))}
               </tr>
@@ -259,22 +259,7 @@ export default function Documents({ role }: Props) {
                     </td>
                     <td className="px-4 py-3 text-[12px] text-hint whitespace-nowrap">{fmtDate(d.doc_date)}</td>
                     <td className="px-4 py-3 text-[13px] font-medium whitespace-nowrap">{fmtRub(d.amount)}</td>
-                    <td className="px-4 py-3">
-                      {canEdit ? (
-                        <select
-                          value={d.status}
-                          onChange={e => handleStatusChange(d, e.target.value)}
-                          className={`text-[11px] px-2 py-1 rounded-lg border font-medium outline-none cursor-pointer ${status.cls}`}>
-                          {Object.entries(STATUS_MAP).map(([k, v]) => (
-                            <option key={k} value={k}>{v.label}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className={`text-[11px] px-2 py-1 rounded-lg border font-medium ${status.cls}`}>
-                          {status.label}
-                        </span>
-                      )}
-                    </td>
+
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-1.5">
                         {d.file_url ? (
