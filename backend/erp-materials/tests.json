@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET materials list",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"requests": []},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

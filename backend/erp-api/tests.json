@@ -1,0 +1,61 @@
+{
+  "tests": [
+    {
+      "name": "GET dashboard",
+      "method": "GET",
+      "path": "/?r=dashboard",
+      "expectedStatus": 200,
+      "expectedBody": {"active_deals": 0},
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET clients",
+      "method": "GET",
+      "path": "/?r=clients",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET deals",
+      "method": "GET",
+      "path": "/?r=deals",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET projects",
+      "method": "GET",
+      "path": "/?r=projects",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET procurement",
+      "method": "GET",
+      "path": "/?r=procurement",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET payments",
+      "method": "GET",
+      "path": "/?r=payments",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET kcompany",
+      "method": "GET",
+      "path": "/?r=kcompany",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET staff",
+      "method": "GET",
+      "path": "/?r=staff",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    }
+  ]
+}

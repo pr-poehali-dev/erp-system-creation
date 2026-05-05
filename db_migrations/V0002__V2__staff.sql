@@ -1,0 +1,10 @@
+CREATE TABLE staff (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(200) NOT NULL,
+  role VARCHAR(80) NOT NULL,
+  dept VARCHAR(80),
+  phone VARCHAR(30),
+  email VARCHAR(120),
+  is_active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);

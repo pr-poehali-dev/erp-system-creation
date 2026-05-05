@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET projects list",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"projects": []},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+CREATE TABLE clients (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(200) NOT NULL,
+  phone VARCHAR(30),
+  email VARCHAR(120),
+  source VARCHAR(80),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);

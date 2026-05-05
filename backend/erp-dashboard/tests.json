@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET dashboard stats",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"kpi": {}},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET k_company",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"live": {"alert": true}},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

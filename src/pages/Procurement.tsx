@@ -1,122 +1,456 @@
+import { useEffect, useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
+import { api, MaterialRequest, Project } from "@/lib/api";
 
 interface Props { role: Role; }
 
-const requests = [
-  { id: "ЗМ-0312", project: "ДОМ-241", material: "Блок газобетонный D400, 40 м³", urgency: "Срочно", status: "pending", foreman: "Захаров И.", created: "05.05.26", sum: "128 000" },
-  { id: "ЗМ-0311", project: "ДОМ-238", material: "Арматура А500С Ø12, 2 т", urgency: "Обычно", status: "ordered", foreman: "Соколов Г.", created: "04.05.26", sum: "156 000" },
-  { id: "ЗМ-0310", project: "ДОМ-244", material: "Цемент М500 Д0, 50 мешков", urgency: "Срочно", status: "delivered", foreman: "Романов С.", created: "03.05.26", sum: "26 000" },
-  { id: "ЗМ-0309", project: "ДОМ-235", material: "Профнастил НС-35 RAL 3011, 200 м²", urgency: "Обычно", status: "pending", foreman: "Захаров И.", created: "02.05.26", sum: "136 000" },
-];
-
-const suppliers = [
-  { name: "СтройМат-НН", rating: 4.8, delivTime: "2-3 дня", quality: 4.9, price: "★ Лучшая цена", orders: 42 },
-  { name: "МеталлТорг", rating: 4.5, delivTime: "3-5 дней", quality: 4.3, price: "Средняя", orders: 28 },
-  { name: "ОкноГрупп", rating: 4.2, delivTime: "7-10 дней", quality: 4.6, price: "Выше рынка", orders: 15 },
-  { name: "КровМаркет", rating: 3.9, delivTime: "5-7 дней", quality: 3.8, price: "Ниже рынка", orders: 9 },
-];
-
-const statusMap: Record<string, { label: string; cls: string }> = {
-  pending: { label: "Ожидает", cls: "badge-warning" },
-  ordered: { label: "Заказан", cls: "badge-info" },
-  delivered: { label: "Доставлен", cls: "badge-success" },
+const STATUS_MAP: Record<string, { label: string; cls: string; next: string | null; nextLabel: string | null }> = {
+  new: { label: "Новая", cls: "badge-warning", next: "ordered", nextLabel: "Отметить заказанным" },
+  ordered: { label: "Заказан", cls: "badge-info", next: "delivered", nextLabel: "Отметить доставленным" },
+  delivered: { label: "Доставлен", cls: "badge-success", next: null, nextLabel: null },
 };
 
+const UNITS = ["шт", "м²", "м³", "т", "л", "кг"];
+const PRIORITIES = [
+  { value: "urgent", label: "Срочно" },
+  { value: "normal", label: "Обычно" },
+];
+
+const EMPTY_FORM = {
+  project_id: "",
+  material: "",
+  quantity: "",
+  unit: "шт",
+  required_date: "",
+  priority: "normal",
+  notes: "",
+};
+
+const canChangeStatus = (role: Role) =>
+  ["director", "supply_director", "supplier"].includes(role);
+
 export default function Procurement({ role }: Props) {
+  const [requests, setRequests] = useState<MaterialRequest[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [statusSaving, setStatusSaving] = useState<number | null>(null);
+
+  const loadRequests = () => {
+    setLoading(true);
+    api.procurement
+      .list()
+      .then(setRequests)
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadRequests();
+    api.projects.list().then(setProjects);
+  }, []);
+
+  const pendingCount = requests.filter((r) => r.status === "new").length;
+  const orderedCount = requests.filter((r) => r.status === "ordered").length;
+
+  const handleOpenModal = () => {
+    setForm({ ...EMPTY_FORM });
+    setFormError("");
+    setModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setModalOpen(false);
+    setFormError("");
+  };
+
+  const handleField = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>
+  ) => {
+    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.material.trim()) { setFormError("Укажите материал"); return; }
+    if (!form.quantity || Number(form.quantity) <= 0) { setFormError("Укажите количество"); return; }
+    if (!form.required_date) { setFormError("Укажите дату поставки"); return; }
+
+    setSaving(true);
+    setFormError("");
+    try {
+      await api.procurement.create({
+        project_id: form.project_id ? Number(form.project_id) : null,
+        material: form.material.trim(),
+        quantity: Number(form.quantity),
+        unit: form.unit,
+        required_date: form.required_date,
+        priority: form.priority,
+        notes: form.notes.trim(),
+      });
+      handleCloseModal();
+      loadRequests();
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : "Ошибка сохранения");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleStatusChange = async (req: MaterialRequest, nextStatus: string) => {
+    setStatusSaving(req.id);
+    try {
+      await api.procurement.updateStatus(req.id, nextStatus);
+      loadRequests();
+    } finally {
+      setStatusSaving(null);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-[1400px]">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">Снабжение и Закупки</h1>
-          <p className="text-hint mt-0.5">Заявки на материалы, тендеры, поставщики</p>
+          <p className="text-hint mt-0.5">Заявки на материалы · статусы поставок</p>
         </div>
-        <button className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors">
-          <Icon name="Plus" size={14} />
-          Новая заявка
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={loadRequests}
+            className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-lg text-[13px] hover:bg-secondary transition-colors"
+          >
+            <Icon name="RefreshCw" size={13} className={loading ? "animate-spin" : ""} />
+            Обновить
+          </button>
+          <button
+            onClick={handleOpenModal}
+            className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors"
+          >
+            <Icon name="Plus" size={14} />
+            Новая заявка
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      {/* Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
         {[
-          { label: "Ожидают обработки", value: "8", icon: "Clock", color: "text-amber-600 bg-amber-50" },
-          { label: "В пути", value: "5", icon: "Truck", color: "text-blue-600 bg-blue-50" },
-          { label: "Сумма заказов (май)", value: "₽ 1.4 млн", icon: "ShoppingCart", color: "text-emerald-600 bg-emerald-50" },
-        ].map(c => (
-          <div key={c.label} className="bg-white rounded-xl border border-border p-4 flex items-center gap-4">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${c.color}`}>
+          {
+            label: "Новых заявок",
+            value: loading ? "—" : String(pendingCount),
+            icon: "Clock",
+            color: "text-amber-600 bg-amber-50",
+          },
+          {
+            label: "В заказе",
+            value: loading ? "—" : String(orderedCount),
+            icon: "Truck",
+            color: "text-blue-600 bg-blue-50",
+          },
+          {
+            label: "Всего заявок",
+            value: loading ? "—" : String(requests.length),
+            icon: "ShoppingCart",
+            color: "text-emerald-600 bg-emerald-50",
+          },
+        ].map((c) => (
+          <div
+            key={c.label}
+            className="bg-white rounded-xl border border-border p-4 flex items-center gap-4"
+          >
+            <div
+              className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${c.color}`}
+            >
               <Icon name={c.icon} size={20} />
             </div>
             <div>
-              <div className="text-[20px] font-bold text-foreground">{c.value}</div>
+              <div
+                className={`text-[20px] font-bold text-foreground ${
+                  loading ? "animate-pulse text-muted-foreground" : ""
+                }`}
+              >
+                {c.value}
+              </div>
               <div className="text-hint">{c.label}</div>
             </div>
           </div>
         ))}
       </div>
 
-      {/* Requests */}
+      {/* Requests table */}
       <div className="bg-white rounded-xl border border-border">
         <div className="px-5 py-4 border-b border-border flex items-center justify-between">
           <h2 className="font-semibold text-[15px]">Заявки на материалы</h2>
-          <button className="text-primary text-[13px] hover:underline">Все заявки →</button>
         </div>
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-border">
-              {["№", "Проект", "Материал", "Срочность", "Сумма", "Прораб", "Статус", "Дата"].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-hint font-medium">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {requests.map(r => (
-              <tr key={r.id} className="hover:bg-background transition-colors cursor-pointer">
-                <td className="px-4 py-3 text-[13px] text-primary font-medium">{r.id}</td>
-                <td className="px-4 py-3 text-[13px] font-medium">{r.project}</td>
-                <td className="px-4 py-3 text-[13px] max-w-[200px] truncate">{r.material}</td>
-                <td className="px-4 py-3">
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${r.urgency === "Срочно" ? "badge-error" : "badge-info"}`}>
-                    {r.urgency}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-[13px] font-semibold">₽ {r.sum}</td>
-                <td className="px-4 py-3 text-[13px]">{r.foreman}</td>
-                <td className="px-4 py-3">
-                  <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${statusMap[r.status].cls}`}>
-                    {statusMap[r.status].label}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-hint">{r.created}</td>
-              </tr>
+
+        {loading ? (
+          <div className="divide-y divide-border">
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="px-4 py-3.5 flex items-center gap-4 animate-pulse">
+                <div className="h-4 bg-secondary rounded w-24" />
+                <div className="h-4 bg-secondary rounded w-20" />
+                <div className="h-4 bg-secondary rounded flex-1" />
+                <div className="h-5 bg-secondary rounded-full w-16" />
+                <div className="h-4 bg-secondary rounded w-24" />
+                <div className="h-5 bg-secondary rounded-full w-20" />
+              </div>
             ))}
-          </tbody>
-        </table>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border">
+                  {["№", "Проект", "Материал", "Кол-во", "Дата поставки", "Прораб", "Приоритет", "Статус", ""].map(
+                    (h) => (
+                      <th
+                        key={h}
+                        className="px-4 py-3 text-left text-hint font-medium whitespace-nowrap"
+                      >
+                        {h}
+                      </th>
+                    )
+                  )}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {requests.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-8 text-center text-hint">
+                      Заявок пока нет
+                    </td>
+                  </tr>
+                ) : (
+                  requests.map((r) => {
+                    const st = STATUS_MAP[r.status] || STATUS_MAP["new"];
+                    return (
+                      <tr key={r.id} className="hover:bg-background transition-colors">
+                        <td className="px-4 py-3 text-[13px] text-primary font-medium whitespace-nowrap">
+                          {r.code}
+                        </td>
+                        <td className="px-4 py-3 text-[13px] font-medium whitespace-nowrap">
+                          {r.project_code || "—"}
+                        </td>
+                        <td className="px-4 py-3 text-[13px] max-w-[200px]">
+                          <div className="truncate" title={r.material}>
+                            {r.material}
+                          </div>
+                          {r.notes && (
+                            <div className="text-hint truncate text-[11px]" title={r.notes}>
+                              {r.notes}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-[13px] whitespace-nowrap">
+                          {r.quantity} {r.unit}
+                        </td>
+                        <td className="px-4 py-3 text-hint whitespace-nowrap">
+                          {new Date(r.required_date).toLocaleDateString("ru-RU")}
+                        </td>
+                        <td className="px-4 py-3 text-[13px] whitespace-nowrap">
+                          {r.foreman_name || "—"}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span
+                            className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
+                              r.priority === "urgent" ? "badge-error" : "badge-info"
+                            }`}
+                          >
+                            {r.priority === "urgent" ? "Срочно" : "Обычно"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span
+                            className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${st.cls}`}
+                          >
+                            {st.label}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          {canChangeStatus(role) && st.next && (
+                            <button
+                              onClick={() => handleStatusChange(r, st.next!)}
+                              disabled={statusSaving === r.id}
+                              className="text-[12px] px-3 py-1 border border-border rounded-lg hover:bg-secondary transition-colors disabled:opacity-50 whitespace-nowrap"
+                            >
+                              {statusSaving === r.id ? (
+                                <span className="flex items-center gap-1">
+                                  <Icon name="Loader2" size={11} className="animate-spin" />
+                                  ...
+                                </span>
+                              ) : (
+                                st.nextLabel
+                              )}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      {/* Suppliers */}
-      <div className="bg-white rounded-xl border border-border">
-        <div className="px-5 py-4 border-b border-border">
-          <h2 className="font-semibold text-[15px]">Рейтинг поставщиков</h2>
-        </div>
-        <div className="divide-y divide-border">
-          {suppliers.map((s, i) => (
-            <div key={s.name} className="px-5 py-4 flex items-center gap-4">
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-[13px] font-bold shrink-0 ${i === 0 ? "bg-amber-100 text-amber-700" : "bg-secondary text-muted-foreground"}`}>
-                #{i + 1}
-              </div>
-              <div className="flex-1">
-                <div className="text-[13px] font-semibold">{s.name}</div>
-                <div className="text-hint">Заказов: {s.orders} · Срок: {s.delivTime} · {s.price}</div>
-              </div>
-              <div className="flex items-center gap-1">
-                <Icon name="Star" size={13} className="text-amber-400 fill-amber-400" />
-                <span className="text-[13px] font-semibold">{s.rating}</span>
-              </div>
+      {/* Create modal */}
+      {modalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="bg-white rounded-xl border border-border shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto animate-fade-in">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <h2 className="font-semibold text-[15px]">Новая заявка на материал</h2>
+              <button
+                onClick={handleCloseModal}
+                className="text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <Icon name="X" size={18} />
+              </button>
             </div>
-          ))}
+            <form onSubmit={handleCreate} className="px-5 py-4 space-y-4">
+              <div>
+                <label className="block text-[13px] font-medium text-foreground mb-1">
+                  Проект
+                </label>
+                <select
+                  name="project_id"
+                  value={form.project_id}
+                  onChange={handleField}
+                  className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary"
+                >
+                  <option value="">— Без проекта —</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.code} · {p.client_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[13px] font-medium text-foreground mb-1">
+                  Материал <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  name="material"
+                  value={form.material}
+                  onChange={handleField}
+                  placeholder="Блок газобетонный D400"
+                  className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[13px] font-medium text-foreground mb-1">
+                    Количество <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    name="quantity"
+                    value={form.quantity}
+                    onChange={handleField}
+                    placeholder="10"
+                    min={0}
+                    step="any"
+                    className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[13px] font-medium text-foreground mb-1">
+                    Единица
+                  </label>
+                  <select
+                    name="unit"
+                    value={form.unit}
+                    onChange={handleField}
+                    className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    {UNITS.map((u) => (
+                      <option key={u} value={u}>
+                        {u}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[13px] font-medium text-foreground mb-1">
+                  Дата поставки <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="date"
+                  name="required_date"
+                  value={form.required_date}
+                  onChange={handleField}
+                  className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[13px] font-medium text-foreground mb-1">
+                  Приоритет
+                </label>
+                <select
+                  name="priority"
+                  value={form.priority}
+                  onChange={handleField}
+                  className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary"
+                >
+                  {PRIORITIES.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[13px] font-medium text-foreground mb-1">
+                  Примечания
+                </label>
+                <textarea
+                  name="notes"
+                  value={form.notes}
+                  onChange={handleField}
+                  rows={3}
+                  placeholder="Дополнительная информация..."
+                  className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary resize-none"
+                />
+              </div>
+
+              {formError && (
+                <div className="flex items-center gap-2 text-red-600 text-[13px]">
+                  <Icon name="AlertCircle" size={14} />
+                  {formError}
+                </div>
+              )}
+
+              <div className="flex gap-3 pt-1">
+                <button
+                  type="button"
+                  onClick={handleCloseModal}
+                  className="flex-1 px-4 py-2 border border-border rounded-lg text-[13px] hover:bg-secondary transition-colors"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="flex-1 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+                >
+                  {saving ? "Сохранение..." : "Создать заявку"}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

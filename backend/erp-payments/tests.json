@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "GET payments",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": {"payments": []},
+      "bodyMatcher": "partial"
+    }
+  ]
+}
