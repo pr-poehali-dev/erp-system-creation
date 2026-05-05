@@ -134,6 +134,19 @@ export const api = {
       request<any>("contract_docs", "POST", { action: "approve", deal_id, approved, reject_reason }),
     confirmPayment: (deal_id: number) =>
       request<any>("contract_docs", "POST", { action: "confirm_payment", deal_id }),
+    uploadSigned: (deal_id: number, template_id: number, file_b64: string, file_name: string) =>
+      request<any>("contract_docs", "POST", { action: "upload_signed", deal_id, template_id, file_b64, file_name }),
+    confirmDocPayment: (deal_id: number, template_id: number) =>
+      request<any>("contract_docs", "POST", { action: "confirm_doc_payment", deal_id, template_id }),
+  },
+
+  payout_requests: {
+    list: (manager_id?: number) =>
+      request<{ deals: PayoutDeal[] }>("payout_requests", "GET", undefined, manager_id ? { manager_id: String(manager_id) } : {}),
+    create: (deal_id: number, manager_id: number, amount?: number, notes?: string) =>
+      request<any>("payout_requests", "POST", { action: "create", deal_id, manager_id, amount, notes }),
+    update: (payout_id: number, status: string, notes?: string) =>
+      request<any>("payout_requests", "POST", { action: "update", payout_id, status, notes }),
   },
 
   notifications: {
@@ -502,6 +515,9 @@ export interface DocTemplate {
   file_updated_at: string | null;
   is_active: boolean;
   created_at: string;
+  version: number;
+  prev_file_url: string | null;
+  prev_file_name: string | null;
 }
 
 export interface ContractDocItem {
@@ -510,13 +526,19 @@ export interface ContractDocItem {
   description: string | null;
   is_required: boolean;
   sort_order: number;
+  template_version: number;
   template_file_url: string | null;
   template_file_name: string | null;
   doc_id: number | null;
   file_url: string | null;
   file_name: string | null;
-  status: string; // pending | uploaded | approved
+  status: string; // pending | uploaded | review | approved | rejected
   uploaded_at: string | null;
+  // Подписанный директором вариант
+  signed_file_url: string | null;
+  signed_file_name: string | null;
+  signed_at: string | null;
+  manager_seen_signed: boolean;
 }
 
 export interface ContractDocsPackage {
@@ -543,4 +565,21 @@ export interface Notification {
 export interface NotificationsResponse {
   notifications: Notification[];
   unread_count: number;
+}
+
+export interface PayoutDeal {
+  id: number;
+  code: string;
+  budget: number;
+  contract_status: string;
+  signed_date: string | null;
+  client_name: string;
+  client_phone: string;
+  manager_name: string;
+  serial_project_name: string | null;
+  payout_id: number | null;
+  payout_status: string | null; // pending | approved | rejected
+  payout_amount: number | null;
+  requested_at: string | null;
+  notes: string | null;
 }

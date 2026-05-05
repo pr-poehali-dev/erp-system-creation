@@ -196,10 +196,13 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
             submitting={submitting}
             showReject={showReject}
             rejReason={rejReason}
+            items={docPackage?.items || []}
+            dealId={deal.id}
             onApprove={handleApprove}
             onToggleReject={() => setShowReject(v => !v)}
             onReject={handleReject}
             onRejReasonChange={setRejReason}
+            onReload={reloadDocs}
             onBack={() => setStep("upload")}
             onNext={() => setStep("payment")}
           />

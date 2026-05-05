@@ -3,6 +3,7 @@ import Icon from "@/components/ui/icon";
 import { Deal, SerialProject, StageDuration, Configuration } from "@/lib/api";
 
 const fmt = (n: number) => `₽ ${n.toLocaleString("ru")}`;
+const fmtGreen = (n: number) => n.toLocaleString("ru");
 
 // Считает длительность по выбранным этапам + буфер
 function calcDuration(stages: StageDuration[], selected: number[], buffer: number): number {
@@ -130,7 +131,8 @@ export default function KpModal({ deal, serialProjects, stageDurations, saving, 
                           </div>
                         </div>
                         <div className="text-right">
-                          <div className="text-[13px] font-bold text-primary">{fmt(project.base_price)}</div>
+                          <div className="text-[11px] text-muted-foreground">от</div>
+                          <div className="text-[14px] font-bold text-emerald-600">₽ {fmtGreen(project.base_price)}</div>
                           <div className="text-hint text-[11px]">{project.base_duration_days} дней</div>
                         </div>
                       </div>
@@ -167,10 +169,12 @@ export default function KpModal({ deal, serialProjects, stageDurations, saving, 
                           <div className="text-hint text-[11px] mt-0.5">{cfg.description}</div>
                           <div className="text-hint text-[11px]">Этапы: {cfg.included_stages.join(", ")}</div>
                         </div>
-                        <div className="text-right ml-3">
-                          <div className="text-[14px] font-bold text-primary">{fmt(price)}</div>
-                          <div className="text-hint text-[11px]">{cfg.duration_days} + {buffer} дн. буфер</div>
-                          <div className="text-hint text-[11px]">×{cfg.price_coefficient}</div>
+                        <div className="text-right ml-3 shrink-0">
+                          {sp && cfg.price_coefficient !== 1 && (
+                            <div className="text-[11px] text-muted-foreground line-through">₽ {fmtGreen(sp.base_price)}</div>
+                          )}
+                          <div className="text-[15px] font-bold text-emerald-600">₽ {fmtGreen(price)}</div>
+                          <div className="text-hint text-[11px]">{cfg.duration_days} + {buffer} дн.</div>
                         </div>
                       </div>
                     </button>

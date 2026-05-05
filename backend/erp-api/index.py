@@ -1158,7 +1158,7 @@ def get_doc_templates(cur, active_only: bool = True):
     cur.execute(f"""
         SELECT id, name, description, is_required, sort_order,
                file_url, file_name, file_size_kb, file_updated_at,
-               is_active, created_at
+               is_active, created_at, version, prev_file_url, prev_file_name
         FROM {SCHEMA}.doc_templates
         {where}
         ORDER BY sort_order, id
@@ -1172,13 +1172,18 @@ def update_doc_template(cur, tpl_id: int, body: dict):
     for field in ["name", "description", "is_required", "sort_order", "is_active"]:
         if field in body:
             sets.append(f"{field}=%s"); vals.append(body[field])
-    # Если передан файл — заливаем в S3
+    # Если передан файл — заливаем в S3, старый файл сохраняем как prev
     file_b64 = body.get("file_b64")
     file_name = body.get("file_name")
     if file_b64 and file_name:
+        # Сохраняем старый URL как prev_file
+        cur.execute(f"SELECT file_url, file_name, version FROM {SCHEMA}.doc_templates WHERE id=%s", (tpl_id,))
+        old = cur.fetchone()
         cdn_url, size_kb = upload_file_to_s3(file_b64, f"template_{tpl_id}_{file_name}", "doc_templates")
-        sets += ["file_url=%s", "file_name=%s", "file_size_kb=%s", "file_updated_at=now()"]
-        vals += [cdn_url, file_name, size_kb]
+        sets += ["file_url=%s", "file_name=%s", "file_size_kb=%s", "file_updated_at=now()",
+                 "version=version+1",
+                 "prev_file_url=%s", "prev_file_name=%s"]
+        vals += [cdn_url, file_name, size_kb, old[0] if old else None, old[1] if old else None]
     if not sets:
         return False
     sets.append("updated_at=now()")
@@ -1214,14 +1219,16 @@ def create_doc_template(cur, body: dict):
 def get_contract_docs(cur, deal_id: int):
     """
     Возвращает статус пакета документов по сделке:
-    все шаблоны + загружены ли файлы менеджером.
+    все шаблоны + загружены ли файлы менеджером + подписанные директором.
     """
     # Все активные шаблоны
     templates = get_doc_templates(cur, active_only=True)
     # Уже загруженные для этой сделки
     cur.execute(f"""
         SELECT id, template_id, file_url, file_name, file_size_kb,
-               uploaded_at, status, notes
+               uploaded_at, status, notes,
+               signed_file_url, signed_file_name, signed_at,
+               payment_confirmed, manager_seen_signed
         FROM {SCHEMA}.contract_documents
         WHERE deal_id = %s
     """, (deal_id,))
@@ -1237,6 +1244,7 @@ def get_contract_docs(cur, deal_id: int):
             "description":   tpl["description"],
             "is_required":   tpl["is_required"],
             "sort_order":    tpl["sort_order"],
+            "template_version": tpl.get("version", 1),
             # Шаблон для скачивания
             "template_file_url":  tpl["file_url"],
             "template_file_name": tpl["file_name"],
@@ -1246,10 +1254,15 @@ def get_contract_docs(cur, deal_id: int):
             "file_name":  doc["file_name"] if doc else None,
             "status":     doc["status"]    if doc else "pending",
             "uploaded_at":doc["uploaded_at"] if doc else None,
+            # Подписанный директором вариант
+            "signed_file_url":  doc["signed_file_url"]  if doc else None,
+            "signed_file_name": doc["signed_file_name"] if doc else None,
+            "signed_at":        doc["signed_at"]         if doc else None,
+            "manager_seen_signed": doc["manager_seen_signed"] if doc else False,
         })
 
     all_required_uploaded = all(
-        r["status"] in ("uploaded", "approved")
+        r["status"] in ("uploaded", "approved", "review")
         for r in result if r["is_required"]
     )
     return {
@@ -1450,6 +1463,136 @@ def confirm_payment(cur, deal_id: int):
         deal_id=deal_id,
     )
     return {"deal_id": deal_id, "contract_status": "payment_confirmed", "stage": "planning"}, None
+
+def upload_signed_doc(cur, deal_id: int, template_id: int, body: dict):
+    """Директор загружает подписанный вариант документа и отправляет менеджеру."""
+    file_b64  = body["file_b64"]
+    file_name = body["file_name"]
+
+    cdn_url, size_kb = upload_file_to_s3(
+        file_b64,
+        f"deal_{deal_id}_signed_{template_id}_{file_name}",
+        "contract_docs"
+    )
+
+    cur.execute(f"""
+        UPDATE {SCHEMA}.contract_documents
+        SET signed_file_url=%s, signed_file_name=%s, signed_at=now(), manager_seen_signed=false
+        WHERE deal_id=%s AND template_id=%s
+        RETURNING id
+    """, (cdn_url, file_name, deal_id, template_id))
+    row = cur.fetchone()
+    if not row:
+        return None, "Документ не найден"
+
+    # Уведомляем менеджера о том, что подписанный документ готов
+    cur.execute(f"SELECT code, manager_id FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+    deal_row = cur.fetchone()
+    if deal_row:
+        deal_code, manager_id = deal_row
+        create_notification(cur,
+            type_="docs_signed_returned",
+            title=f"Подписанный документ готов: {deal_code}",
+            body_text="Директор подписал документ и отправил его вам. Скачайте подписанный вариант.",
+            role="crm_manager",
+            staff_id=manager_id,
+            deal_id=deal_id,
+        )
+    return {"doc_id": row[0], "signed_file_url": cdn_url}, None
+
+def confirm_doc_payment(cur, deal_id: int, template_id: int):
+    """Директор нажимает 'Оплата прошла' у конкретного документа."""
+    cur.execute(f"""
+        UPDATE {SCHEMA}.contract_documents
+        SET payment_confirmed=true
+        WHERE deal_id=%s AND template_id=%s
+        RETURNING id
+    """, (deal_id, template_id))
+    if not cur.fetchone():
+        return None, "Документ не найден"
+    return {"ok": True}, None
+
+def get_payout_deals(cur, manager_id: int = None):
+    """Сделки с подтверждённой оплатой для заявок на вознаграждение."""
+    where_mgr = f"AND d.manager_id = {int(manager_id)}" if manager_id else ""
+    cur.execute(f"""
+        SELECT d.id, d.code, d.budget, d.contract_status, d.signed_date,
+               c.name AS client_name, c.phone AS client_phone,
+               s.name AS manager_name,
+               sp.name AS serial_project_name,
+               pr.id AS payout_id, pr.status AS payout_status,
+               pr.amount AS payout_amount, pr.requested_at, pr.notes
+        FROM {SCHEMA}.deals d
+        LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
+        LEFT JOIN {SCHEMA}.staff s ON s.id = d.manager_id
+        LEFT JOIN {SCHEMA}.serial_projects sp ON sp.id = d.serial_project_id
+        LEFT JOIN {SCHEMA}.payout_requests pr ON pr.deal_id = d.id
+            AND (pr.manager_id = d.manager_id)
+        WHERE d.contract_status = 'payment_confirmed'
+        {where_mgr}
+        ORDER BY d.updated_at DESC
+    """)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+def create_payout_request(cur, deal_id: int, manager_id: int, body: dict):
+    """Менеджер подаёт заявку на выплату вознаграждения."""
+    amount = body.get("amount")
+    notes  = body.get("notes", "")
+    # Проверяем что нет активной заявки
+    cur.execute(f"""
+        SELECT id FROM {SCHEMA}.payout_requests
+        WHERE deal_id=%s AND manager_id=%s AND status NOT IN ('rejected')
+    """, (deal_id, manager_id))
+    if cur.fetchone():
+        return None, "Заявка по этой сделке уже подана"
+
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.payout_requests (deal_id, manager_id, amount, notes, status)
+        VALUES (%s, %s, %s, %s, 'pending')
+        RETURNING id
+    """, (deal_id, manager_id, amount, notes))
+    payout_id = cur.fetchone()[0]
+
+    # Уведомляем директора
+    cur.execute(f"SELECT code FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+    deal_code = (cur.fetchone() or [""])[0]
+    create_notification(cur,
+        type_="payout_requested",
+        title=f"Заявка на выплату: {deal_code}",
+        body_text=f"Менеджер запрашивает вознаграждение{f' ₽{int(amount):,}' if amount else ''}.",
+        role="director",
+        deal_id=deal_id,
+    )
+    return {"payout_id": payout_id, "ok": True}, None
+
+def update_payout_request(cur, payout_id: int, body: dict):
+    """Директор одобряет/отклоняет заявку на выплату."""
+    status = body["status"]  # approved | rejected
+    cur.execute(f"""
+        UPDATE {SCHEMA}.payout_requests
+        SET status=%s, reviewed_at=now(), notes=COALESCE(%s, notes)
+        WHERE id=%s
+        RETURNING deal_id, manager_id
+    """, (status, body.get("notes"), payout_id))
+    row = cur.fetchone()
+    if not row:
+        return None, "Заявка не найдена"
+    deal_id, manager_id = row
+
+    cur.execute(f"SELECT code FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+    deal_code = (cur.fetchone() or [""])[0]
+    notif_type = "payout_approved" if status == "approved" else "payout_rejected"
+    notif_text = "Ваша заявка на выплату одобрена!" if status == "approved" else "Заявка на выплату отклонена. Уточните детали."
+    create_notification(cur,
+        type_=notif_type,
+        title=f"Выплата {'одобрена' if status == 'approved' else 'отклонена'}: {deal_code}",
+        body_text=notif_text,
+        role="crm_manager",
+        staff_id=manager_id,
+        deal_id=deal_id,
+    )
+    return {"ok": True, "status": status}, None
 
 # ─── CONTRACTORS ─────────────────────────────────────────────────────────────
 
@@ -1879,7 +2022,7 @@ def handler(event: dict, context) -> dict:
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
               "stage_durations", "estimate_works", "estimate_materials", "estimate",
               "contractors", "documents", "doc_templates", "contract_docs",
-              "notifications"}
+              "notifications", "payout_requests"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -2195,6 +2338,43 @@ def handler(event: dict, context) -> dict:
                 elif action == "confirm_payment":
                     # Директор подтверждает оплату
                     result, error = confirm_payment(cur, deal_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+
+                elif action == "upload_signed":
+                    # Директор загружает подписанный вариант документа
+                    template_id = int(body["template_id"])
+                    result, error = upload_signed_doc(cur, deal_id, template_id, body)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+
+                elif action == "confirm_doc_payment":
+                    # Директор нажимает «Оплата прошла» у документа
+                    template_id = int(body["template_id"])
+                    result, error = confirm_doc_payment(cur, deal_id, template_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+
+        # ── PAYOUT REQUESTS ────────────────────────────────────────────────────
+        elif resource == "payout_requests":
+            if method == "GET":
+                manager_id = int(qs["manager_id"]) if qs.get("manager_id") else None
+                return ok({"deals": get_payout_deals(cur, manager_id)})
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "create":
+                    deal_id_pr = int(body["deal_id"])
+                    mgr_id     = int(body["manager_id"])
+                    result, error = create_payout_request(cur, deal_id_pr, mgr_id, body)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result, 201)
+                elif action == "update":
+                    payout_id = int(body["payout_id"])
+                    result, error = update_payout_request(cur, payout_id, body)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)

@@ -6,6 +6,7 @@ import LeadModal from "@/components/sales/LeadModal";
 import KpModal from "@/components/sales/KpModal";
 import ContractModal from "@/components/sales/ContractModal";
 import DealCard from "@/components/sales/DealCard";
+import PayoutTab from "@/components/sales/PayoutTab";
 
 interface Props { role: Role; }
 
@@ -33,6 +34,8 @@ export default function Sales({ role }: Props) {
 
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
+  const [tab, setTab] = useState<"funnel" | "payout">("funnel");
+  const [currentManagerId, setCurrentManagerId] = useState<number | undefined>();
 
   const notify = (msg: string) => {
     setSuccessMsg(msg);
@@ -47,7 +50,11 @@ export default function Sales({ role }: Props) {
   useEffect(() => {
     loadDeals();
     api.clients().then(setClients);
-    api.staff("crm_manager").then(setManagers);
+    api.staff("crm_manager").then(list => {
+      setManagers(list);
+      // Для упрощения: первый crm_manager — текущий (в реальном приложении бы брали из сессии)
+      if (role === "crm_manager" && list.length > 0) setCurrentManagerId(list[0].id);
+    });
     api.staff("realtor").then(setRealtors);
     api.serial_projects.list().then(setSerialProjects);
     api.stage_durations.list().then(setStageDurations);
@@ -100,6 +107,9 @@ export default function Sales({ role }: Props) {
   const totalBudget  = (stage: string) => dealsByStage(stage).reduce((s, d) => s + (d.budget || 0), 0);
   const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)} млн ₽` : `${n.toLocaleString("ru")} ₽`;
 
+  // Показываем вкладку выплат для менеджеров и директора
+  const showPayoutTab = ["crm_manager", "director"].includes(role);
+
   return (
     <div className="space-y-6 max-w-[1600px]">
       {/* Header */}
@@ -108,7 +118,7 @@ export default function Sales({ role }: Props) {
           <h1 className="text-xl font-semibold">Продажи и CRM</h1>
           <p className="text-hint mt-0.5">Воронка продаж · {activeDeals.length} активных сделок</p>
         </div>
-        {canEdit && (
+        {canEdit && tab === "funnel" && (
           <button
             onClick={() => setLeadModalOpen(true)}
             className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors"
@@ -119,6 +129,28 @@ export default function Sales({ role }: Props) {
         )}
       </div>
 
+      {/* Вкладки */}
+      {showPayoutTab && (
+        <div className="flex border-b border-border gap-1">
+          <button
+            onClick={() => setTab("funnel")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
+              tab === "funnel" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}>
+            <Icon name="Kanban" size={14} />
+            Воронка продаж
+          </button>
+          <button
+            onClick={() => setTab("payout")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
+              tab === "payout" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}>
+            <Icon name="Wallet" size={14} />
+            Заявка на выплату
+          </button>
+        </div>
+      )}
+
       {/* Success notification */}
       {successMsg && (
         <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-5 py-3 flex items-center gap-2 animate-fade-in">
@@ -127,8 +159,13 @@ export default function Sales({ role }: Props) {
         </div>
       )}
 
+      {/* Вкладка: Заявка на выплату */}
+      {tab === "payout" && showPayoutTab && (
+        <PayoutTab role={role} managerId={currentManagerId} />
+      )}
+
       {/* Воронка — 4 колонки */}
-      {loading ? (
+      {tab === "funnel" && loading && (
         <div className="grid grid-cols-4 gap-4">
           {STAGES.map(s => (
             <div key={s.key} className="bg-white rounded-xl border border-border p-4 space-y-3">
@@ -137,7 +174,8 @@ export default function Sales({ role }: Props) {
             </div>
           ))}
         </div>
-      ) : (
+      )}
+      {tab === "funnel" && !loading && (
         <div className="grid grid-cols-4 gap-4 items-start">
           {STAGES.map(stage => {
             const stageDealList = dealsByStage(stage.key);
@@ -195,8 +233,8 @@ export default function Sales({ role }: Props) {
         </div>
       )}
 
-      {/* Отказы */}
-      {lostDeals.length > 0 && (
+      {/* Отказы (только в воронке) */}
+      {tab === "funnel" && lostDeals.length > 0 && (
         <div className="bg-white rounded-xl border border-border">
           <div className="px-5 py-3 border-b border-border flex items-center gap-2">
             <Icon name="XCircle" size={14} className="text-muted-foreground" />

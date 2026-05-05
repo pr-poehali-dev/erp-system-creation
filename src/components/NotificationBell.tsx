@@ -4,18 +4,26 @@ import { api, Notification } from "@/lib/api";
 import { Role } from "@/App";
 
 const TYPE_ICON: Record<string, string> = {
-  docs_for_review:    "FileSearch",
-  docs_approved:      "CheckCircle",
-  docs_rejected:      "XCircle",
-  payment_pending:    "Clock",
-  payment_confirmed:  "BadgeCheck",
+  docs_for_review:      "FileSearch",
+  docs_approved:        "CheckCircle",
+  docs_rejected:        "XCircle",
+  docs_signed_returned: "FileCheck",
+  payment_pending:      "Clock",
+  payment_confirmed:    "BadgeCheck",
+  payout_requested:     "Wallet",
+  payout_approved:      "PartyPopper",
+  payout_rejected:      "XCircle",
 };
 const TYPE_COLOR: Record<string, string> = {
-  docs_for_review:    "text-blue-500",
-  docs_approved:      "text-emerald-500",
-  docs_rejected:      "text-red-500",
-  payment_pending:    "text-amber-500",
-  payment_confirmed:  "text-emerald-600",
+  docs_for_review:      "text-blue-500",
+  docs_approved:        "text-emerald-500",
+  docs_rejected:        "text-red-500",
+  docs_signed_returned: "text-violet-500",
+  payment_pending:      "text-amber-500",
+  payment_confirmed:    "text-emerald-600",
+  payout_requested:     "text-blue-500",
+  payout_approved:      "text-emerald-600",
+  payout_rejected:      "text-red-500",
 };
 
 function timeAgo(iso: string) {
