@@ -23,14 +23,12 @@ export default function AdminStageDurations() {
     setSaving(true);
     try {
       const stageName = stages.find(s => s.stage_num === editing.num)?.name ?? "";
-      const res = await api.stage_durations.update(editing.num, Number(editing.val));
+      await api.stage_durations.update(editing.num, Number(editing.val));
       const updated = await api.stage_durations.list();
       setStages(updated);
       setEditing(null);
-      // Показываем уведомление о пересчёте
-      const count = (res as { recalculated_projects?: number }).recalculated_projects ?? 0;
-      setLastRecalc({ count, stageName });
-      setTimeout(() => setLastRecalc(null), 6000);
+      setLastRecalc({ count: 0, stageName });
+      setTimeout(() => setLastRecalc(null), 5000);
     } finally { setSaving(false); }
   };
 
@@ -51,10 +49,7 @@ export default function AdminStageDurations() {
         <div className="px-5 py-3 bg-emerald-50 border-b border-emerald-200 flex items-center gap-2 animate-fade-in">
           <Icon name="CheckCircle" size={14} className="text-emerald-600 shrink-0" />
           <span className="text-[12px] text-emerald-800">
-            <strong>«{lastRecalc.stageName}»</strong> обновлён.
-            {lastRecalc.count > 0
-              ? ` Гант-планы пересчитаны в ${lastRecalc.count} активных проект${lastRecalc.count === 1 ? "е" : lastRecalc.count < 5 ? "ах" : "ах"}.`
-              : " Активных проектов для пересчёта нет."}
+            Норматив <strong>«{lastRecalc.stageName}»</strong> сохранён. Применится к новым проектам.
           </span>
         </div>
       )}
@@ -105,8 +100,7 @@ export default function AdminStageDurations() {
       <div className="px-5 py-3 bg-blue-50 border-t border-blue-100">
         <div className="text-[12px] text-blue-700 flex items-center gap-2">
           <Icon name="Info" size={13} className="shrink-0" />
-          При изменении норматива Гант-планы всех активных проектов пересчитываются автоматически.
-          Этапы которые уже начаты — сдвигаются только по дате окончания.
+          Изменения применяются к новым сделкам (лид и КП). Активные проекты в строительстве не затрагиваются.
         </div>
       </div>
     </div>

@@ -191,6 +191,7 @@ export interface Deal {
   kp_notes: string | null;
   address: string | null;
   planned_start_date: string | null;
+  contract_status: string; // none | docs_uploaded | docs_review | docs_approved | payment_pending | payment_confirmed
 }
 
 export interface StageDuration {

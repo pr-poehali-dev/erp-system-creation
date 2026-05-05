@@ -124,7 +124,8 @@ def get_deals(cur):
                cfg.price_coefficient,
                d.selected_stages, d.signed_date, d.buffer_days,
                d.kp_notes, d.address, d.planned_start_date,
-               d.serial_project_id, d.configuration_id
+               d.serial_project_id, d.configuration_id,
+               COALESCE(d.contract_status, 'none') as contract_status
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id

@@ -245,6 +245,7 @@ export default function Sales({ role }: Props) {
       {contractDeal && (
         <ContractModal
           deal={contractDeal}
+          role={role}
           saving={saving}
           onClose={() => setContractDeal(null)}
           onSubmit={(body) => handleSignContract(contractDeal, body)}

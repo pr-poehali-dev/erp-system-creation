@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import Icon from "@/components/ui/icon";
 import { Deal, SlotItem, ContractDocItem, ContractDocsPackage, api } from "@/lib/api";
+import { Role } from "@/App";
 
 const MONTH_NAMES = ["","Январь","Февраль","Март","Апрель","Май","Июнь",
   "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"];
@@ -113,12 +114,13 @@ function stepFromStatus(status: string): Step {
 
 interface Props {
   deal: Deal;
+  role: Role;
   saving: boolean;
   onClose: () => void;
   onSubmit: (body: object) => void;
 }
 
-export default function ContractModal({ deal, saving, onClose, onSubmit }: Props) {
+export default function ContractModal({ deal, role, saving, onClose, onSubmit }: Props) {
   const today = new Date().toISOString().slice(0, 10);
   const [step, setStep]               = useState<Step>("download");
   const [docPackage, setDocPackage]   = useState<ContractDocsPackage | null>(null);
@@ -136,9 +138,9 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
   const [signedDate, setSignedDate] = useState(today);
   const [error, setError]           = useState("");
 
-  const isSerial = deal.project_type === "serial" || !deal.project_type;
-  const cfgDur   = deal.configuration_duration || 115;
-  const isDirector = false; // в реальности прокидывается через роль
+  const isSerial    = deal.project_type === "serial" || !deal.project_type;
+  const cfgDur      = deal.configuration_duration || 115;
+  const isDirector  = role === "director";
 
   const reloadDocs = () => {
     api.contract_docs.get(deal.id).then(pkg => {
@@ -386,31 +388,38 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
                 </div>
                 <div className="text-[12px] text-blue-800">Документы отправлены. Директор получил уведомление и проверяет пакет.</div>
 
-                {/* Директор видит эти кнопки */}
-                <div className="pt-2 border-t border-blue-200 space-y-2">
-                  <div className="text-[11px] text-blue-700 font-medium">Для директора:</div>
-                  <div className="flex gap-2">
-                    <button type="button" onClick={handleApprove} disabled={submitting}
-                      className="flex-1 px-3 py-2 bg-emerald-500 text-white rounded-lg text-[12px] font-medium hover:bg-emerald-600 disabled:opacity-50">
-                      {submitting ? "..." : "✓ Подтвердить документы"}
-                    </button>
-                    <button type="button" onClick={() => setShowReject(v => !v)}
-                      className="px-3 py-2 border border-red-200 text-red-600 rounded-lg text-[12px] hover:bg-red-50 transition-colors">
-                      Отклонить
-                    </button>
-                  </div>
-                  {showReject && (
-                    <div className="space-y-2">
-                      <textarea value={rejReason} onChange={e => setRejReason(e.target.value)} rows={2}
-                        placeholder="Причина отклонения..."
-                        className="w-full border border-red-200 rounded-lg px-3 py-2 text-[12px] outline-none focus:ring-1 focus:ring-red-400 resize-none" />
-                      <button type="button" onClick={handleReject} disabled={!rejReason.trim() || submitting}
-                        className="w-full px-3 py-2 bg-red-500 text-white rounded-lg text-[12px] font-medium disabled:opacity-40">
-                        Отклонить и вернуть менеджеру
+                {/* Только директор видит кнопки подтверждения */}
+                {isDirector ? (
+                  <div className="pt-2 border-t border-blue-200 space-y-2">
+                    <div className="text-[11px] text-blue-700 font-medium">Проверьте документы:</div>
+                    <div className="flex gap-2">
+                      <button type="button" onClick={handleApprove} disabled={submitting}
+                        className="flex-1 px-3 py-2 bg-emerald-500 text-white rounded-lg text-[12px] font-medium hover:bg-emerald-600 disabled:opacity-50">
+                        {submitting ? "..." : "✓ Подтвердить"}
+                      </button>
+                      <button type="button" onClick={() => setShowReject(v => !v)}
+                        className="px-3 py-2 border border-red-200 text-red-600 rounded-lg text-[12px] hover:bg-red-50 transition-colors">
+                        Отклонить
                       </button>
                     </div>
-                  )}
-                </div>
+                    {showReject && (
+                      <div className="space-y-2">
+                        <textarea value={rejReason} onChange={e => setRejReason(e.target.value)} rows={2}
+                          placeholder="Причина отклонения..."
+                          className="w-full border border-red-200 rounded-lg px-3 py-2 text-[12px] outline-none focus:ring-1 focus:ring-red-400 resize-none" />
+                        <button type="button" onClick={handleReject} disabled={!rejReason.trim() || submitting}
+                          className="w-full px-3 py-2 bg-red-500 text-white rounded-lg text-[12px] font-medium disabled:opacity-40">
+                          Отклонить и вернуть менеджеру
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-[12px] text-blue-700 mt-1 flex items-center gap-1.5">
+                    <Icon name="Clock" size={12} className="shrink-0" />
+                    Ожидайте — директор проверяет документы
+                  </div>
+                )}
               </div>
             )}
 
@@ -452,14 +461,21 @@ export default function ContractModal({ deal, saving, onClose, onSubmit }: Props
                   Документы подтверждены. Ожидайте поступления аванса от заказчика.
                   Директор подтвердит оплату после получения средств.
                 </div>
-                {/* Директор подтверждает */}
-                <div className="pt-2 border-t border-amber-200">
-                  <div className="text-[11px] text-amber-700 font-medium mb-2">Для директора — после получения оплаты:</div>
-                  <button type="button" onClick={handleConfirmPayment} disabled={submitting}
-                    className="w-full px-4 py-2.5 bg-emerald-500 text-white rounded-lg text-[13px] font-semibold hover:bg-emerald-600 disabled:opacity-50">
-                    {submitting ? "..." : "✓ Подтвердить получение оплаты"}
-                  </button>
-                </div>
+                {/* Только директор подтверждает оплату */}
+                {isDirector ? (
+                  <div className="pt-2 border-t border-amber-200">
+                    <div className="text-[11px] text-amber-700 font-medium mb-2">После получения аванса от заказчика:</div>
+                    <button type="button" onClick={handleConfirmPayment} disabled={submitting}
+                      className="w-full px-4 py-2.5 bg-emerald-500 text-white rounded-lg text-[13px] font-semibold hover:bg-emerald-600 disabled:opacity-50">
+                      {submitting ? "..." : "✓ Подтвердить получение оплаты"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-[12px] text-amber-700 mt-1 flex items-center gap-1.5 pt-2 border-t border-amber-200">
+                    <Icon name="Clock" size={12} className="shrink-0" />
+                    Ожидайте — директор подтвердит поступление оплаты
+                  </div>
+                )}
               </div>
             )}
 
