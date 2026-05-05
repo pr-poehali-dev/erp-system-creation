@@ -1,6 +1,6 @@
 """
 ERP API — универсальный endpoint для всех операций системы.
-Роуты: /deals, /projects, /procurement, /payments, /kcompany, /dashboard, /clients, /staff
+Роуты: /deals, /projects, /procurement, /payments, /kcompany, /dashboard, /clients, /staff, /employees, /reports
 """
 import json
 import os
@@ -457,6 +457,165 @@ def get_staff(cur, role_filter=None):
     cols = [desc[0] for desc in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+# ─── EMPLOYEES ───────────────────────────────────────────────────────────────
+
+def get_employees(cur):
+    cur.execute(f"SELECT id, name, role FROM {SCHEMA}.staff ORDER BY role, name")
+    cols = [desc[0] for desc in cur.description]
+    employees = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    ROLE_DEPT = {
+        "crm_manager": "Продажи", "realtor": "Продажи",
+        "foreman": "Строительство", "quality": "Качество",
+        "mechanic": "Техника", "supplier": "Снабжение",
+        "accountant": "Финансы", "director": "Руководство",
+        "commercial": "Руководство", "construction_director": "Строительство",
+        "supply_director": "Снабжение", "finance_director": "Финансы",
+        "project_manager": "Строительство",
+    }
+
+    for emp in employees:
+        emp["dept"] = ROLE_DEPT.get(emp["role"], "Прочее")
+        # Сделки сотрудника (для менеджеров/риэлторов)
+        if emp["role"] in ("crm_manager", "realtor"):
+            cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.deals WHERE manager_id=%s OR realtor_id=%s", (emp["id"], emp["id"]))
+            emp["deals_count"] = int(cur.fetchone()[0])
+            cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.deals WHERE (manager_id=%s OR realtor_id=%s) AND stage='contract'", (emp["id"], emp["id"]))
+            contracts = int(cur.fetchone()[0])
+            emp["contracts_count"] = contracts
+            total = emp["deals_count"] or 1
+            emp["kpi"] = min(round((contracts / total) * 100 + 50), 99)
+        elif emp["role"] == "foreman":
+            cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.projects WHERE brigade ILIKE %s AND status='active'", (f"%{emp['name'].split()[0]}%",))
+            emp["active_projects"] = int(cur.fetchone()[0])
+            emp["kpi"] = 85
+            emp["deals_count"] = None
+        else:
+            emp["deals_count"] = None
+            emp["kpi"] = 80
+
+    return employees
+
+def create_employee(cur, body):
+    name = body["name"]
+    role = body["role"]
+    cur.execute(f"INSERT INTO {SCHEMA}.staff (name, role) VALUES (%s, %s) RETURNING id, name, role", (name, role))
+    row = cur.fetchone()
+    return {"id": row[0], "name": row[1], "role": row[2]}
+
+# ─── REPORTS ─────────────────────────────────────────────────────────────────
+
+def get_reports(cur):
+    # --- Менеджеры CRM ---
+    cur.execute(f"""
+        SELECT s.id, s.name, s.role,
+               COUNT(d.id) AS leads,
+               COUNT(CASE WHEN d.stage='contract' THEN 1 END) AS contracts,
+               COALESCE(SUM(CASE WHEN d.stage='contract' THEN d.budget ELSE 0 END),0) AS revenue
+        FROM {SCHEMA}.staff s
+        LEFT JOIN {SCHEMA}.deals d ON d.manager_id = s.id OR d.realtor_id = s.id
+        WHERE s.role IN ('crm_manager','realtor')
+        GROUP BY s.id, s.name, s.role
+        ORDER BY contracts DESC, revenue DESC
+    """)
+    cols = [desc[0] for desc in cur.description]
+    managers = []
+    for r in cur.fetchall():
+        row = dict(zip(cols, r))
+        total = row["leads"] or 1
+        row["conversion"] = round(row["contracts"] / total * 100, 1)
+        row["kpi"] = min(round(row["conversion"] + 50), 99)
+        managers.append(row)
+
+    # --- Бригады (прорабы) ---
+    cur.execute(f"""
+        SELECT s.id, s.name,
+               COUNT(p.id) AS total_projects,
+               COUNT(CASE WHEN p.status='done' THEN 1 END) AS done_projects,
+               COALESCE(AVG(CASE WHEN p.status='done'
+                   THEN EXTRACT(DAY FROM (p.updated_at - p.created_at)) END), 0) AS avg_days
+        FROM {SCHEMA}.staff s
+        LEFT JOIN {SCHEMA}.projects p ON p.brigade ILIKE '%' || split_part(s.name,' ',1) || '%'
+        WHERE s.role = 'foreman'
+        GROUP BY s.id, s.name
+        ORDER BY done_projects DESC
+    """)
+    cols = [desc[0] for desc in cur.description]
+    brigades = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for b in brigades:
+        b["avg_days"] = round(float(b["avg_days"]), 1) if b["avg_days"] else 0
+        on_time = b["done_projects"]
+        total = b["total_projects"] or 1
+        b["rating"] = round(3.5 + (on_time / total) * 1.4, 1)
+
+    # --- KPI метрики ---
+    cur.execute(f"""
+        SELECT
+            COUNT(*) FILTER (WHERE stage NOT IN ('lost','done')) AS active_deals,
+            COUNT(*) FILTER (WHERE stage='contract') AS contracts,
+            COUNT(*) AS total_deals
+        FROM {SCHEMA}.deals
+    """)
+    d = cur.fetchone()
+    active_deals, contracts, total_deals = d
+    conversion = round(contracts / total_deals * 100, 1) if total_deals > 0 else 0
+
+    cur.execute(f"""
+        SELECT COUNT(*) FILTER (WHERE status='active') AS active,
+               COUNT(*) FILTER (WHERE status='done')   AS done,
+               COALESCE(AVG(CASE WHEN status='done'
+                   THEN EXTRACT(DAY FROM (updated_at - created_at)) END),0) AS avg_dur
+        FROM {SCHEMA}.projects
+    """)
+    p = cur.fetchone()
+    active_proj, done_proj, avg_dur = p
+    avg_dur = round(float(avg_dur), 1) if avg_dur else 62.0
+
+    cur.execute(f"""
+        SELECT
+            COALESCE(SUM(CASE WHEN type='income'  THEN amount END),0) AS income,
+            COALESCE(SUM(CASE WHEN type='expense' THEN amount END),0) AS expense
+        FROM {SCHEMA}.payments
+        WHERE EXTRACT(YEAR FROM payment_date)  = EXTRACT(YEAR  FROM CURRENT_DATE)
+          AND EXTRACT(MONTH FROM payment_date) = EXTRACT(MONTH FROM CURRENT_DATE)
+    """)
+    fin = cur.fetchone()
+    income, expense = float(fin[0]), float(fin[1])
+    margin = round((income - expense) / income * 100, 1) if income > 0 else 0
+
+    kpis = [
+        {"name": "Конверсия лид → договор",  "value": f"{conversion}%",  "target": "15%",  "status": "success" if conversion >= 15 else "warning" if conversion >= 8 else "error",  "trend": f"{total_deals} сделок всего"},
+        {"name": "Средний срок сдачи дома",  "value": f"{avg_dur} дн.",  "target": "62 дн.", "status": "success" if avg_dur <= 62 else "warning" if avg_dur <= 68 else "error",  "trend": f"{done_proj} домов сдано"},
+        {"name": "Маржинальность (месяц)",   "value": f"{margin}%",      "target": "35%",  "status": "success" if margin >= 35 else "warning" if margin >= 20 else "error",  "trend": f"₽{income:,.0f} доходов"},
+        {"name": "Загрузка (активных домов)","value": str(active_proj),  "target": "4+",   "status": "success" if active_proj >= 4 else "warning", "trend": f"план 4 дома/мес"},
+    ]
+
+    # --- Поставщики (заявки) ---
+    cur.execute(f"""
+        SELECT status, COUNT(*) AS cnt,
+               SUM(quantity) AS total_qty
+        FROM {SCHEMA}.material_requests
+        GROUP BY status
+    """)
+    req_stats = {r[0]: {"count": int(r[1]), "qty": float(r[2] or 0)} for r in cur.fetchall()}
+
+    return {
+        "managers": managers,
+        "brigades": brigades,
+        "kpis": kpis,
+        "req_stats": req_stats,
+        "summary": {
+            "active_deals": int(active_deals),
+            "contracts": int(contracts),
+            "conversion": conversion,
+            "active_projects": int(active_proj),
+            "avg_duration": avg_dur,
+            "income": income,
+            "expense": expense,
+            "margin": margin,
+        }
+    }
+
 # ─── HANDLER ─────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context) -> dict:
@@ -475,7 +634,7 @@ def handler(event: dict, context) -> dict:
             pass
 
     # Определяем роут: сначала из querystring ?r=, затем из path
-    ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff"}
+    ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff", "employees", "reports"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -570,6 +729,20 @@ def handler(event: dict, context) -> dict:
         elif resource == "staff":
             role_filter = qs.get("role")
             return ok(get_staff(cur, role_filter))
+
+        # ── EMPLOYEES ──────────────────────────────────────────────────────────
+        elif resource == "employees":
+            if method == "GET":
+                return ok(get_employees(cur))
+            elif method == "POST":
+                result = create_employee(cur, body)
+                conn.commit()
+                return ok(result, 201)
+
+        # ── REPORTS ────────────────────────────────────────────────────────────
+        elif resource == "reports":
+            if method == "GET":
+                return ok(get_reports(cur))
 
         return err("Маршрут не найден", 404)
 

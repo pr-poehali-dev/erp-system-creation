@@ -49,6 +49,15 @@ export const api = {
     last: () => request<KCompany>("kcompany"),
     calc: () => request<KCompany>("kcompany", "GET", undefined, { action: "calc" }),
   },
+
+  employees: {
+    list: () => request<Employee[]>("employees"),
+    create: (body: object) => request<any>("employees", "POST", body),
+  },
+
+  reports: {
+    get: () => request<ReportsData>("reports"),
+  },
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -175,4 +184,60 @@ export interface DashboardData {
   revenue_month: number;
   pending_requests: number;
   k_company: KCompany | null;
+}
+
+export interface Employee {
+  id: number;
+  name: string;
+  role: string;
+  dept: string;
+  kpi: number;
+  deals_count: number | null;
+  contracts_count?: number;
+  active_projects?: number;
+}
+
+export interface ReportsKPI {
+  name: string;
+  value: string;
+  target: string;
+  status: "success" | "warning" | "error";
+  trend: string;
+}
+
+export interface ReportsManager {
+  id: number;
+  name: string;
+  role: string;
+  leads: number;
+  contracts: number;
+  revenue: number;
+  conversion: number;
+  kpi: number;
+}
+
+export interface ReportsBrigade {
+  id: number;
+  name: string;
+  total_projects: number;
+  done_projects: number;
+  avg_days: number;
+  rating: number;
+}
+
+export interface ReportsData {
+  kpis: ReportsKPI[];
+  managers: ReportsManager[];
+  brigades: ReportsBrigade[];
+  summary: {
+    active_deals: number;
+    contracts: number;
+    conversion: number;
+    active_projects: number;
+    avg_duration: number;
+    income: number;
+    expense: number;
+    margin: number;
+  };
+  req_stats: Record<string, { count: number; qty: number }>;
 }

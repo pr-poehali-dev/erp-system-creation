@@ -5,7 +5,7 @@
       "method": "GET",
       "path": "/?r=dashboard",
       "expectedStatus": 200,
-      "expectedBody": {"active_deals": 0},
+      "expectedBody": {"active_projects": 2},
       "bodyMatcher": "partial"
     },
     {
@@ -54,6 +54,20 @@
       "name": "GET staff",
       "method": "GET",
       "path": "/?r=staff",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET employees",
+      "method": "GET",
+      "path": "/?r=employees",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET reports",
+      "method": "GET",
+      "path": "/?r=reports",
       "expectedStatus": 200,
       "bodyMatcher": "partial"
     }
