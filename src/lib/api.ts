@@ -125,11 +125,23 @@ export const api = {
   },
 
   contract_docs: {
-    // Получить статус пакета по сделке
     get: (deal_id: number) => request<ContractDocsPackage>("contract_docs", "GET", undefined, { deal_id: String(deal_id) }),
-    // Загрузить файл (base64)
     upload: (deal_id: number, template_id: number, file_b64: string, file_name: string) =>
-      request<any>("contract_docs", "POST", { deal_id, template_id, file_b64, file_name }),
+      request<any>("contract_docs", "POST", { action: "upload", deal_id, template_id, file_b64, file_name }),
+    submitReview: (deal_id: number) =>
+      request<any>("contract_docs", "POST", { action: "submit_review", deal_id }),
+    approve: (deal_id: number, approved: boolean, reject_reason?: string) =>
+      request<any>("contract_docs", "POST", { action: "approve", deal_id, approved, reject_reason }),
+    confirmPayment: (deal_id: number) =>
+      request<any>("contract_docs", "POST", { action: "confirm_payment", deal_id }),
+  },
+
+  notifications: {
+    list: (role?: string, unread?: boolean) =>
+      request<NotificationsResponse>("notifications", "GET", undefined,
+        { ...(role ? { role } : {}), ...(unread ? { unread: "1" } : {}) }),
+    markRead: (ids: number[]) =>
+      request<any>("notifications", "POST", { action: "read", ids }),
   },
 };
 
@@ -511,4 +523,23 @@ export interface ContractDocsPackage {
   all_required_done: boolean;
   total: number;
   uploaded_count: number;
+  contract_status: string; // none | docs_uploaded | docs_review | docs_approved | payment_pending | payment_confirmed
+}
+
+export interface Notification {
+  id: number;
+  type: string; // docs_for_review | docs_approved | docs_rejected | payment_pending | payment_confirmed
+  title: string;
+  body: string | null;
+  role: string | null;
+  staff_id: number | null;
+  deal_id: number | null;
+  deal_code: string | null;
+  is_read: boolean;
+  created_at: string;
+}
+
+export interface NotificationsResponse {
+  notifications: Notification[];
+  unread_count: number;
 }

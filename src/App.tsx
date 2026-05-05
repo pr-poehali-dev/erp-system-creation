@@ -18,6 +18,7 @@ import Employees from "@/pages/Employees";
 import Reports from "@/pages/Reports";
 import Admin from "@/pages/Admin";
 import Estimate from "@/pages/Estimate";
+import NotificationBell from "@/components/NotificationBell";
 
 export type Role =
   | "director"
@@ -201,7 +202,10 @@ function ERPApp() {
           ))}
         </nav>
 
-        <div className="relative ml-2 shrink-0">
+        <div className="flex items-center gap-2 ml-2 shrink-0">
+          <NotificationBell role={currentRole} />
+
+          <div className="relative">
           <button
             onClick={() => setRoleMenuOpen(!roleMenuOpen)}
             className="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-lg border border-border hover:bg-secondary transition-all text-[13px]"
@@ -235,6 +239,7 @@ function ERPApp() {
               ))}
             </div>
           )}
+          </div>
         </div>
       </header>
 

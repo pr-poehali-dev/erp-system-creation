@@ -847,6 +847,8 @@ def get_serial_projects(cur):
     """)
     cols = [desc[0] for desc in cur.description]
     projects = [dict(zip(cols, r)) for r in cur.fetchall()]
+    # Нормативы для пересчёта duration_days комплектаций
+    stage_norms = get_stage_durations(cur)
     for p in projects:
         cur.execute(f"""
             SELECT id, name, description, price_coefficient, duration_days, included_stages
@@ -855,10 +857,22 @@ def get_serial_projects(cur):
             ORDER BY duration_days
         """, (p["id"],))
         ccols = [desc[0] for desc in cur.description]
-        p["configurations"] = [dict(zip(ccols, r)) for r in cur.fetchall()]
+        cfgs = [dict(zip(ccols, r)) for r in cur.fetchall()]
+        # Пересчитываем duration_days из актуальных нормативов
+        for cfg in cfgs:
+            included = list(cfg["included_stages"]) if cfg["included_stages"] else []
+            if included:
+                filtered = [s for s in stage_norms if s["stage_num"] in included]
+                if filtered:
+                    plan = _build_plan_from_norms(date(2000, 1, 1), filtered)
+                    if plan:
+                        max_end = max(pp[4] for pp in plan)
+                        cfg["duration_days"] = (max_end - date(2000, 1, 1)).days + 1
+        p["configurations"] = cfgs
     return projects
 
 def get_configurations(cur, serial_project_id):
+    """Возвращает комплектации. duration_days пересчитывается из актуальных нормативов stage_durations."""
     cur.execute(f"""
         SELECT id, name, description, price_coefficient, duration_days, included_stages
         FROM {SCHEMA}.configurations
@@ -866,7 +880,20 @@ def get_configurations(cur, serial_project_id):
         ORDER BY duration_days
     """, (serial_project_id,))
     cols = [desc[0] for desc in cur.description]
-    return [dict(zip(cols, r)) for r in cur.fetchall()]
+    cfgs = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    # Пересчитываем duration_days из актуальных нормативов (чтобы отражать изменения директора)
+    stage_norms = get_stage_durations(cur)
+    for cfg in cfgs:
+        included = list(cfg["included_stages"]) if cfg["included_stages"] else []
+        if included:
+            filtered = [s for s in stage_norms if s["stage_num"] in included]
+            if filtered:
+                plan = _build_plan_from_norms(date(2000, 1, 1), filtered)
+                if plan:
+                    max_end = max(p[4] for p in plan)
+                    cfg["duration_days"] = (max_end - date(2000, 1, 1)).days + 1
+    return cfgs
 
 def create_serial_project(cur, body):
     name  = body["name"]
@@ -1044,6 +1071,53 @@ def upsert_estimate_row(cur, table: str, body: dict):
             """, (sp_id, snum, name, unit, qty, price, supplier, notes, sort))
     row = cur.fetchone()
     return {"id": row[0]} if row else {"id": None}
+
+# ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
+
+def create_notification(cur, type_: str, title: str, body_text: str = "",
+                        role: str = None, staff_id: int = None, deal_id: int = None):
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.notifications (type, title, body, role, staff_id, deal_id)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (type_, title, body_text, role, staff_id, deal_id))
+    return cur.fetchone()[0]
+
+def get_notifications(cur, role: str = None, staff_id: int = None, unread_only: bool = False):
+    wheres, vals = ["1=1"], []
+    if role:
+        wheres.append("(n.role=%s OR n.role IS NULL)"); vals.append(role)
+    if staff_id:
+        wheres.append("(n.staff_id=%s OR n.staff_id IS NULL)"); vals.append(staff_id)
+    if unread_only:
+        wheres.append("n.is_read=FALSE")
+    cur.execute(f"""
+        SELECT n.id, n.type, n.title, n.body, n.role, n.staff_id,
+               n.deal_id, n.is_read, n.created_at,
+               d.code as deal_code
+        FROM {SCHEMA}.notifications n
+        LEFT JOIN {SCHEMA}.deals d ON d.id = n.deal_id
+        WHERE {' AND '.join(wheres)}
+        ORDER BY n.created_at DESC
+        LIMIT 50
+    """, vals)
+    cols = [x[0] for x in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+def mark_notifications_read(cur, notif_ids: list):
+    if not notif_ids:
+        return
+    placeholders = ",".join(["%s"] * len(notif_ids))
+    cur.execute(f"UPDATE {SCHEMA}.notifications SET is_read=TRUE WHERE id IN ({placeholders})", notif_ids)
+
+def get_unread_count(cur, role: str = None, staff_id: int = None):
+    wheres, vals = ["is_read=FALSE"], []
+    if role:
+        wheres.append("(role=%s OR role IS NULL)"); vals.append(role)
+    if staff_id:
+        wheres.append("(staff_id=%s OR staff_id IS NULL)"); vals.append(staff_id)
+    cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.notifications WHERE {' AND '.join(wheres)}", vals)
+    return int(cur.fetchone()[0])
 
 # ─── S3 HELPER ───────────────────────────────────────────────────────────────
 
@@ -1238,6 +1312,143 @@ def upload_contract_doc(cur, deal_id: int, template_id: int, body: dict):
           deal_id, cdn_url, file_name, size_kb))
 
     return {"doc_id": doc_id, "file_url": cdn_url, "file_name": file_name}
+
+def submit_docs_for_review(cur, deal_id: int):
+    """
+    Менеджер отправляет пакет документов на проверку директору (шаг 2→3).
+    Устанавливает статус пакета 'docs_review', уведомляет директора.
+    """
+    # Проверяем что все обязательные загружены
+    pkg = get_contract_docs(cur, deal_id)
+    if not pkg["all_required_done"]:
+        return None, "Загрузите все обязательные документы перед отправкой"
+
+    # Переводим все uploaded → review
+    cur.execute(f"""
+        UPDATE {SCHEMA}.contract_documents
+        SET status='review'
+        WHERE deal_id=%s AND status='uploaded'
+    """, (deal_id,))
+
+    # Обновляем статус сделки
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals SET contract_status='docs_review', updated_at=now() WHERE id=%s
+        RETURNING code, client_id
+    """, (deal_id,))
+    row = cur.fetchone()
+    deal_code = row[0] if row else ""
+
+    # Уведомление директору
+    create_notification(cur,
+        type_="docs_for_review",
+        title=f"Документы на проверку: {deal_code}",
+        body_text="Менеджер загрузил пакет документов и ожидает проверки.",
+        role="director",
+        deal_id=deal_id,
+    )
+    return {"deal_id": deal_id, "contract_status": "docs_review"}, None
+
+def approve_docs(cur, deal_id: int, approved: bool, reject_reason: str = ""):
+    """
+    Директор подтверждает или отклоняет документы (шаг 3).
+    approved=True → статус 'docs_approved' + уведомление менеджеру.
+    approved=False → статус 'docs_rejected' + причина отклонения.
+    """
+    new_doc_status = "approved" if approved else "rejected"
+    new_deal_status = "docs_approved" if approved else "docs_uploaded"
+
+    cur.execute(f"""
+        UPDATE {SCHEMA}.contract_documents
+        SET status=%s, reviewed_at=now(), reject_reason=%s
+        WHERE deal_id=%s AND status='review'
+    """, (new_doc_status, reject_reason or None, deal_id))
+
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals SET contract_status=%s, updated_at=now() WHERE id=%s
+        RETURNING code
+    """, (new_deal_status, deal_id))
+    deal_code = (cur.fetchone() or [""])[0]
+
+    # Находим менеджера сделки
+    cur.execute(f"SELECT manager_id FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+    manager_row = cur.fetchone()
+
+    if approved:
+        create_notification(cur,
+            type_="docs_approved",
+            title=f"Документы подтверждены: {deal_code}",
+            body_text="Директор подтвердил документы. Переходите к ожиданию оплаты.",
+            role="crm_manager",
+            staff_id=manager_row[0] if manager_row else None,
+            deal_id=deal_id,
+        )
+    else:
+        create_notification(cur,
+            type_="docs_rejected",
+            title=f"Документы отклонены: {deal_code}",
+            body_text=f"Причина: {reject_reason}. Исправьте и загрузите повторно.",
+            role="crm_manager",
+            staff_id=manager_row[0] if manager_row else None,
+            deal_id=deal_id,
+        )
+    return {"deal_id": deal_id, "contract_status": new_deal_status, "approved": approved}, None
+
+def set_payment_pending(cur, deal_id: int):
+    """
+    Переводим сделку в ожидание оплаты (шаг 3→4).
+    Вызывается директором после approve_docs или отдельно.
+    """
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals SET contract_status='payment_pending', updated_at=now() WHERE id=%s
+        RETURNING code, manager_id
+    """, (deal_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Сделка не найдена"
+    deal_code, manager_id = row
+
+    create_notification(cur,
+        type_="payment_pending",
+        title=f"Ожидание оплаты: {deal_code}",
+        body_text="Документы подтверждены. Ожидайте поступления оплаты от заказчика.",
+        role="crm_manager",
+        staff_id=manager_id,
+        deal_id=deal_id,
+    )
+    return {"deal_id": deal_id, "contract_status": "payment_pending"}, None
+
+def confirm_payment(cur, deal_id: int):
+    """
+    Директор подтверждает оплату → менеджер получает уведомление (шаг 4→финал).
+    """
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals
+        SET contract_status='payment_confirmed', stage='planning', updated_at=now()
+        WHERE id=%s
+        RETURNING code, manager_id
+    """, (deal_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Сделка не найдена"
+    deal_code, manager_id = row
+
+    create_notification(cur,
+        type_="payment_confirmed",
+        title=f"Оплата подтверждена: {deal_code}",
+        body_text="Оплата получена! Сделка переходит в производство. Получите выплату комиссионного вознаграждения.",
+        role="crm_manager",
+        staff_id=manager_id,
+        deal_id=deal_id,
+    )
+    # Уведомление директору по строительству
+    create_notification(cur,
+        type_="payment_confirmed",
+        title=f"Проект готов к запуску: {deal_code}",
+        body_text="Оплата подтверждена, сделка в стадии планирования производства.",
+        role="construction_director",
+        deal_id=deal_id,
+    )
+    return {"deal_id": deal_id, "contract_status": "payment_confirmed", "stage": "planning"}, None
 
 # ─── CONTRACTORS ─────────────────────────────────────────────────────────────
 
@@ -1666,7 +1877,8 @@ def handler(event: dict, context) -> dict:
     ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff",
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
               "stage_durations", "estimate_works", "estimate_materials", "estimate",
-              "contractors", "documents", "doc_templates", "contract_docs"}
+              "contractors", "documents", "doc_templates", "contract_docs",
+              "notifications"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -1841,14 +2053,13 @@ def handler(event: dict, context) -> dict:
                 row = cur.fetchone()
                 if not row:
                     return err("Этап не найден")
-                # Автоматически пересчитываем Гант-планы всех активных проектов
-                recalc = recalc_active_projects_stages(cur)
+                # Норматив обновлён — применяется только к новым проектам (lead/kp).
+                # Активные проекты (status active/planning) не затрагиваем.
                 conn.commit()
                 return ok({
                     "stage_num": row[0],
                     "stage_name": row[1],
                     "duration_days": row[2],
-                    "recalculated_projects": recalc["recalculated_projects"],
                 })
 
         # ── ESTIMATE (полная смета: работы + материалы) ────────────────────────
@@ -1945,14 +2156,64 @@ def handler(event: dict, context) -> dict:
                 deal_id = qs.get("deal_id")
                 if not deal_id:
                     return err("deal_id required")
-                return ok(get_contract_docs(cur, int(deal_id)))
+                # Возвращаем пакет + contract_status сделки
+                pkg = get_contract_docs(cur, int(deal_id))
+                cur.execute(f"SELECT contract_status FROM {SCHEMA}.deals WHERE id=%s", (int(deal_id),))
+                cs_row = cur.fetchone()
+                pkg["contract_status"] = cs_row[0] if cs_row else "none"
+                return ok(pkg)
             elif method == "POST":
-                # Менеджер загружает файл
-                deal_id     = int(body["deal_id"])
-                template_id = int(body["template_id"])
-                result = upload_contract_doc(cur, deal_id, template_id, body)
-                conn.commit()
-                return ok(result)
+                action  = body.get("action", "upload")
+                deal_id = int(body["deal_id"])
+
+                if action == "upload":
+                    template_id = int(body["template_id"])
+                    result = upload_contract_doc(cur, deal_id, template_id, body)
+                    conn.commit()
+                    return ok(result)
+
+                elif action == "submit_review":
+                    # Менеджер отправляет на проверку директору
+                    result, error = submit_docs_for_review(cur, deal_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+
+                elif action == "approve":
+                    # Директор подтверждает/отклоняет
+                    approved = bool(body.get("approved", True))
+                    reason   = body.get("reject_reason", "")
+                    result, error = approve_docs(cur, deal_id, approved, reason)
+                    if error: return err(error)
+                    # Если подтвердил — сразу переводим в ожидание оплаты
+                    if approved:
+                        set_payment_pending(cur, deal_id)
+                    conn.commit()
+                    return ok(result)
+
+                elif action == "confirm_payment":
+                    # Директор подтверждает оплату
+                    result, error = confirm_payment(cur, deal_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+
+        # ── NOTIFICATIONS ──────────────────────────────────────────────────────
+        elif resource == "notifications":
+            if method == "GET":
+                role      = qs.get("role")
+                staff_id  = int(qs["staff_id"]) if qs.get("staff_id") else None
+                unread    = qs.get("unread") == "1"
+                notifs    = get_notifications(cur, role, staff_id, unread)
+                count     = get_unread_count(cur, role, staff_id)
+                return ok({"notifications": notifs, "unread_count": count})
+            elif method == "POST":
+                action = body.get("action", "read")
+                if action == "read":
+                    ids = body.get("ids", [])
+                    mark_notifications_read(cur, ids)
+                    conn.commit()
+                    return ok({"ok": True})
 
         return err("Маршрут не найден", 404)
 
