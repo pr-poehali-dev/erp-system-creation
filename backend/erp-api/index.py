@@ -48,12 +48,61 @@ def next_code(cur, table, prefix, col="code"):
 
 # ─── DEALS ───────────────────────────────────────────────────────────────────
 
+def get_free_slots(cur):
+    """Возвращает свободные слоты с загрузкой месяца для слот-плана."""
+    cur.execute(f"""
+        SELECT
+            s.id, s.year, s.month, s.start_date, s.status, s.monthly_limit,
+            COUNT(occupied.id) AS occupied_count
+        FROM {SCHEMA}.slots s
+        LEFT JOIN {SCHEMA}.slots occupied
+            ON occupied.year = s.year
+            AND occupied.month = s.month
+            AND occupied.status IN ('booked', 'busy')
+        WHERE s.status = 'free'
+          AND s.start_date >= CURRENT_DATE
+        GROUP BY s.id, s.year, s.month, s.start_date, s.status, s.monthly_limit
+        ORDER BY s.start_date
+    """)
+    cols = [desc[0] for desc in cur.description]
+    slots = []
+    for row in cur.fetchall():
+        d = dict(zip(cols, row))
+        d["available"] = int(d["monthly_limit"]) - int(d["occupied_count"]) > 0
+        d["occupied_count"] = int(d["occupied_count"])
+        slots.append(d)
+    return slots
+
+def get_slot_plan(cur):
+    """Полная картина слот-плана по месяцам (для директора/коммерческого)."""
+    cur.execute(f"""
+        SELECT
+            s.year, s.month, s.monthly_limit,
+            COUNT(*) FILTER (WHERE s.status = 'free')   AS free_count,
+            COUNT(*) FILTER (WHERE s.status = 'booked') AS booked_count,
+            COUNT(*) FILTER (WHERE s.status = 'busy')   AS busy_count
+        FROM {SCHEMA}.slots s
+        GROUP BY s.year, s.month, s.monthly_limit
+        ORDER BY s.year, s.month
+    """)
+    cols = [desc[0] for desc in cur.description]
+    months = []
+    for row in cur.fetchall():
+        d = dict(zip(cols, row))
+        total_occupied = int(d["booked_count"]) + int(d["busy_count"])
+        d["total_occupied"] = total_occupied
+        d["load_pct"] = round(total_occupied / int(d["monthly_limit"]) * 100) if d["monthly_limit"] else 0
+        d["overloaded"] = total_occupied >= int(d["monthly_limit"])
+        months.append(d)
+    return months
+
 def get_deals(cur):
     cur.execute(f"""
         SELECT d.id, d.code, d.stage, d.budget, d.start_date, d.source, d.notes, d.created_at,
                c.name as client_name, c.phone as client_phone,
                sm.name as manager_name, sr.name as realtor_name,
                sl.id as slot_id, sl.year as slot_year, sl.month as slot_month,
+               sl.start_date as slot_start_date,
                d.project_id
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
@@ -72,20 +121,36 @@ def create_deal(cur, body):
     realtor_id = body.get("realtor_id")
     source = body.get("source", "")
     budget = float(body.get("budget", 0))
-    start_date = body.get("start_date", date.today().isoformat())
     notes = body.get("notes", "")
 
-    # Проверить свободный слот
-    start = date.fromisoformat(start_date)
+    # Менеджер передаёт slot_id (выбранный из списка свободных)
+    slot_id = body.get("slot_id")
+    if not slot_id:
+        return None, "Выберите слот из доступных"
+    slot_id = int(slot_id)
+
+    # Получаем слот и проверяем что он свободен
     cur.execute(f"""
-        SELECT id FROM {SCHEMA}.slots
-        WHERE year=%s AND month=%s AND status='free'
-        ORDER BY id LIMIT 1
-    """, (start.year, start.month))
+        SELECT id, year, month, start_date, status, monthly_limit FROM {SCHEMA}.slots WHERE id=%s
+    """, (slot_id,))
     slot_row = cur.fetchone()
     if not slot_row:
-        return None, "Нет свободных слотов на выбранный месяц"
-    slot_id = slot_row[0]
+        return None, "Слот не найден"
+    s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
+    if s_status != 'free':
+        return None, "Выбранный слот уже занят. Выберите другой"
+
+    # Проверяем лимит месяца
+    cur.execute(f"""
+        SELECT COUNT(*) FROM {SCHEMA}.slots
+        WHERE year=%s AND month=%s AND status IN ('booked','busy')
+    """, (s_year, s_month))
+    occupied = int(cur.fetchone()[0])
+    if occupied + 1 > s_limit:
+        return None, f"Месяц перегружен: {occupied}/{s_limit} слотов занято. Выберите другой месяц"
+
+    # start_date сделки = дата слота
+    start_date = s_start_date.isoformat() if hasattr(s_start_date, 'isoformat') else str(s_start_date)
 
     code = next_code(cur, "deals", "ЛД")
     realtor_val = int(realtor_id) if realtor_id else None
@@ -101,7 +166,7 @@ def create_deal(cur, body):
 
     # Бронируем слот
     cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, slot_id))
-    return {"id": deal_id, "code": deal_code, "slot_id": slot_id}, None
+    return {"id": deal_id, "code": deal_code, "slot_id": slot_id, "start_date": start_date}, None
 
 def update_deal_stage(cur, deal_id, new_stage):
     cur.execute(f"""
@@ -634,7 +699,7 @@ def handler(event: dict, context) -> dict:
             pass
 
     # Определяем роут: сначала из querystring ?r=, затем из path
-    ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff", "employees", "reports"}
+    ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff", "employees", "reports", "slots"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -743,6 +808,15 @@ def handler(event: dict, context) -> dict:
         elif resource == "reports":
             if method == "GET":
                 return ok(get_reports(cur))
+
+        # ── SLOTS ──────────────────────────────────────────────────────────────
+        elif resource == "slots":
+            if method == "GET":
+                action = qs.get("action", "free")
+                if action == "plan":
+                    return ok(get_slot_plan(cur))
+                else:
+                    return ok(get_free_slots(cur))
 
         return err("Маршрут не найден", 404)
 

@@ -58,6 +58,11 @@ export const api = {
   reports: {
     get: () => request<ReportsData>("reports"),
   },
+
+  slots: {
+    free: () => request<SlotItem[]>("slots"),
+    plan: () => request<SlotMonth[]>("slots", "GET", undefined, { action: "plan" }),
+  },
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -240,4 +245,27 @@ export interface ReportsData {
     margin: number;
   };
   req_stats: Record<string, { count: number; qty: number }>;
+}
+
+export interface SlotItem {
+  id: number;
+  year: number;
+  month: number;
+  start_date: string;
+  status: string;
+  monthly_limit: number;
+  occupied_count: number;
+  available: boolean;
+}
+
+export interface SlotMonth {
+  year: number;
+  month: number;
+  monthly_limit: number;
+  free_count: number;
+  booked_count: number;
+  busy_count: number;
+  total_occupied: number;
+  load_pct: number;
+  overloaded: boolean;
 }

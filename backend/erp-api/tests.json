@@ -5,7 +5,7 @@
       "method": "GET",
       "path": "/?r=dashboard",
       "expectedStatus": 200,
-      "expectedBody": {"active_projects": 2},
+      "expectedBody": {"revenue_month": 5400000.0},
       "bodyMatcher": "partial"
     },
     {
@@ -68,6 +68,20 @@
       "name": "GET reports",
       "method": "GET",
       "path": "/?r=reports",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET slots free",
+      "method": "GET",
+      "path": "/?r=slots",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET slots plan",
+      "method": "GET",
+      "path": "/?r=slots&action=plan",
       "expectedStatus": 200,
       "bodyMatcher": "partial"
     }

@@ -12,7 +12,7 @@ const EMPTY_FORM: DealFormState = {
   client_id: "",
   source: "",
   budget: "",
-  start_date: "",
+  slot_id: "",
   manager_id: "",
   realtor_id: "",
   notes: "",
@@ -33,10 +33,7 @@ export default function Sales({ role: _role }: Props) {
 
   const loadDeals = () => {
     setLoading(true);
-    api.deals
-      .list()
-      .then(setDeals)
-      .finally(() => setLoading(false));
+    api.deals.list().then(setDeals).finally(() => setLoading(false));
   };
 
   useEffect(() => {
@@ -63,24 +60,28 @@ export default function Sales({ role: _role }: Props) {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
   };
 
+  const handleSlotSelect = (slotId: string) => {
+    setForm((prev) => ({ ...prev, slot_id: slotId }));
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.client_id) { setFormError("Выберите клиента"); return; }
-    if (!form.budget) { setFormError("Укажите бюджет"); return; }
-    if (!form.start_date) { setFormError("Укажите дату начала"); return; }
+    if (!form.client_id)  { setFormError("Выберите клиента"); return; }
+    if (!form.budget)     { setFormError("Укажите бюджет"); return; }
+    if (!form.slot_id)    { setFormError("Выберите слот для старта строительства"); return; }
     if (!form.manager_id) { setFormError("Выберите менеджера"); return; }
 
     setSaving(true);
     setFormError("");
     try {
       await api.deals.create({
-        client_id: Number(form.client_id),
-        source: form.source,
-        budget: Number(form.budget),
-        start_date: form.start_date,
+        client_id:  Number(form.client_id),
+        source:     form.source,
+        budget:     Number(form.budget),
+        slot_id:    Number(form.slot_id),
         manager_id: Number(form.manager_id),
         realtor_id: form.realtor_id ? Number(form.realtor_id) : null,
-        notes: form.notes,
+        notes:      form.notes,
       });
       handleCloseModal();
       loadDeals();
@@ -150,6 +151,7 @@ export default function Sales({ role: _role }: Props) {
           formError={formError}
           onClose={handleCloseModal}
           onField={handleField}
+          onSlotSelect={handleSlotSelect}
           onSubmit={handleCreate}
         />
       )}
