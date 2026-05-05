@@ -36,6 +36,7 @@ export default function Sales({ role }: Props) {
   const [successMsg, setSuccessMsg] = useState("");
   const [tab, setTab] = useState<"funnel" | "payout">("funnel");
   const [currentManagerId, setCurrentManagerId] = useState<number | undefined>();
+  const [payoutCount, setPayoutCount] = useState(0);
 
   const notify = (msg: string) => {
     setSuccessMsg(msg);
@@ -47,18 +48,36 @@ export default function Sales({ role }: Props) {
     api.deals.list().then(setDeals).finally(() => setLoading(false));
   };
 
+  const loadPayoutCount = () => {
+    if (!["crm_manager", "director"].includes(role)) return;
+    api.payout_requests.list(role === "crm_manager" ? currentManagerId : undefined)
+      .then(r => {
+        if (role === "crm_manager") {
+          // Для менеджера: сделки без заявки (нужно подать счёт)
+          setPayoutCount(r.deals.filter(d => !d.payout_id).length);
+        } else {
+          // Для директора: заявки ожидающие согласования
+          setPayoutCount(r.deals.filter(d => d.payout_status === "pending").length);
+        }
+      });
+  };
+
   useEffect(() => {
     loadDeals();
     api.clients().then(setClients);
     api.staff("crm_manager").then(list => {
       setManagers(list);
-      // Для упрощения: первый crm_manager — текущий (в реальном приложении бы брали из сессии)
       if (role === "crm_manager" && list.length > 0) setCurrentManagerId(list[0].id);
     });
     api.staff("realtor").then(setRealtors);
     api.serial_projects.list().then(setSerialProjects);
     api.stage_durations.list().then(setStageDurations);
   }, []);
+
+  // Подгружаем счётчик выплат после загрузки deals и managerId
+  useEffect(() => {
+    loadPayoutCount();
+  }, [currentManagerId, deals]);
 
   const canEdit = ["director", "commercial", "crm_manager", "realtor"].includes(role);
 
@@ -141,12 +160,19 @@ export default function Sales({ role }: Props) {
             Воронка продаж
           </button>
           <button
-            onClick={() => setTab("payout")}
+            onClick={() => { setTab("payout"); setPayoutCount(0); }}
             className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
               tab === "payout" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
             }`}>
             <Icon name="Wallet" size={14} />
             Заявка на выплату
+            {payoutCount > 0 && tab !== "payout" && (
+              <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${
+                tab === "payout" ? "bg-primary text-white" : "bg-red-500 text-white"
+              }`}>
+                {payoutCount > 9 ? "9+" : payoutCount}
+              </span>
+            )}
           </button>
         </div>
       )}

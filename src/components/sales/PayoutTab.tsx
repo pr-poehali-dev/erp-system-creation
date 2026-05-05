@@ -132,25 +132,43 @@ export default function PayoutTab({ role, managerId }: Props) {
         </div>
       )}
 
+      {/* Для менеджера — новые сделки требующие загрузки счёта */}
+      {!isDirector && deals.some(d => !d.payout_id) && (
+        <div className="bg-emerald-50 border border-emerald-300 rounded-xl px-4 py-3 flex items-center gap-2">
+          <div className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-pulse shrink-0" />
+          <span className="text-[13px] font-medium text-emerald-900">
+            {deals.filter(d => !d.payout_id).length} {deals.filter(d => !d.payout_id).length === 1 ? "сделка ждёт" : "сделки ждут"} — загрузите счёт на вознаграждение
+          </span>
+        </div>
+      )}
+
       {deals.map(deal => {
-        const badge       = deal.payout_status ? STATUS_BADGE[deal.payout_status] : null;
-        const isSubmit    = submitting === deal.id;
-        const hasRequest  = !!deal.payout_id;
-        const isRejected  = deal.payout_status === "rejected";
-        const isPending   = deal.payout_status === "pending";
-        const isApproved  = deal.payout_status === "approved";
-        const showForm    = !isDirector && (!hasRequest || isRejected);
+        const badge        = deal.payout_status ? STATUS_BADGE[deal.payout_status] : null;
+        const isSubmit     = submitting === deal.id;
+        const hasRequest   = !!deal.payout_id;
+        const isRejected   = deal.payout_status === "rejected";
+        const isPending    = deal.payout_status === "pending";
+        const isApproved   = deal.payout_status === "approved";
+        const showForm     = !isDirector && (!hasRequest || isRejected);
         const isRejectOpen = rejectId === deal.id;
+        const isNew        = !isDirector && !hasRequest; // новая — без заявки
         // fileRef handled via inline onChange + hidden input id
 
         return (
-          <div key={deal.id} className="bg-white border border-border rounded-xl p-4 space-y-3">
+          <div key={deal.id} className={`rounded-xl p-4 space-y-3 border transition-all ${
+            isNew ? "border-emerald-300 bg-emerald-50/60" : "bg-white border-border"
+          }`}>
             {/* Шапка */}
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-[13px] font-bold text-primary">{deal.code}</span>
-                  {badge && (
+                  {isNew && (
+                    <span className="flex items-center gap-1 text-[10px] bg-emerald-500 text-white px-1.5 py-0.5 rounded-md font-bold">
+                      Загрузите счёт
+                    </span>
+                  )}
+                  {badge && !isNew && (
                     <span className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md border font-medium ${badge.cls}`}>
                       <Icon name={badge.icon as Parameters<typeof Icon>[0]["name"]} size={10} />
                       {badge.label}

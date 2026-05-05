@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
-import { api, Document, Contractor, Deal } from "@/lib/api";
+import { api, Document, Contractor, Deal, PayoutDeal } from "@/lib/api";
 import ContractReviewModal from "@/components/director/ContractReviewModal";
 
 interface Props { role: Role; }
@@ -84,8 +84,10 @@ export default function Documents({ role }: Props) {
   const [error, setError]           = useState("");
 
   // Для директора: сделки с документами на подписание
-  const [pendingDeals, setPendingDeals] = useState<Deal[]>([]);
-  const [reviewDeal, setReviewDeal]     = useState<Deal | null>(null);
+  const [pendingDeals, setPendingDeals]   = useState<Deal[]>([]);
+  const [reviewDeal, setReviewDeal]       = useState<Deal | null>(null);
+  // Для директора: счета от менеджеров на согласование
+  const [pendingPayouts, setPendingPayouts] = useState<PayoutDeal[]>([]);
 
   const [form, setForm] = useState({
     doc_type: "", category: "", title: "", status: "draft",
@@ -103,11 +105,14 @@ export default function Documents({ role }: Props) {
   const loadPendingDeals = () => {
     if (!isDirector) return;
     api.deals.list().then(deals => {
-      // Сделки где есть документы на проверку или ожидание оплаты
       const pending = deals.filter(d =>
         ["docs_review", "docs_approved", "payment_pending"].includes(d.contract_status || "")
       );
       setPendingDeals(pending);
+    });
+    // Загружаем счета менеджеров (pending = ждут одобрения)
+    api.payout_requests.list().then(r => {
+      setPendingPayouts(r.deals.filter(d => d.payout_status === "pending" && d.invoice_file_url));
     });
   };
 
@@ -234,6 +239,52 @@ export default function Documents({ role }: Props) {
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* ═══ ДИРЕКТОР: Счета от менеджеров на согласование ══════════════════ */}
+      {isDirector && pendingPayouts.length > 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-xl overflow-hidden">
+          <div className="px-5 py-3 border-b border-emerald-200 flex items-center gap-2">
+            <Icon name="Receipt" size={15} className="text-emerald-600 shrink-0" />
+            <span className="font-semibold text-[14px] text-emerald-900">
+              Счета на согласование — {pendingPayouts.length} {pendingPayouts.length === 1 ? "счёт" : "счёта"}
+            </span>
+          </div>
+          <div className="divide-y divide-emerald-100">
+            {pendingPayouts.map(deal => (
+              <div key={deal.id} className="px-5 py-3 flex items-center gap-4">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[13px] font-bold text-primary">{deal.code}</span>
+                    <span className="flex items-center gap-1 text-[11px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md font-medium">
+                      <Icon name="Clock" size={10} />Ожидает согласования
+                    </span>
+                  </div>
+                  <div className="text-[12px] text-foreground font-medium mt-0.5">{deal.client_name}</div>
+                  <div className="text-hint text-[11px]">{deal.manager_name}</div>
+                </div>
+                {deal.budget > 0 && (
+                  <div className="text-[13px] font-bold text-emerald-600 shrink-0">
+                    ₽ {deal.budget.toLocaleString("ru")}
+                  </div>
+                )}
+                <div className="flex items-center gap-2 shrink-0">
+                  {deal.invoice_file_url && (
+                    <a href={deal.invoice_file_url} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1.5 px-3 py-1.5 border border-emerald-300 bg-white rounded-lg text-[12px] text-emerald-700 font-medium hover:bg-emerald-50 transition-colors">
+                      <Icon name="Download" size={13} />Счёт
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="px-5 py-2.5 bg-emerald-100/50 border-t border-emerald-200">
+            <p className="text-[11px] text-emerald-700">
+              Для согласования и выплат перейдите в раздел <strong>CRM → Заявка на выплату</strong>
+            </p>
           </div>
         </div>
       )}
