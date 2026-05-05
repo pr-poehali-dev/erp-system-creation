@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
-import { api, Document, Contractor } from "@/lib/api";
+import { api, Document, Contractor, Deal } from "@/lib/api";
+import ContractReviewModal from "@/components/director/ContractReviewModal";
 
 interface Props { role: Role; }
 
@@ -82,11 +83,16 @@ export default function Documents({ role }: Props) {
   const [saving, setSaving]         = useState(false);
   const [error, setError]           = useState("");
 
+  // Для директора: сделки с документами на подписание
+  const [pendingDeals, setPendingDeals] = useState<Deal[]>([]);
+  const [reviewDeal, setReviewDeal]     = useState<Deal | null>(null);
+
   const [form, setForm] = useState({
     doc_type: "", category: "", title: "", status: "draft",
     amount: "", doc_date: "", contractor_id: "", deal_id: "", notes: "",
   });
 
+  const isDirector = role === "director";
   const canEdit = ["director", "commercial", "supply_director", "finance_director"].includes(role);
 
   const load = () => {
@@ -94,10 +100,22 @@ export default function Documents({ role }: Props) {
     api.documents.list(category ? { category } : {}).then(setDocs).finally(() => setLoading(false));
   };
 
+  const loadPendingDeals = () => {
+    if (!isDirector) return;
+    api.deals.list().then(deals => {
+      // Сделки где есть документы на проверку или ожидание оплаты
+      const pending = deals.filter(d =>
+        ["docs_review", "docs_approved", "payment_pending"].includes(d.contract_status || "")
+      );
+      setPendingDeals(pending);
+    });
+  };
+
   useEffect(() => { load(); }, [category]);
 
   useEffect(() => {
     api.contractors.list().then(setContractors);
+    loadPendingDeals();
   }, []);
 
   const filtered = docs.filter(d => {
@@ -164,6 +182,61 @@ export default function Documents({ role }: Props) {
           )}
         </div>
       </div>
+
+      {/* ═══ ДИРЕКТОР: Документы на подписание ════════════════════════════════ */}
+      {isDirector && pendingDeals.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl overflow-hidden">
+          <div className="px-5 py-3 border-b border-amber-200 flex items-center gap-2">
+            <div className="w-2.5 h-2.5 bg-amber-500 rounded-full animate-pulse" />
+            <span className="font-semibold text-[14px] text-amber-900">
+              Требует вашего внимания — {pendingDeals.length} {pendingDeals.length === 1 ? "сделка" : "сделки"}
+            </span>
+          </div>
+          <div className="divide-y divide-amber-200">
+            {pendingDeals.map(deal => {
+              const cs = deal.contract_status || "";
+              const statusLabel = cs === "docs_review"
+                ? { text: "Документы ждут подписи", cls: "bg-amber-100 text-amber-800", icon: "FileSearch" }
+                : cs === "docs_approved"
+                ? { text: "Ожидание оплаты", cls: "bg-blue-100 text-blue-800", icon: "Clock" }
+                : { text: "Подтвердить оплату", cls: "bg-emerald-100 text-emerald-800", icon: "BadgeCheck" };
+
+              return (
+                <div key={deal.id} className="px-5 py-3 flex items-center gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[13px] font-bold text-primary">{deal.code}</span>
+                      <span className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-md font-medium ${statusLabel.cls}`}>
+                        <Icon name={statusLabel.icon as Parameters<typeof Icon>[0]["name"]} size={10} />
+                        {statusLabel.text}
+                      </span>
+                    </div>
+                    <div className="text-[12px] text-foreground font-medium mt-0.5">{deal.client_name}</div>
+                    <div className="text-hint text-[11px]">{deal.manager_name}</div>
+                  </div>
+                  {deal.budget > 0 && (
+                    <div className="text-[13px] font-bold text-emerald-600 shrink-0">
+                      ₽ {deal.budget.toLocaleString("ru")}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => setReviewDeal(deal)}
+                    className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-[13px] font-medium transition-colors shrink-0 ${
+                      cs === "payment_pending"
+                        ? "bg-emerald-500 text-white hover:bg-emerald-600"
+                        : "bg-primary text-white hover:bg-primary/90"
+                    }`}>
+                    {cs === "payment_pending"
+                      ? <><Icon name="BadgeCheck" size={14} />Подтвердить оплату</>
+                      : <><Icon name="PenLine" size={14} />Открыть</>
+                    }
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Категории */}
       <div className="flex gap-2 flex-wrap">
@@ -387,6 +460,20 @@ export default function Documents({ role }: Props) {
             </form>
           </div>
         </div>
+      )}
+
+      {/* МОДАЛКА директора — подписание договора */}
+      {reviewDeal && (
+        <ContractReviewModal
+          dealId={reviewDeal.id}
+          dealCode={reviewDeal.code}
+          clientName={reviewDeal.client_name}
+          onClose={() => setReviewDeal(null)}
+          onApproved={() => {
+            loadPendingDeals();
+            setReviewDeal(null);
+          }}
+        />
       )}
     </div>
   );
