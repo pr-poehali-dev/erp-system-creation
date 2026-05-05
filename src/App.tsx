@@ -79,13 +79,6 @@ function ERPApp() {
       roles: ["director", "commercial", "crm_manager", "realtor"],
     },
     {
-      id: "warehouse",
-      label: "Розница / Склад",
-      icon: "Warehouse",
-      component: <Warehouse role={currentRole} />,
-      roles: ["director", "commercial", "supply_director", "supplier"],
-    },
-    {
       id: "construction",
       label: "Строительство",
       icon: "HardHat",
@@ -93,18 +86,25 @@ function ERPApp() {
       roles: ["director", "construction_director", "foreman", "project_manager", "client"],
     },
     {
-      id: "rental",
-      label: "Аренда техники",
-      icon: "Truck",
-      component: <Rental role={currentRole} />,
-      roles: ["director", "construction_director", "mechanic"],
-    },
-    {
       id: "procurement",
       label: "Снабжение",
       icon: "ShoppingCart",
       component: <Procurement role={currentRole} />,
       roles: ["director", "supply_director", "supplier", "foreman"],
+    },
+    {
+      id: "warehouse",
+      label: "Розница / Склад",
+      icon: "Warehouse",
+      component: <Warehouse role={currentRole} />,
+      roles: ["director", "commercial", "supply_director", "supplier"],
+    },
+    {
+      id: "rental",
+      label: "Аренда техники",
+      icon: "Truck",
+      component: <Rental role={currentRole} />,
+      roles: ["director", "construction_director", "mechanic"],
     },
     {
       id: "quality",
