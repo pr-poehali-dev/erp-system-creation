@@ -116,57 +116,82 @@ def get_deals(cur):
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 def create_deal(cur, body):
-    client_id = int(body["client_id"])
-    manager_id = int(body.get("manager_id", 1))
-    realtor_id = body.get("realtor_id")
-    source = body.get("source", "")
-    budget = float(body.get("budget", 0))
-    notes = body.get("notes", "")
+    client_id       = int(body["client_id"])
+    manager_id      = int(body.get("manager_id", 1))
+    realtor_id      = body.get("realtor_id")
+    source          = body.get("source", "")
+    budget          = float(body.get("budget", 0))
+    notes           = body.get("notes", "")
+    project_type    = body.get("project_type", "serial")
+    sp_id           = body.get("serial_project_id")
+    cfg_id          = body.get("configuration_id")
+    planned_start   = body.get("planned_start_date")
 
-    # Менеджер передаёт slot_id (выбранный из списка свободных)
+    # Для индивидуального проекта слот не обязателен
     slot_id = body.get("slot_id")
-    if not slot_id:
-        return None, "Выберите слот из доступных"
-    slot_id = int(slot_id)
+    start_date = None
 
-    # Получаем слот и проверяем что он свободен
-    cur.execute(f"""
-        SELECT id, year, month, start_date, status, monthly_limit FROM {SCHEMA}.slots WHERE id=%s
-    """, (slot_id,))
-    slot_row = cur.fetchone()
-    if not slot_row:
-        return None, "Слот не найден"
-    s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
-    if s_status != 'free':
-        return None, "Выбранный слот уже занят. Выберите другой"
+    if project_type == "serial":
+        if not slot_id:
+            return None, "Выберите слот из доступных"
+        slot_id = int(slot_id)
 
-    # Проверяем лимит месяца
-    cur.execute(f"""
-        SELECT COUNT(*) FROM {SCHEMA}.slots
-        WHERE year=%s AND month=%s AND status IN ('booked','busy')
-    """, (s_year, s_month))
-    occupied = int(cur.fetchone()[0])
-    if occupied + 1 > s_limit:
-        return None, f"Месяц перегружен: {occupied}/{s_limit} слотов занято. Выберите другой месяц"
+        cur.execute(f"""
+            SELECT id, year, month, start_date, status, monthly_limit FROM {SCHEMA}.slots WHERE id=%s
+        """, (slot_id,))
+        slot_row = cur.fetchone()
+        if not slot_row:
+            return None, "Слот не найден"
+        s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
+        if s_status != 'free':
+            return None, "Выбранный слот уже занят. Выберите другой"
 
-    # start_date сделки = дата слота
-    start_date = s_start_date.isoformat() if hasattr(s_start_date, 'isoformat') else str(s_start_date)
+        cur.execute(f"""
+            SELECT COUNT(*) FROM {SCHEMA}.slots
+            WHERE year=%s AND month=%s AND status IN ('booked','busy')
+        """, (s_year, s_month))
+        occupied = int(cur.fetchone()[0])
+        if occupied + 1 > s_limit:
+            return None, f"Месяц перегружен: {occupied}/{s_limit} слотов занято. Выберите другой месяц"
+
+        start_date = s_start_date.isoformat() if hasattr(s_start_date, 'isoformat') else str(s_start_date)
+    else:
+        slot_id = None
+        start_date = planned_start or date.today().isoformat()
 
     code = next_code(cur, "deals", "ЛД")
-    realtor_val = int(realtor_id) if realtor_id else None
+    realtor_val  = int(realtor_id) if realtor_id else None
+    sp_val       = int(sp_id) if sp_id else None
+    cfg_val      = int(cfg_id) if cfg_id else None
+    ps_val       = planned_start if planned_start else None
 
     cur.execute(f"""
         INSERT INTO {SCHEMA}.deals
-            (code, client_id, manager_id, realtor_id, source, budget, start_date, notes, slot_id, stage)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'new')
+            (code, client_id, manager_id, realtor_id, source, budget, start_date, notes,
+             slot_id, stage, project_type, serial_project_id, configuration_id, planned_start_date)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'new', %s, %s, %s, %s)
         RETURNING id, code
-    """, (code, client_id, manager_id, realtor_val, source, budget, start_date, notes, slot_id))
+    """, (code, client_id, manager_id, realtor_val, source, budget, start_date, notes,
+          slot_id, project_type, sp_val, cfg_val, ps_val))
 
     deal_id, deal_code = cur.fetchone()
 
-    # Бронируем слот
-    cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, slot_id))
-    return {"id": deal_id, "code": deal_code, "slot_id": slot_id, "start_date": start_date}, None
+    # Бронируем слот (только для серийного)
+    if slot_id:
+        cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, slot_id))
+
+    # Для индивидуального — создаём карточку
+    if project_type == 'individual':
+        desired_area = float(body.get("desired_area", 0))
+        spec_req = body.get("special_requests", "")
+        cur.execute(f"""
+            INSERT INTO {SCHEMA}.individual_project_requests
+                (deal_id, client_id, desired_area, special_requests, status)
+            VALUES (%s, %s, %s, %s, 'awaiting_design')
+        """, (deal_id, client_id, desired_area, spec_req))
+
+    return {"id": deal_id, "code": deal_code, "slot_id": slot_id, "start_date": start_date,
+            "project_type": project_type}, None
 
 def update_deal_stage(cur, deal_id, new_stage):
     cur.execute(f"""
@@ -189,12 +214,60 @@ def update_deal_stage(cur, deal_id, new_stage):
 
 # ─── PROJECTS ────────────────────────────────────────────────────────────────
 
-STAGES_TEMPLATE = [
-    ("Фундамент", 1, 10),
-    ("Коробка", 2, 8),
-    ("Кровля", 3, 28),
-    ("Штукатурка", 4, 4),
+# 11 этапов строительства. parallel_group: None = последовательный, число = параллельная группа.
+# depends_on: список stage_num от которых зависит этот этап.
+ALL_STAGES = [
+    # (stage_num, name, duration, parallel_group, depends_on)
+    (1,  "Подготовка основания", 5,  None, []),
+    (2,  "Фундамент",            10, None, [1]),
+    (3,  "Коробка",              8,  None, [2]),
+    (4,  "Кровля",               28, 1,   [3]),   # параллельная группа 1
+    (5,  "Окна",                 1,  1,   [3]),   # параллельная группа 1
+    (6,  "Фасад",                16, 1,   [3]),   # параллельная группа 1
+    (7,  "Электрика черновая",   7,  1,   [3]),   # параллельная группа 1
+    (8,  "Сантехника черновая",  7,  1,   [3]),   # параллельная группа 1
+    (9,  "Штукатурка+стяжка",    4,  None, [4,5,6,7,8]),  # после завершения всей группы 1
+    (10, "Чистовая отделка",     7,  None, [9]),
+    (11, "Отделка финиш",        1,  None, [9]),
 ]
+
+def build_stage_plan(start_date: date, included_nums: list) -> list:
+    """
+    Строит план дат для выбранных этапов.
+    Параллельные этапы (одна группа) стартуют в одну дату.
+    Возвращает список (stage_num, name, duration, planned_start, planned_end, parallel_group, depends_on).
+    """
+    stage_map = {s[0]: s for s in ALL_STAGES if s[0] in included_nums}
+    end_dates = {}   # stage_num -> planned_end date
+    result = []
+
+    # Обрабатываем этапы по порядку stage_num
+    for stage_num in sorted(stage_map.keys()):
+        snum, name, duration, par_group, deps = stage_map[stage_num]
+
+        # Определяем дату старта
+        if not deps:
+            s_date = start_date
+        else:
+            # Берём максимальную дату окончания зависимостей (только включённых)
+            dep_ends = [end_dates[d] for d in deps if d in end_dates]
+            if dep_ends:
+                s_date = max(dep_ends) + timedelta(days=1)
+            else:
+                s_date = start_date
+
+        # Если параллельная группа — все этапы группы стартуют одновременно
+        if par_group is not None:
+            # Найти самую раннюю дату старта в этой группе (уже посчитанных)
+            group_starts = [r[3] for r in result if r[2] == par_group]
+            if group_starts:
+                s_date = min(group_starts)
+
+        e_date = s_date + timedelta(days=duration - 1)
+        end_dates[snum] = e_date
+        result.append((snum, name, duration, s_date, e_date, par_group, deps))
+
+    return result
 
 def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
     if isinstance(start_date, str):
@@ -206,8 +279,37 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
     if ex:
         return ex[0], None
 
+    # Получаем конфигурацию сделки для правильных этапов и длительности
+    cur.execute(f"""
+        SELECT d.configuration_id, d.project_type, d.planned_start_date,
+               cfg.included_stages, cfg.duration_days, cfg.name as cfg_name
+        FROM {SCHEMA}.deals d
+        LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
+        WHERE d.id = %s
+    """, (deal_id,))
+    deal_row = cur.fetchone()
+
+    # Определяем этапы и длительность
+    if deal_row and deal_row[3]:  # есть комплектация
+        project_type, planned_start, included_stages, total_duration, cfg_name = \
+            deal_row[1], deal_row[2], list(deal_row[3]), deal_row[4], deal_row[5]
+    else:
+        project_type = deal_row[1] if deal_row else 'serial'
+        planned_start = deal_row[2] if deal_row else None
+        included_stages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        total_duration = 62
+        cfg_name = 'Под ключ'
+
+    # Для индивидуального проекта без сметы — не создаём проект автоматически
+    if project_type == 'individual':
+        return None, None
+
+    # Плановая дата начала строительства (если задана в сделке)
+    if planned_start:
+        start_date = planned_start if isinstance(planned_start, date) else date.fromisoformat(str(planned_start))
+
     code = next_code(cur, "projects", "ДОМ")
-    deadline = start_date + timedelta(days=62)
+    deadline = start_date + timedelta(days=total_duration)
 
     cur.execute(f"""
         INSERT INTO {SCHEMA}.projects (code, deal_id, client_id, start_date, deadline, status)
@@ -216,16 +318,16 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
     """, (code, deal_id, client_id, start_date, deadline))
     project_id = cur.fetchone()[0]
 
-    # Развернуть этапы
-    cur_date = start_date
-    for name, order_num, duration in STAGES_TEMPLATE:
-        planned_end = cur_date + timedelta(days=duration - 1)
+    # Развернуть этапы по комплектации
+    stage_plan = build_stage_plan(start_date, included_stages)
+    for order_num, (snum, name, duration, ps, pe, par_group, deps) in enumerate(stage_plan, 1):
         cur.execute(f"""
             INSERT INTO {SCHEMA}.project_stages
-                (project_id, name, order_num, duration_days, planned_start, planned_end, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-        """, (project_id, name, order_num, duration, cur_date, planned_end))
-        cur_date = planned_end + timedelta(days=1)
+                (project_id, name, order_num, stage_num, duration_days,
+                 planned_start, planned_end, parallel_group, depends_on, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+        """, (project_id, name, order_num, snum, duration, ps, pe,
+              par_group, deps if deps else None))
 
     # Слот → занят
     if slot_id:
@@ -507,6 +609,113 @@ def get_dashboard(cur):
         "k_company": k,
     }
 
+# ─── SERIAL PROJECTS & CONFIGURATIONS ────────────────────────────────────────
+
+def get_serial_projects(cur):
+    cur.execute(f"""
+        SELECT sp.id, sp.name, sp.area_sqm, sp.base_price, sp.base_duration_days,
+               sp.description, sp.is_active, sp.created_at,
+               COUNT(cfg.id) AS config_count
+        FROM {SCHEMA}.serial_projects sp
+        LEFT JOIN {SCHEMA}.configurations cfg ON cfg.serial_project_id = sp.id AND cfg.is_active = TRUE
+        WHERE sp.is_active = TRUE
+        GROUP BY sp.id, sp.name, sp.area_sqm, sp.base_price, sp.base_duration_days,
+                 sp.description, sp.is_active, sp.created_at
+        ORDER BY sp.name
+    """)
+    cols = [desc[0] for desc in cur.description]
+    projects = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for p in projects:
+        cur.execute(f"""
+            SELECT id, name, description, price_coefficient, duration_days, included_stages
+            FROM {SCHEMA}.configurations
+            WHERE serial_project_id=%s AND is_active=TRUE
+            ORDER BY duration_days
+        """, (p["id"],))
+        ccols = [desc[0] for desc in cur.description]
+        p["configurations"] = [dict(zip(ccols, r)) for r in cur.fetchall()]
+    return projects
+
+def get_configurations(cur, serial_project_id):
+    cur.execute(f"""
+        SELECT id, name, description, price_coefficient, duration_days, included_stages
+        FROM {SCHEMA}.configurations
+        WHERE serial_project_id=%s AND is_active=TRUE
+        ORDER BY duration_days
+    """, (serial_project_id,))
+    cols = [desc[0] for desc in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+def create_serial_project(cur, body):
+    name  = body["name"]
+    area  = float(body.get("area_sqm", 0))
+    price = float(body["base_price"])
+    dur   = int(body.get("base_duration_days", 62))
+    desc  = body.get("description", "")
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.serial_projects (name, area_sqm, base_price, base_duration_days, description)
+        VALUES (%s, %s, %s, %s, %s) RETURNING id
+    """, (name, area, price, dur, desc))
+    return {"id": cur.fetchone()[0]}
+
+def create_configuration(cur, body):
+    sp_id   = int(body["serial_project_id"])
+    name    = body["name"]
+    desc    = body.get("description", "")
+    coeff   = float(body.get("price_coefficient", 1.0))
+    dur     = int(body.get("duration_days", 62))
+    stages  = body.get("included_stages", list(range(1, 12)))
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.configurations
+            (serial_project_id, name, description, price_coefficient, duration_days, included_stages)
+        VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
+    """, (sp_id, name, desc, coeff, dur, stages))
+    return {"id": cur.fetchone()[0]}
+
+# ─── INDIVIDUAL PROJECT REQUESTS ─────────────────────────────────────────────
+
+def get_individual_requests(cur):
+    cur.execute(f"""
+        SELECT ipr.id, ipr.deal_id, ipr.desired_area, ipr.special_requests,
+               ipr.status, ipr.design_deadline, ipr.estimate_file_url,
+               ipr.created_at, ipr.updated_at,
+               c.name as client_name,
+               d.code as deal_code
+        FROM {SCHEMA}.individual_project_requests ipr
+        LEFT JOIN {SCHEMA}.clients c ON c.id = ipr.client_id
+        LEFT JOIN {SCHEMA}.deals d ON d.id = ipr.deal_id
+        ORDER BY ipr.created_at DESC
+    """)
+    cols = [desc[0] for desc in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+def update_individual_request(cur, req_id, body):
+    status   = body.get("status")
+    designer = body.get("assigned_designer_id")
+    deadline = body.get("design_deadline")
+    url      = body.get("estimate_file_url")
+    sets, vals = [], []
+    if status:   sets.append("status=%s");                  vals.append(status)
+    if designer: sets.append("assigned_designer_id=%s");    vals.append(int(designer))
+    if deadline: sets.append("design_deadline=%s");         vals.append(deadline)
+    if url:      sets.append("estimate_file_url=%s");       vals.append(url)
+    if not sets:
+        return False
+    sets.append("updated_at=now()")
+    vals.append(req_id)
+    cur.execute(f"UPDATE {SCHEMA}.individual_project_requests SET {', '.join(sets)} WHERE id=%s", vals)
+    return True
+
+# ─── SLOT PLAN (управление лимитами) ─────────────────────────────────────────
+
+def update_slot_limit(cur, year, month, new_limit):
+    """Обновляет monthly_limit для всех слотов указанного месяца."""
+    cur.execute(f"""
+        UPDATE {SCHEMA}.slots SET monthly_limit=%s
+        WHERE year=%s AND month=%s
+    """, (int(new_limit), int(year), int(month)))
+    return {"year": year, "month": month, "monthly_limit": new_limit}
+
 # ─── CLIENTS / STAFF ─────────────────────────────────────────────────────────
 
 def get_clients(cur):
@@ -699,7 +908,8 @@ def handler(event: dict, context) -> dict:
             pass
 
     # Определяем роут: сначала из querystring ?r=, затем из path
-    ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff", "employees", "reports", "slots"}
+    ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff",
+              "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -817,6 +1027,44 @@ def handler(event: dict, context) -> dict:
                     return ok(get_slot_plan(cur))
                 else:
                     return ok(get_free_slots(cur))
+            elif method == "POST":
+                # Обновить лимит месяца
+                result = update_slot_limit(cur, body["year"], body["month"], body["monthly_limit"])
+                conn.commit()
+                return ok(result)
+
+        # ── SERIAL PROJECTS ────────────────────────────────────────────────────
+        elif resource == "serial_projects":
+            if method == "GET":
+                return ok(get_serial_projects(cur))
+            elif method == "POST":
+                result = create_serial_project(cur, body)
+                conn.commit()
+                return ok(result, 201)
+
+        # ── CONFIGURATIONS ─────────────────────────────────────────────────────
+        elif resource == "configurations":
+            if method == "GET":
+                sp_id = qs.get("serial_project_id")
+                if not sp_id:
+                    return err("serial_project_id required")
+                return ok(get_configurations(cur, int(sp_id)))
+            elif method == "POST":
+                result = create_configuration(cur, body)
+                conn.commit()
+                return ok(result, 201)
+
+        # ── INDIVIDUAL REQUESTS ────────────────────────────────────────────────
+        elif resource == "individual_requests":
+            if method == "GET":
+                return ok(get_individual_requests(cur))
+            elif method == "POST":
+                req_id = int(body.get("id", 0))
+                if req_id:
+                    ok_res = update_individual_request(cur, req_id, body)
+                    conn.commit()
+                    return ok({"ok": ok_res})
+                return err("id required")
 
         return err("Маршрут не найден", 404)
 

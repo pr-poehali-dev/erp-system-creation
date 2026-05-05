@@ -16,6 +16,10 @@ const EMPTY_FORM: DealFormState = {
   manager_id: "",
   realtor_id: "",
   notes: "",
+  project_type: "serial",
+  serial_project_id: "",
+  configuration_id: "",
+  planned_start_date: "",
 };
 
 export default function Sales({ role: _role }: Props) {
@@ -64,24 +68,33 @@ export default function Sales({ role: _role }: Props) {
     setForm((prev) => ({ ...prev, slot_id: slotId }));
   };
 
+  const handleFormPatch = (patch: Partial<DealFormState>) => {
+    setForm((prev) => ({ ...prev, ...patch }));
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.client_id)  { setFormError("Выберите клиента"); return; }
     if (!form.budget)     { setFormError("Укажите бюджет"); return; }
-    if (!form.slot_id)    { setFormError("Выберите слот для старта строительства"); return; }
     if (!form.manager_id) { setFormError("Выберите менеджера"); return; }
+    const isSerial = form.project_type === "serial" || !form.project_type;
+    if (isSerial && !form.slot_id) { setFormError("Выберите слот для старта строительства"); return; }
 
     setSaving(true);
     setFormError("");
     try {
       await api.deals.create({
-        client_id:  Number(form.client_id),
-        source:     form.source,
-        budget:     Number(form.budget),
-        slot_id:    Number(form.slot_id),
-        manager_id: Number(form.manager_id),
-        realtor_id: form.realtor_id ? Number(form.realtor_id) : null,
-        notes:      form.notes,
+        client_id:          Number(form.client_id),
+        source:             form.source,
+        budget:             Number(form.budget),
+        slot_id:            form.slot_id ? Number(form.slot_id) : null,
+        manager_id:         Number(form.manager_id),
+        realtor_id:         form.realtor_id ? Number(form.realtor_id) : null,
+        notes:              form.notes,
+        project_type:       form.project_type || "serial",
+        serial_project_id:  form.serial_project_id ? Number(form.serial_project_id) : null,
+        configuration_id:   form.configuration_id ? Number(form.configuration_id) : null,
+        planned_start_date: form.planned_start_date || null,
       });
       handleCloseModal();
       loadDeals();
@@ -128,7 +141,7 @@ export default function Sales({ role: _role }: Props) {
         <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-5 py-3 flex items-center gap-2">
           <Icon name="CheckCircle" size={15} className="text-emerald-600 shrink-0" />
           <span className="text-[13px] text-emerald-800">
-            Сделка переведена в «Договор» — проект создан автоматически
+            Сделка переведена в «Договор» — проект ДОМ-XXXX создан автоматически с этапами строительства
           </span>
         </div>
       )}
@@ -152,6 +165,7 @@ export default function Sales({ role: _role }: Props) {
           onClose={handleCloseModal}
           onField={handleField}
           onSlotSelect={handleSlotSelect}
+          onFormPatch={handleFormPatch}
           onSubmit={handleCreate}
         />
       )}

@@ -146,7 +146,7 @@ function ERPApp() {
       label: "Администрирование",
       icon: "Settings",
       component: <Admin role={currentRole} />,
-      roles: ["director"],
+      roles: ["director", "construction_director"],
     },
   ];
 

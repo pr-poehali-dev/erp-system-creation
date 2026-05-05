@@ -62,6 +62,23 @@ export const api = {
   slots: {
     free: () => request<SlotItem[]>("slots"),
     plan: () => request<SlotMonth[]>("slots", "GET", undefined, { action: "plan" }),
+    updateLimit: (year: number, month: number, monthly_limit: number) =>
+      request<any>("slots", "POST", { year, month, monthly_limit }),
+  },
+
+  serial_projects: {
+    list: () => request<SerialProject[]>("serial_projects"),
+    create: (body: object) => request<any>("serial_projects", "POST", body),
+  },
+
+  configurations: {
+    list: (serial_project_id: number) =>
+      request<Configuration[]>("configurations", "GET", undefined, { serial_project_id: String(serial_project_id) }),
+  },
+
+  individual_requests: {
+    list: () => request<IndividualRequest[]>("individual_requests"),
+    update: (body: object) => request<any>("individual_requests", "POST", body),
   },
 };
 
@@ -268,4 +285,38 @@ export interface SlotMonth {
   total_occupied: number;
   load_pct: number;
   overloaded: boolean;
+}
+
+export interface Configuration {
+  id: number;
+  name: string;
+  description: string;
+  price_coefficient: number;
+  duration_days: number;
+  included_stages: number[];
+}
+
+export interface SerialProject {
+  id: number;
+  name: string;
+  area_sqm: number;
+  base_price: number;
+  base_duration_days: number;
+  description: string;
+  is_active: boolean;
+  config_count: number;
+  configurations: Configuration[];
+}
+
+export interface IndividualRequest {
+  id: number;
+  deal_id: number;
+  deal_code: string;
+  client_name: string;
+  desired_area: number;
+  special_requests: string;
+  status: string;
+  design_deadline: string | null;
+  estimate_file_url: string | null;
+  created_at: string;
 }
