@@ -100,11 +100,12 @@ function DirectorDocRow({ item, dealId, onUploaded }: {
 }
 
 // ─── Панель директора (показывается вместо шагов менеджера) ──────────────────
-function DirectorPanel({ deal, docPackage, submitting, showReject, rejReason, onReload,
+function DirectorPanel({ deal, docPackage, docsLoading, submitting, showReject, rejReason, onReload,
   onApprove, onToggleReject, onReject, onRejReasonChange, onConfirmPayment, onNext
 }: {
   deal: Deal;
   docPackage: ContractDocsPackage | null;
+  docsLoading: boolean;
   submitting: boolean;
   showReject: boolean;
   rejReason: string;
@@ -116,8 +117,8 @@ function DirectorPanel({ deal, docPackage, submitting, showReject, rejReason, on
   onConfirmPayment: () => void;
   onNext: () => void;
 }) {
-  const cs       = docPackage?.contract_status ?? "none";
-  const items    = docPackage?.items || [];
+  const cs        = docPackage?.contract_status ?? "none";
+  const items     = docPackage?.items || [];
   const allSigned = items.length > 0 && items.every(it => it.signed_file_url);
 
   const STATUS_INFO: Record<string, { label: string; cls: string; icon: string }> = {
@@ -130,8 +131,16 @@ function DirectorPanel({ deal, docPackage, submitting, showReject, rejReason, on
   };
   const statusInfo = STATUS_INFO[cs] || STATUS_INFO["none"];
 
+  if (docsLoading) {
+    return (
+      <div className="px-5 py-5 space-y-3">
+        {[1,2,3].map(i => <div key={i} className="h-16 bg-secondary rounded-xl animate-pulse" />)}
+      </div>
+    );
+  }
+
   return (
-    <div className="px-5 py-5 space-y-5">
+    <div className="px-5 py-5 space-y-4">
       {/* Статус */}
       <div className={`flex items-center gap-2 px-4 py-3 rounded-xl border ${statusInfo.cls}`}>
         <Icon name={statusInfo.icon as Parameters<typeof Icon>[0]["name"]} size={16} className="shrink-0" />
@@ -148,7 +157,7 @@ function DirectorPanel({ deal, docPackage, submitting, showReject, rejReason, on
       {["none","docs_uploaded","docs_review"].includes(cs) && (
         <div className="space-y-2">
           <div className="text-[13px] font-semibold">
-            {items.length > 0 ? "Документы для подписания:" : "Документы менеджером ещё не загружены"}
+            {items.length > 0 ? "Документы от менеджера — подпишите и загрузите:" : "Менеджер ещё не загрузил документы"}
           </div>
           {items.map(item => (
             <DirectorDocRow key={item.template_id} item={item} dealId={deal.id} onUploaded={onReload} />
@@ -382,6 +391,7 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
             <DirectorPanel
               deal={deal}
               docPackage={docPackage}
+              docsLoading={docsLoading}
               submitting={submitting}
               showReject={showReject}
               rejReason={rejReason}
