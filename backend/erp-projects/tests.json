@@ -6,7 +6,7 @@
       "path": "/",
       "expectedStatus": 200,
       "expectedBody": {"projects": []},
-      "bodyMatcher": "partial"
+      "bodyMatcher": "contains_key"
     }
   ]
 }

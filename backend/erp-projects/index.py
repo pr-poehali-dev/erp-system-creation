@@ -5,6 +5,7 @@ import json
 import os
 import psycopg2
 from datetime import date, datetime
+from decimal import Decimal
 
 
 CORS = {
@@ -28,6 +29,8 @@ def get_conn():
 def json_serial(obj):
     if isinstance(obj, (date, datetime)):
         return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
 
 
@@ -73,8 +76,10 @@ def handler(event: dict, context) -> dict:
                 }
 
             else:
-                # Список проектов
-                cur.execute("""
+                # Список проектов (archived=1 — только архив, иначе — активные/завершённые)
+                show_archived = params.get('archived') == '1'
+                where_clause = "WHERE p.status = 'archived'" if show_archived else "WHERE p.status != 'archived'"
+                cur.execute(f"""
                     SELECT p.id, p.code, p.address, p.brigade, p.start_date, p.deadline, p.status, p.total_cost,
                            c.name as client_name,
                            (SELECT COUNT(*) FROM project_stages ps WHERE ps.project_id = p.id) as total_stages,
@@ -82,8 +87,8 @@ def handler(event: dict, context) -> dict:
                            (SELECT ps.name FROM project_stages ps WHERE ps.project_id = p.id AND ps.status = 'active' LIMIT 1) as current_stage
                     FROM projects p
                     LEFT JOIN clients c ON p.client_id = c.id
-                    WHERE p.status != 'archived'
-                    ORDER BY p.created_at DESC
+                    {where_clause}
+                    ORDER BY p.updated_at DESC
                 """)
                 cols = [d[0] for d in cur.description]
                 rows = [dict(zip(cols, r)) for r in cur.fetchall()]

@@ -42,7 +42,12 @@ export const api = {
   },
 
   projects: {
-    list: () => request<Project[]>("projects"),
+    list: () => request<{ projects: Project[] }>("projects").then(r => r.projects),
+    listArchived: () => request<{ projects: Project[] }>("projects", "GET", undefined, { archived: "1" }).then(r => r.projects),
+    archive: (project_id: number) =>
+      request<any>("projects", "PUT", { action: "update_project", project_id, status: "archived" }),
+    restore: (project_id: number) =>
+      request<any>("projects", "PUT", { action: "update_project", project_id, status: "active" }),
   },
 
   procurement: {
