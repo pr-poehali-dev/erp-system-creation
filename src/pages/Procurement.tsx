@@ -5,10 +5,21 @@ import { api, MaterialRequest, Project } from "@/lib/api";
 
 interface Props { role: Role; }
 
-const STATUS_MAP: Record<string, { label: string; cls: string; next: string | null; nextLabel: string | null }> = {
-  new: { label: "Новая", cls: "badge-warning", next: "ordered", nextLabel: "Отметить заказанным" },
-  ordered: { label: "Заказан", cls: "badge-info", next: "delivered", nextLabel: "Отметить доставленным" },
-  delivered: { label: "Доставлен", cls: "badge-success", next: null, nextLabel: null },
+const STATUS_MAP: Record<string, { label: string; cls: string; icon: string }> = {
+  new:         { label: "Новая",     cls: "bg-amber-100 text-amber-700 border-amber-200",    icon: "Clock" },
+  in_progress: { label: "В работе",  cls: "bg-blue-100 text-blue-700 border-blue-200",        icon: "Truck" },
+  purchased:   { label: "Закуплено", cls: "bg-emerald-100 text-emerald-700 border-emerald-200", icon: "PackageCheck" },
+  // legacy
+  ordered:     { label: "Заказан",   cls: "bg-blue-100 text-blue-700 border-blue-200",        icon: "Truck" },
+  delivered:   { label: "Доставлен", cls: "bg-emerald-100 text-emerald-700 border-emerald-200", icon: "PackageCheck" },
+};
+
+const STATUS_TRANSITIONS: Record<string, { value: string; label: string }[]> = {
+  new:         [{ value: "in_progress", label: "В работе" }, { value: "purchased", label: "Закуплено" }],
+  in_progress: [{ value: "purchased", label: "Закуплено" }],
+  ordered:     [{ value: "in_progress", label: "В работе" }, { value: "purchased", label: "Закуплено" }],
+  purchased:   [],
+  delivered:   [],
 };
 
 const UNITS = ["шт", "м²", "м³", "т", "л", "кг"];
@@ -53,8 +64,9 @@ export default function Procurement({ role }: Props) {
     api.projects.list().then(setProjects);
   }, []);
 
-  const pendingCount = requests.filter((r) => r.status === "new").length;
-  const orderedCount = requests.filter((r) => r.status === "ordered").length;
+  const pendingCount    = requests.filter((r) => r.status === "new").length;
+  const inProgressCount = requests.filter((r) => r.status === "in_progress" || r.status === "ordered").length;
+  const purchasedCount  = requests.filter((r) => r.status === "purchased" || r.status === "delivered").length;
 
   const handleOpenModal = () => {
     setForm({ ...EMPTY_FORM });
@@ -125,13 +137,15 @@ export default function Procurement({ role }: Props) {
             <Icon name="RefreshCw" size={13} className={loading ? "animate-spin" : ""} />
             Обновить
           </button>
-          <button
-            onClick={handleOpenModal}
-            className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors"
-          >
-            <Icon name="Plus" size={14} />
-            Новая заявка
-          </button>
+          {role !== "supplier" && (
+            <button
+              onClick={handleOpenModal}
+              className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors"
+            >
+              <Icon name="Plus" size={14} />
+              Новая заявка
+            </button>
+          )}
         </div>
       </div>
 
@@ -145,15 +159,15 @@ export default function Procurement({ role }: Props) {
             color: "text-amber-600 bg-amber-50",
           },
           {
-            label: "В заказе",
-            value: loading ? "—" : String(orderedCount),
+            label: "В работе",
+            value: loading ? "—" : String(inProgressCount),
             icon: "Truck",
             color: "text-blue-600 bg-blue-50",
           },
           {
-            label: "Всего заявок",
-            value: loading ? "—" : String(requests.length),
-            icon: "ShoppingCart",
+            label: "Закуплено",
+            value: loading ? "—" : String(purchasedCount),
+            icon: "PackageCheck",
             color: "text-emerald-600 bg-emerald-50",
           },
         ].map((c) => (
@@ -204,7 +218,7 @@ export default function Procurement({ role }: Props) {
             <table className="w-full">
               <thead>
                 <tr className="border-b border-border">
-                  {["№", "Проект", "Материал", "Кол-во", "Дата поставки", "Прораб", "Приоритет", "Статус", ""].map(
+                  {["№", "Проект", "Материал", "Кол-во", "Дата поставки", "Прораб", "Статус", "Действие"].map(
                     (h) => (
                       <th
                         key={h}
@@ -219,13 +233,15 @@ export default function Procurement({ role }: Props) {
               <tbody className="divide-y divide-border">
                 {requests.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-8 text-center text-hint">
+                    <td colSpan={8} className="px-4 py-8 text-center text-hint">
                       Заявок пока нет
                     </td>
                   </tr>
                 ) : (
                   requests.map((r) => {
                     const st = STATUS_MAP[r.status] || STATUS_MAP["new"];
+                    const transitions = STATUS_TRANSITIONS[r.status] || [];
+                    const isSaving = statusSaving === r.id;
                     return (
                       <tr key={r.id} className="hover:bg-background transition-colors">
                         <td className="px-4 py-3 text-[13px] text-primary font-medium whitespace-nowrap">
@@ -247,44 +263,41 @@ export default function Procurement({ role }: Props) {
                         <td className="px-4 py-3 text-[13px] whitespace-nowrap">
                           {r.quantity} {r.unit}
                         </td>
-                        <td className="px-4 py-3 text-hint whitespace-nowrap">
-                          {new Date(r.required_date).toLocaleDateString("ru-RU")}
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <span className={`text-[13px] ${
+                            new Date(r.required_date) < new Date() && r.status !== "purchased" && r.status !== "delivered"
+                              ? "text-red-500 font-medium"
+                              : "text-hint"
+                          }`}>
+                            {new Date(r.required_date).toLocaleDateString("ru-RU")}
+                          </span>
                         </td>
                         <td className="px-4 py-3 text-[13px] whitespace-nowrap">
                           {r.foreman_name || "—"}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          <span
-                            className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${
-                              r.priority === "urgent" ? "badge-error" : "badge-info"
-                            }`}
-                          >
-                            {r.priority === "urgent" ? "Срочно" : "Обычно"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 whitespace-nowrap">
-                          <span
-                            className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${st.cls}`}
-                          >
+                          <span className={`text-[11px] px-2 py-0.5 rounded-full border font-medium ${st.cls}`}>
                             {st.label}
                           </span>
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          {canChangeStatus(role) && st.next && (
-                            <button
-                              onClick={() => handleStatusChange(r, st.next!)}
-                              disabled={statusSaving === r.id}
-                              className="text-[12px] px-3 py-1 border border-border rounded-lg hover:bg-secondary transition-colors disabled:opacity-50 whitespace-nowrap"
-                            >
-                              {statusSaving === r.id ? (
-                                <span className="flex items-center gap-1">
-                                  <Icon name="Loader2" size={11} className="animate-spin" />
-                                  ...
-                                </span>
-                              ) : (
-                                st.nextLabel
-                              )}
-                            </button>
+                          {canChangeStatus(role) && transitions.length > 0 && (
+                            <div className="flex items-center gap-1.5">
+                              {transitions.map(t => (
+                                <button
+                                  key={t.value}
+                                  onClick={() => handleStatusChange(r, t.value)}
+                                  disabled={isSaving}
+                                  className="text-[12px] px-3 py-1.5 border border-border rounded-lg hover:bg-secondary transition-colors disabled:opacity-50 whitespace-nowrap flex items-center gap-1"
+                                >
+                                  {isSaving
+                                    ? <Icon name="Loader" size={11} className="animate-spin" />
+                                    : null
+                                  }
+                                  {t.label}
+                                </button>
+                              ))}
+                            </div>
                           )}
                         </td>
                       </tr>
