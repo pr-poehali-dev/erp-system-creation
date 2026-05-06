@@ -24,7 +24,6 @@ interface Props {
   canEdit: boolean;
   isArchiveView?: boolean;
   onToKp: () => void;
-  onToContract: () => void;
   onToPlanning?: () => void;
   onLost: () => void;
   onArchive?: () => void;
@@ -34,14 +33,11 @@ interface Props {
 
 export default function DealCard({
   deal, canEdit, isArchiveView,
-  onToKp, onToContract, onToPlanning, onLost, onArchive, onRestore, onDelete,
+  onToKp, onToPlanning, onLost, onArchive, onRestore, onDelete,
 }: Props) {
   const isSerial = deal.project_type === "serial" || !deal.project_type;
   const cs       = deal.contract_status || "none";
   const csBadge  = CONTRACT_STATUS_BADGE[cs];
-
-  // Нет стадии contract в воронке — убрано
-  const showContractBtn = false;
 
   const isInProduction = deal.stage === "planning" || deal.stage === "closed";
 

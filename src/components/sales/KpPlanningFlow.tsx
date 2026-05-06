@@ -119,13 +119,6 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
     finally { setSubmitting(false); }
   };
 
-  const handleToPlanning = async () => {
-    setSaving(true); setError("");
-    try { await api.deals.toPlanning(deal.id); onDone(); }
-    catch (e: unknown) { setError(e instanceof Error ? e.message : "Ошибка"); }
-    finally { setSaving(false); }
-  };
-
   const stepDone = (s: Step): boolean => {
     if (s === "slot")     return !!deal.kp_slot_id;
     if (s === "download") return !!deal.kp_slot_id && cs !== "none";
@@ -201,13 +194,11 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
             requiredDone={requiredDone}
             isApproved={isApproved}
             submitting={submitting}
-            saving={saving}
             error={error}
             dealId={deal.id}
             onSetStep={setStep}
             onReloadDocs={reloadDocs}
             onSubmitReview={handleSubmitReview}
-            onToPlanning={handleToPlanning}
             onClose={onClose}
           />
         )}

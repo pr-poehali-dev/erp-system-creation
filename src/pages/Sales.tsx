@@ -4,7 +4,6 @@ import Icon from "@/components/ui/icon";
 import { api, Deal, Client, Staff, SerialProject, StageDuration } from "@/lib/api";
 import LeadModal from "@/components/sales/LeadModal";
 import KpModal from "@/components/sales/KpModal";
-import ContractModal from "@/components/sales/ContractModal";
 import KpPlanningFlow from "@/components/sales/KpPlanningFlow";
 import DealCard from "@/components/sales/DealCard";
 
@@ -30,7 +29,6 @@ export default function Sales({ role }: Props) {
   // Модалки
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [kpDeal, setKpDeal] = useState<Deal | null>(null);
-  const [contractDeal, setContractDeal] = useState<Deal | null>(null);
   const [planningDeal, setPlanningDeal] = useState<Deal | null>(null);
 
   const [saving, setSaving] = useState(false);
@@ -91,16 +89,6 @@ export default function Sales({ role }: Props) {
       setKpDeal(null);
       loadDeals();
       notify("КП сохранено");
-    } finally { setSaving(false); }
-  };
-
-  const handleSignContract = async (deal: Deal, body: object) => {
-    setSaving(true);
-    try {
-      await api.deals.toContract(deal.id, body);
-      setContractDeal(null);
-      loadDeals();
-      notify("Договор подписан — проект создан автоматически");
     } finally { setSaving(false); }
   };
 
@@ -224,7 +212,6 @@ export default function Sales({ role }: Props) {
                   canEdit={false}
                   isArchiveView
                   onToKp={() => {}}
-                  onToContract={() => {}}
                   onLost={() => {}}
                   onRestore={() => handleRestoreDeal(deal)}
                 />
@@ -278,7 +265,6 @@ export default function Sales({ role }: Props) {
                         deal={deal}
                         canEdit={canEdit}
                         onToKp={() => setKpDeal(deal)}
-                        onToContract={() => setContractDeal(deal)}
                         onToPlanning={() => setPlanningDeal(deal)}
                         onLost={() => handleLost(deal)}
                         onArchive={role === "director" ? () => handleArchiveDeal(deal) : undefined}
@@ -350,16 +336,6 @@ export default function Sales({ role }: Props) {
           saving={saving}
           onClose={() => setKpDeal(null)}
           onSubmit={(body) => handleSaveKp(kpDeal, body)}
-        />
-      )}
-
-      {contractDeal && (
-        <ContractModal
-          deal={contractDeal}
-          role={role}
-          saving={saving}
-          onClose={() => setContractDeal(null)}
-          onSubmit={(body) => handleSignContract(contractDeal, body)}
         />
       )}
 

@@ -15,20 +15,18 @@ interface Props {
   requiredDone: boolean;
   isApproved: boolean;
   submitting: boolean;
-  saving: boolean;
   error: string;
   dealId: number;
   onSetStep: (s: Step) => void;
   onReloadDocs: () => void;
   onSubmitReview: () => void;
-  onToPlanning: () => void;
   onClose: () => void;
 }
 
 export default function KpFlowManagerDocs({
   step, cs, kpSlotDate, docPackage, docsLoading, items,
-  requiredDone, isApproved, submitting, saving, error,
-  dealId, onSetStep, onReloadDocs, onSubmitReview, onToPlanning, onClose,
+  requiredDone, isApproved, submitting, error,
+  dealId, onSetStep, onReloadDocs, onSubmitReview, onClose,
 }: Props) {
   return (
     <>
