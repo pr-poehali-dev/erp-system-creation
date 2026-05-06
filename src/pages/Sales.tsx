@@ -187,7 +187,7 @@ export default function Sales({ role }: Props) {
 
       {/* Вкладка: Заявка на выплату */}
       {tab === "payout" && showPayoutTab && (
-        <PayoutTab role={role} managerId={currentManagerId} />
+        <PayoutTab key={`payout-${currentManagerId}`} role={role} managerId={currentManagerId} onReload={loadPayoutCount} />
       )}
 
       {/* Воронка — 4 колонки */}

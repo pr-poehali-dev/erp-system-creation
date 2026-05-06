@@ -23,9 +23,10 @@ const STATUS_BADGE: Record<string, { label: string; cls: string; icon: string }>
 interface Props {
   role: Role;
   managerId?: number;
+  onReload?: () => void;
 }
 
-export default function PayoutTab({ role, managerId }: Props) {
+export default function PayoutTab({ role, managerId, onReload }: Props) {
   const [deals, setDeals]       = useState<PayoutDeal[]>([]);
   const [loading, setLoading]   = useState(true);
   const [submitting, setSubmitting] = useState<number | null>(null);
@@ -78,6 +79,7 @@ export default function PayoutTab({ role, managerId }: Props) {
       setSuccessId(deal.id);
       setTimeout(() => setSuccessId(null), 5000);
       load();
+      onReload?.();
     } finally { setSubmitting(null); }
   };
 
@@ -88,6 +90,7 @@ export default function PayoutTab({ role, managerId }: Props) {
     try {
       await api.payout_requests.update(deal.payout_id, "approved");
       load();
+      onReload?.();
     } finally { setSubmitting(null); }
   };
 
@@ -100,6 +103,7 @@ export default function PayoutTab({ role, managerId }: Props) {
       setRejectId(null);
       setRejectComment("");
       load();
+      onReload?.();
     } finally { setSubmitting(null); }
   };
 
@@ -177,6 +181,12 @@ export default function PayoutTab({ role, managerId }: Props) {
                 </div>
                 <div className="text-[13px] font-semibold text-foreground">{deal.client_name}</div>
                 <div className="text-hint text-[11px]">{deal.manager_name} · {deal.client_phone}</div>
+                {deal.project_id && (
+                  <div className="flex items-center gap-1 text-[11px] text-emerald-700 font-medium mt-0.5">
+                    <Icon name="HardHat" size={10} className="shrink-0" />
+                    Проект создан · план-график в разделе «Строительство»
+                  </div>
+                )}
               </div>
               <div className="text-right shrink-0">
                 <div className="text-[14px] font-bold text-emerald-600">{fmt(deal.budget)}</div>

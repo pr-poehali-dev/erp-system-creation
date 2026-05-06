@@ -553,9 +553,9 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
     if slot_id:
         cur.execute(f"UPDATE {SCHEMA}.slots SET status='busy' WHERE id=%s", (slot_id,))
 
-    # Привязать project_id к сделке + перевести в planning
+    # Привязать project_id к сделке (stage остаётся 'contract' — оплата ещё не подтверждена)
     cur.execute(f"""
-        UPDATE {SCHEMA}.deals SET project_id=%s, stage='planning', updated_at=now()
+        UPDATE {SCHEMA}.deals SET project_id=%s, updated_at=now()
         WHERE id=%s
     """, (project_id, deal_id))
 
@@ -1555,6 +1555,7 @@ def get_payout_deals(cur, manager_id: int = None):
                c.name AS client_name, c.phone AS client_phone,
                s.name AS manager_name,
                sp.name AS serial_project_name,
+               d.project_id,
                pr.id AS payout_id, pr.status AS payout_status,
                pr.amount AS payout_amount, pr.requested_at, pr.notes,
                pr.invoice_file_url, pr.invoice_file_name, pr.reject_comment

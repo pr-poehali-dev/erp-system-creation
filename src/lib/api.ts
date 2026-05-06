@@ -589,6 +589,7 @@ export interface PayoutDeal {
   client_phone: string;
   manager_name: string;
   serial_project_name: string | null;
+  project_id: number | null;
   payout_id: number | null;
   payout_status: string | null; // pending | approved | rejected
   payout_amount: number | null;

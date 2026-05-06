@@ -4,13 +4,12 @@ import Icon from "@/components/ui/icon";
 const MONTH_NAMES = ["","Янв","Фев","Мар","Апр","Май","Июн","Июл","Авг","Сен","Окт","Ноя","Дек"];
 const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)} млн ₽` : `${n.toLocaleString("ru")} ₽`;
 
-// Метка статуса пакета документов для карточки
 const CONTRACT_STATUS_BADGE: Record<string, { label: string; cls: string; icon: string }> = {
-  docs_uploaded:       { label: "Загружен",         cls: "bg-blue-50 text-blue-700 border-blue-200",     icon: "Upload" },
-  docs_review:         { label: "На проверке",       cls: "bg-amber-50 text-amber-700 border-amber-200",  icon: "Clock" },
-  docs_approved:       { label: "Одобрено",          cls: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: "CheckCircle" },
-  payment_pending:     { label: "Ожидание оплаты",   cls: "bg-violet-50 text-violet-700 border-violet-200", icon: "Wallet" },
-  payment_confirmed:   { label: "Оплачено",          cls: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: "BadgeCheck" },
+  docs_uploaded:     { label: "Загружен",          cls: "bg-blue-50 text-blue-700 border-blue-200",          icon: "Upload" },
+  docs_review:       { label: "На проверке",        cls: "bg-amber-50 text-amber-700 border-amber-200",       icon: "Clock" },
+  docs_approved:     { label: "Одобрено",           cls: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: "CheckCircle" },
+  payment_pending:   { label: "Ожидание оплаты",    cls: "bg-violet-50 text-violet-700 border-violet-200",    icon: "Wallet" },
+  payment_confirmed: { label: "Оплата подтверждена",cls: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: "BadgeCheck" },
 };
 
 interface Props {
@@ -22,17 +21,26 @@ interface Props {
 }
 
 export default function DealCard({ deal, canEdit, onToKp, onToContract, onLost }: Props) {
-  const isSerial  = deal.project_type === "serial" || !deal.project_type;
-  const cs        = deal.contract_status || "none";
-  const csBadge   = CONTRACT_STATUS_BADGE[cs];
+  const isSerial = deal.project_type === "serial" || !deal.project_type;
+  const cs       = deal.contract_status || "none";
+  const csBadge  = CONTRACT_STATUS_BADGE[cs];
 
-  // Кнопка "Подписать / Открыть договор" показывается на стадии kp
-  // но также нужна директору на стадии contract если ещё не дошли до конца
-  const showContractBtn = deal.stage === "kp" ||
-    (deal.stage === "contract" && ["docs_review","docs_approved","payment_pending"].includes(cs));
+  // Кнопка "Открыть договор" — пока оплата не подтверждена
+  const showContractBtn =
+    deal.stage === "kp" ||
+    (deal.stage === "contract" && ["none","docs_uploaded","docs_review","docs_approved","payment_pending"].includes(cs));
+
+  // Оплата подтверждена — проект создан, ждём вознаграждения
+  const isPaymentConfirmed = cs === "payment_confirmed";
+  // В производстве (stage=planning)
+  const isInProduction = deal.stage === "planning";
 
   return (
-    <div className="bg-white border border-border rounded-xl p-3 hover:border-primary/30 hover:shadow-sm transition-all">
+    <div className={`border rounded-xl p-3 hover:shadow-sm transition-all ${
+      isPaymentConfirmed || isInProduction
+        ? "bg-emerald-50/40 border-emerald-200 hover:border-emerald-300"
+        : "bg-white border-border hover:border-primary/30"
+    }`}>
       {/* Top row */}
       <div className="flex items-start justify-between gap-2 mb-2">
         <div>
@@ -81,14 +89,32 @@ export default function DealCard({ deal, canEdit, onToKp, onToContract, onLost }
         </div>
       )}
 
+      {/* Ссылка на проект (если создан) */}
+      {deal.project_id && (
+        <div className="text-[11px] text-emerald-700 mb-1 flex items-center gap-1 font-medium">
+          <Icon name="HardHat" size={10} className="shrink-0" />
+          Проект привязан · план-график в разделе «Строительство»
+        </div>
+      )}
+
       {/* Manager */}
       <div className="text-hint text-[11px] mb-2">{deal.manager_name}</div>
 
-      {/* Contract status badge (если есть активный процесс) */}
+      {/* Contract status badge */}
       {csBadge && cs !== "none" && (
         <div className={`flex items-center gap-1 px-2 py-1 rounded-md border text-[10px] font-medium mb-2 w-fit ${csBadge.cls}`}>
           <Icon name={csBadge.icon as Parameters<typeof Icon>[0]["name"]} size={9} />
           {csBadge.label}
+        </div>
+      )}
+
+      {/* Плашка "В производстве + заявка на выплату" */}
+      {isInProduction && (
+        <div className="bg-emerald-100 border border-emerald-300 rounded-lg px-2 py-1.5 mb-2 flex items-center gap-1.5">
+          <Icon name="Hammer" size={11} className="text-emerald-700 shrink-0" />
+          <span className="text-[11px] text-emerald-800 font-medium">
+            В производстве · подайте счёт на вознаграждение
+          </span>
         </div>
       )}
 
@@ -107,7 +133,7 @@ export default function DealCard({ deal, canEdit, onToKp, onToContract, onLost }
             <button onClick={onToContract}
               className="flex items-center gap-1 px-2 py-1 bg-violet-50 border border-violet-200 text-violet-700 rounded-md text-[11px] font-medium hover:bg-violet-100 transition-colors">
               <Icon name="PenLine" size={10} />
-              {deal.stage === "kp" ? "Подписать договор" : "Открыть договор"}
+              {deal.stage === "kp" ? "Подписать договор" : "Договор →"}
             </button>
           )}
 
@@ -117,21 +143,6 @@ export default function DealCard({ deal, canEdit, onToKp, onToContract, onLost }
               <Icon name="Edit2" size={10} />
               Ред. КП
             </button>
-          )}
-
-          {deal.stage === "contract" && cs === "payment_confirmed" && (
-            <button onClick={onToContract}
-              className="flex items-center gap-1 px-2 py-1 bg-violet-50 border border-violet-200 text-violet-700 rounded-md text-[11px] font-medium hover:bg-violet-100 transition-colors">
-              <Icon name="CheckCircle" size={10} />
-              Создать проект
-            </button>
-          )}
-
-          {deal.stage === "planning" && (
-            <div className="flex items-center gap-1 px-2 py-1 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-md text-[11px] font-medium">
-              <Icon name="Hammer" size={10} />
-              В производстве
-            </div>
           )}
 
           {["lead", "kp"].includes(deal.stage) && (
