@@ -561,7 +561,8 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
 
     return project_id, None
 
-def get_projects(cur):
+def get_projects(cur, archived=False):
+    where = "WHERE p.status = 'archived'" if archived else "WHERE p.status != 'archived'"
     cur.execute(f"""
         SELECT p.id, p.code, p.start_date, p.deadline, p.status, p.brigade, p.total_cost,
                c.name as client_name, c.phone as client_phone,
@@ -570,6 +571,7 @@ def get_projects(cur):
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id AND ps.status='done') as done_stages
         FROM {SCHEMA}.projects p
         LEFT JOIN {SCHEMA}.clients c ON c.id = p.client_id
+        {where}
         ORDER BY p.created_at DESC
         LIMIT 50
     """)
@@ -2104,7 +2106,7 @@ def handler(event: dict, context) -> dict:
         # ── PROJECTS ───────────────────────────────────────────────────────────
         elif resource == "projects":
             if method == "GET":
-                data = get_projects(cur)
+                data = get_projects(cur, archived=qs.get("archived") == "1")
                 return ok(data)
 
         # ── PROCUREMENT ────────────────────────────────────────────────────────
