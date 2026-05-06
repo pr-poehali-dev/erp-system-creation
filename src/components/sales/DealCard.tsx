@@ -29,18 +29,19 @@ interface Props {
   onLost: () => void;
   onArchive?: () => void;
   onRestore?: () => void;
+  onDelete?: () => void;
 }
 
 export default function DealCard({
   deal, canEdit, isArchiveView,
-  onToKp, onToContract, onToPlanning, onLost, onArchive, onRestore,
+  onToKp, onToContract, onToPlanning, onLost, onArchive, onRestore, onDelete,
 }: Props) {
   const isSerial = deal.project_type === "serial" || !deal.project_type;
   const cs       = deal.contract_status || "none";
   const csBadge  = CONTRACT_STATUS_BADGE[cs];
 
-  // Кнопка «Подписать договор» — для стадии contract (если договор уже подписан напрямую)
-  const showContractBtn = deal.stage === "contract";
+  // Нет стадии contract в воронке — убрано
+  const showContractBtn = false;
 
   const isInProduction = deal.stage === "planning";
 
@@ -209,6 +210,15 @@ export default function DealCard({
               className="flex items-center gap-1 px-2 py-1 border border-gray-200 text-gray-400 rounded-md text-[11px] hover:bg-gray-50 hover:text-gray-600 transition-colors ml-auto">
               <Icon name="Archive" size={10} />
               В архив
+            </button>
+          )}
+
+          {/* Удалить — только директор, с освобождением слота */}
+          {onDelete && (
+            <button onClick={onDelete}
+              className="flex items-center gap-1 px-2 py-1 border border-red-200 text-red-400 rounded-md text-[11px] hover:bg-red-50 hover:text-red-600 transition-colors">
+              <Icon name="Trash2" size={10} />
+              Удалить
             </button>
           )}
         </div>

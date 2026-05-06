@@ -10,12 +10,12 @@ import DealCard from "@/components/sales/DealCard";
 
 interface Props { role: Role; }
 
-// Воронка: 4 стадии (без "Квалификация")
+// Воронка: 4 стадии
 const STAGES = [
-  { key: "lead",     label: "Новый лид",        color: "bg-blue-500",    light: "bg-blue-50 border-blue-200",     icon: "UserPlus" },
-  { key: "kp",       label: "КП отправлено",    color: "bg-amber-500",   light: "bg-amber-50 border-amber-200",   icon: "FileText" },
-  { key: "contract", label: "Договор подписан", color: "bg-violet-500",  light: "bg-violet-50 border-violet-200", icon: "PenLine" },
-  { key: "planning", label: "Планирование",     color: "bg-emerald-500", light: "bg-emerald-50 border-emerald-200", icon: "CalendarCheck" },
+  { key: "lead",     label: "Новый лид",    color: "bg-blue-500",    light: "bg-blue-50 border-blue-200",     icon: "UserPlus" },
+  { key: "kp",       label: "КП отправлено", color: "bg-amber-500",  light: "bg-amber-50 border-amber-200",   icon: "FileText" },
+  { key: "planning", label: "Планирование",  color: "bg-emerald-500", light: "bg-emerald-50 border-emerald-200", icon: "CalendarCheck" },
+  { key: "closed",   label: "Закрыт",        color: "bg-gray-500",   light: "bg-gray-50 border-gray-200",     icon: "CheckCircle" },
 ];
 
 export default function Sales({ role }: Props) {
@@ -121,6 +121,13 @@ export default function Sales({ role }: Props) {
     await api.deals.restore(deal.id);
     loadArchivedDeals();
     notify(`Сделка ${deal.code} восстановлена`);
+  };
+
+  const handleDeleteDeal = async (deal: Deal) => {
+    if (!confirm(`Удалить сделку "${deal.code}"? Привязанный слот будет освобождён.\nДействие необратимо!`)) return;
+    await api.deals.delete(deal.id);
+    loadDeals();
+    notify(`Сделка ${deal.code} удалена, слот освобождён`);
   };
 
   // Фильтруем lost
@@ -267,6 +274,7 @@ export default function Sales({ role }: Props) {
                         onToPlanning={() => setPlanningDeal(deal)}
                         onLost={() => handleLost(deal)}
                         onArchive={role === "director" ? () => handleArchiveDeal(deal) : undefined}
+                        onDelete={role === "director" ? () => handleDeleteDeal(deal) : undefined}
                       />
                     ))
                   )}
@@ -350,6 +358,7 @@ export default function Sales({ role }: Props) {
       {planningDeal && (
         <KpPlanningFlow
           deal={planningDeal}
+          role={role}
           cfgDur={planningDeal.configuration_duration || 115}
           onDone={() => { setPlanningDeal(null); loadDeals(); notify("Обновлено"); }}
           onClose={() => setPlanningDeal(null)}

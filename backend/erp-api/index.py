@@ -50,17 +50,23 @@ def next_code(cur, table, prefix, col="code"):
 
 # ─── DEALS ───────────────────────────────────────────────────────────────────
 
+MIN_SLOT_LAG_DAYS = 10  # Минимальное плечо: слот не раньше чем через 10 дней от сегодня
+
 def get_free_slots(cur, signed_date_str: str = None):
     """
     Возвращает свободные слоты.
-    signed_date_str: если передана дата подписания — возвращает только слоты
-    с start_date >= signed_date + 15 дней (минимальный буфер между подписанием и производством).
+    Минимальное плечо — 10 дней от сегодня.
+    signed_date_str: если передана дата подписания — дополнительно фильтрует
+    по signed_date + 15 дней.
+    Архивные слоты не попадают в список и не влияют на загрузку.
     """
-    min_start = date.today()
+    min_start = date.today() + timedelta(days=MIN_SLOT_LAG_DAYS)
     if signed_date_str:
         try:
             signed = date.fromisoformat(signed_date_str)
-            min_start = signed + timedelta(days=15)
+            candidate = signed + timedelta(days=15)
+            if candidate > min_start:
+                min_start = candidate
         except Exception:
             pass
 
@@ -2468,6 +2474,32 @@ def handler(event: dict, context) -> dict:
                 elif action == "restore":
                     deal_id = int(body["deal_id"])
                     cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=FALSE, updated_at=now() WHERE id=%s RETURNING code", (deal_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return err("Сделка не найдена")
+                    conn.commit()
+                    return ok({"success": True, "code": row[0]})
+                elif action == "delete":
+                    deal_id = int(body["deal_id"])
+                    # Читаем слоты привязанные к этой сделке (slot_id и kp_slot_id)
+                    cur.execute(f"SELECT slot_id, kp_slot_id FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+                    drow = cur.fetchone()
+                    if not drow:
+                        return err("Сделка не найдена")
+                    slot_id_val, kp_slot_id_val = drow
+                    # Освобождаем слоты
+                    for sid in set(filter(None, [slot_id_val, kp_slot_id_val])):
+                        cur.execute(f"""
+                            UPDATE {SCHEMA}.slots SET status='free', deal_id=NULL
+                            WHERE id=%s AND status IN ('booked','busy','free')
+                        """, (sid,))
+                    # Архивируем связанный проект если есть
+                    cur.execute(f"""
+                        UPDATE {SCHEMA}.projects SET status='archived', updated_at=now()
+                        WHERE deal_id=%s AND status != 'archived'
+                    """, (deal_id,))
+                    # Удаляем сделку
+                    cur.execute(f"DELETE FROM {SCHEMA}.deals WHERE id=%s RETURNING code", (deal_id,))
                     row = cur.fetchone()
                     if not row:
                         return err("Сделка не найдена")

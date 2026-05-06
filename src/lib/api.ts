@@ -44,6 +44,8 @@ export const api = {
       request<any>("deals", "POST", { action: "confirm_kp_payment", deal_id }),
     toPlanning: (deal_id: number) =>
       request<any>("deals", "POST", { action: "to_planning", deal_id }),
+    delete: (deal_id: number) =>
+      request<any>("deals", "POST", { action: "delete", deal_id }),
   },
 
   stage_durations: {
