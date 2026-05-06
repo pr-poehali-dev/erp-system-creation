@@ -5,6 +5,7 @@ import { Role } from "@/App";
 import { StepDownload, StepUpload } from "./ContractStepsDownloadUpload";
 import { StepPayment } from "./ContractStepsReviewPayment";
 import ContractStepData from "./ContractStepData";
+import ContractStepSlot from "./ContractStepSlot";
 
 const MIN_BUFFER = 15;
 
@@ -246,19 +247,22 @@ function DirectorPanel({ deal, docPackage, docsLoading, submitting, showReject, 
 }
 
 // ─── Шаги менеджера ───────────────────────────────────────────────────────────
-type Step = "download" | "upload" | "payment" | "contract_data";
+type Step = "slot" | "download" | "upload" | "payment" | "contract_data";
 
 // Определяет с какого шага открыть модалку при первом открытии
-function stepFromStatus(status: string): Step {
-  // Документы отправлены на проверку / менеджер ждёт директора — остаёмся на загрузке
+function stepFromStatus(status: string, hasSlot: boolean): Step {
+  // Слот ещё не выбран — начинаем с выбора слота
+  if (!hasSlot) return "slot";
+  // Документы отправлены на проверку / менеджер ждёт директора
   if (status === "docs_review") return "upload";
-  // Директор одобрил / ждём оплаты / оплата подтверждена — переходим к шагу оплаты
+  // Директор одобрил / ждём оплаты / оплата подтверждена
   if (["docs_approved","payment_pending","payment_confirmed"].includes(status)) return "payment";
-  // Документы ещё не загружены / нет статуса
+  // Документы ещё не загружены
   return "download";
 }
 
 const MANAGER_STEPS = [
+  { key: "slot",     num: 0, label: "Производство" },
   { key: "download", num: 1, label: "Скачать пакет" },
   { key: "upload",   num: 2, label: "Документы" },
   { key: "payment",  num: 3, label: "Оплата" },
@@ -274,7 +278,7 @@ interface Props {
 
 export default function ContractModal({ deal, role, saving, onClose, onSubmit }: Props) {
   const today = new Date().toISOString().slice(0, 10);
-  const [step, setStep]               = useState<Step>("download");
+  const [step, setStep]               = useState<Step>("slot");
   const [docPackage, setDocPackage]   = useState<ContractDocsPackage | null>(null);
   const [docsLoading, setDocsLoading] = useState(true);
   const [submitting, setSubmitting]   = useState(false);
@@ -304,15 +308,23 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
   useEffect(() => {
     api.contract_docs.get(deal.id).then(pkg => {
       setDocPackage(pkg);
-      if (!isDirector) setStep(stepFromStatus(pkg.contract_status));
+      if (!isDirector) setStep(stepFromStatus(pkg.contract_status, !!deal.slot_id));
     }).finally(() => setDocsLoading(false));
   }, [deal.id]);
 
+  // Загрузка слотов при открытии шага slot или contract_data
   useEffect(() => {
-    if (step !== "contract_data" || !isSerial) return;
-    setSloading(true); setSlotId("");
-    api.slots.free(signedDate).then(setSlots).finally(() => setSloading(false));
+    if (!isSerial) return;
+    if (step === "slot" || step === "contract_data") {
+      setSloading(true);
+      api.slots.free(signedDate).then(setSlots).finally(() => setSloading(false));
+    }
   }, [step, isSerial, signedDate]);
+
+  // Если слот уже выбран в сделке — восстанавливаем slotId
+  useEffect(() => {
+    if (deal.slot_id && !slotId) setSlotId(String(deal.slot_id));
+  }, [deal.slot_id]);
 
   const minSlotDate = (() => {
     const d = new Date(signedDate); d.setDate(d.getDate() + MIN_BUFFER);
@@ -363,8 +375,8 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
 
   // Шаг-индикатор для менеджера
   const doneSteps: Record<Step, boolean> = {
+    slot:          !!deal.slot_id,
     download:      contractStatus !== "none",
-    // upload завершён когда директор одобрил (docs_approved+)
     upload:        ["docs_approved","payment_pending","payment_confirmed"].includes(contractStatus),
     payment:       contractStatus === "payment_confirmed",
     contract_data: false,
@@ -438,11 +450,27 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
               })}
             </div>
 
+            {/* ШАГ 0: Производственный слот */}
+            {step === "slot" && (
+              <ContractStepSlot
+                slots={slots} sloading={sloading} slotId={slotId}
+                signedDate={signedDate} cfgDur={cfgDur} minSlotDate={minSlotDate}
+                selectedSlot={selectedSlot} isSerial={isSerial}
+                readOnly={!!deal.slot_id}
+                onSlotChange={setSlotId}
+                onSignedDateChange={setSignedDate}
+                onClose={onClose}
+                onNext={() => setStep("download")}
+              />
+            )}
+
+            {/* ШАГ 1: Скачать документы */}
             {step === "download" && (
               <StepDownload docsLoading={docsLoading} docPackage={docPackage}
                 onClose={onClose} onNext={() => setStep("upload")} />
             )}
 
+            {/* ШАГ 2: Загрузить подписанные */}
             {step === "upload" && (
               <StepUpload docsLoading={docsLoading} docPackage={docPackage}
                 contractStatus={contractStatus} requiredDone={requiredDone}
@@ -451,6 +479,7 @@ export default function ContractModal({ deal, role, saving, onClose, onSubmit }:
                 onSubmitReview={handleSubmitReview} />
             )}
 
+            {/* ШАГ 3: Ожидание оплаты */}
             {step === "payment" && (
               <StepPayment contractStatus={contractStatus} isDirector={false}
                 submitting={submitting} onConfirmPayment={handleConfirmPayment}

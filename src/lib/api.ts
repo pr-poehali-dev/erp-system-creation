@@ -256,6 +256,14 @@ export interface Project {
   progress: number;
   days_left: number;
   stages: ProjectStage[];
+  // Данные из сделки (для директора по строительству)
+  deal_code: string | null;
+  deal_budget: number | null;
+  signed_date: string | null;
+  contract_status: string | null;
+  manager_name: string | null;
+  serial_project_name: string | null;
+  configuration_name: string | null;
 }
 
 export interface MaterialRequest {

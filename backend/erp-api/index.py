@@ -571,9 +571,17 @@ def get_projects(cur, archived=False):
                c.name as client_name, c.phone as client_phone,
                p.address,
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id) as total_stages,
-               (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id AND ps.status='done') as done_stages
+               (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id AND ps.status='done') as done_stages,
+               d.code as deal_code, d.budget as deal_budget, d.signed_date, d.contract_status,
+               sm.name as manager_name,
+               sp.name as serial_project_name,
+               cfg.name as configuration_name
         FROM {SCHEMA}.projects p
         LEFT JOIN {SCHEMA}.clients c ON c.id = p.client_id
+        LEFT JOIN {SCHEMA}.deals d ON d.id = p.deal_id
+        LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id
+        LEFT JOIN {SCHEMA}.serial_projects sp ON sp.id = d.serial_project_id
+        LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
         {where}
         ORDER BY p.created_at DESC
         LIMIT 50

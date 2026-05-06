@@ -37,6 +37,8 @@ export default function Construction({ role }: Props) {
   const [confirmId, setConfirmId]       = useState<number | null>(null);
 
   const isDirector = role === "director";
+  const isConstructionDirector = role === "construction_director";
+  const canArchive = role === "director";
 
   const load = () => {
     setLoading(true);
@@ -263,7 +265,7 @@ export default function Construction({ role }: Props) {
                   </div>
 
                   {/* Кнопки директора */}
-                  {isDirector && (
+                  {canArchive && (
                     <div className="shrink-0">
                       {tab === "active" && !isConfirm && (
                         <button
@@ -313,6 +315,63 @@ export default function Construction({ role }: Props) {
                     </div>
                   )}
                 </div>
+
+                {/* Панель сделки — режим чтения для директора по строительству */}
+                {isConstructionDirector && (p.deal_code || p.manager_name) && (
+                  <div className="mx-5 mb-0 mt-0 border border-blue-200 bg-blue-50/60 rounded-xl px-4 py-3">
+                    <div className="flex items-center gap-2 mb-2">
+                      <Icon name="ClipboardList" size={13} className="text-blue-600 shrink-0" />
+                      <span className="text-[12px] font-semibold text-blue-800">Информация о сделке</span>
+                      {p.contract_status === "payment_confirmed" && (
+                        <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-md font-medium ml-auto">
+                          Оплата подтверждена
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12px]">
+                      {p.deal_code && (
+                        <div>
+                          <span className="text-hint">Сделка:</span>
+                          <span className="font-medium text-foreground ml-1">{p.deal_code}</span>
+                        </div>
+                      )}
+                      {p.manager_name && (
+                        <div>
+                          <span className="text-hint">Менеджер:</span>
+                          <span className="font-medium text-foreground ml-1">{p.manager_name}</span>
+                        </div>
+                      )}
+                      {p.serial_project_name && (
+                        <div>
+                          <span className="text-hint">Проект:</span>
+                          <span className="font-medium text-foreground ml-1">{p.serial_project_name}</span>
+                        </div>
+                      )}
+                      {p.configuration_name && (
+                        <div>
+                          <span className="text-hint">Комплектация:</span>
+                          <span className="font-medium text-foreground ml-1">{p.configuration_name}</span>
+                        </div>
+                      )}
+                      {p.deal_budget && (
+                        <div>
+                          <span className="text-hint">Сумма договора:</span>
+                          <span className="font-medium text-emerald-700 ml-1">
+                            ₽ {p.deal_budget.toLocaleString("ru")}
+                          </span>
+                        </div>
+                      )}
+                      {p.signed_date && (
+                        <div>
+                          <span className="text-hint">Подписан:</span>
+                          <span className="font-medium text-foreground ml-1">
+                            {new Date(p.signed_date).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Gantt mini — не показываем в архиве без этапов */}
                 <div className="px-5 py-4">
