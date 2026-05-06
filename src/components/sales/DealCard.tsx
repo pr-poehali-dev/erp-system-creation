@@ -43,7 +43,7 @@ export default function DealCard({
   // Нет стадии contract в воронке — убрано
   const showContractBtn = false;
 
-  const isInProduction = deal.stage === "planning";
+  const isInProduction = deal.stage === "planning" || deal.stage === "closed";
 
   // Слот — показываем всегда когда привязан
   const showSlot = !!deal.slot_month;
@@ -51,6 +51,7 @@ export default function DealCard({
   // Получаем статус слота
   const slotStatusKey = deal.slot_status ||
     (deal.stage === "planning" ? "booked" :
+     deal.stage === "closed"   ? "booked" :
      deal.stage === "active"   ? "busy"   :
      deal.stage === "done"     ? "archived" : "free");
   const slotSt = SLOT_STATUS[slotStatusKey] || SLOT_STATUS.free;
@@ -139,12 +140,20 @@ export default function DealCard({
         </div>
       )}
 
-      {/* В планировании */}
-      {isInProduction && (
+      {/* В планировании / закрыта */}
+      {deal.stage === "planning" && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 mb-2 flex items-center gap-1.5">
           <Icon name="CalendarCheck" size={11} className="text-amber-700 shrink-0" />
           <span className="text-[11px] text-amber-800 font-medium">
             Планирование производства · проект в разделе «Строительство»
+          </span>
+        </div>
+      )}
+      {deal.stage === "closed" && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1.5 mb-2 flex items-center gap-1.5">
+          <Icon name="CheckCircle" size={11} className="text-emerald-700 shrink-0" />
+          <span className="text-[11px] text-emerald-800 font-medium">
+            Сделка закрыта · проект в разделе «Строительство»
           </span>
         </div>
       )}
@@ -184,7 +193,7 @@ export default function DealCard({
                   : "bg-violet-50 border border-violet-200 text-violet-700 hover:bg-violet-100"
               }`}>
               <Icon name={deal.payment_confirmed ? "PlayCircle" : "PenLine"} size={10} />
-              {deal.payment_confirmed ? "Перевести в планирование →" : "Договор и оплата →"}
+              Договор и оплата →
             </button>
           )}
 

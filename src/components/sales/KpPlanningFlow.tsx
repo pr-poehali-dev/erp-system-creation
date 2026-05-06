@@ -53,10 +53,16 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
 
   const kpSlotDate = deal.kp_slot_start_date;
 
+  const STEP_ORDER: Step[] = ["slot","download","upload","review","payment","planning"];
   const reloadDocs = () => {
     api.contract_docs.get(deal.id).then(pkg => {
       setDocPackage(pkg);
-      setStep(resolveStep(deal, pkg.contract_status, role));
+      const next = resolveStep(deal, pkg.contract_status, role);
+      setStep(prev => {
+        const prevIdx = STEP_ORDER.indexOf(prev);
+        const nextIdx = STEP_ORDER.indexOf(next);
+        return nextIdx >= prevIdx ? next : prev;
+      });
     });
   };
 
@@ -183,8 +189,8 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
           />
         )}
 
-        {/* ── Шаги 2–3: Менеджер — документы ── */}
-        {isManager && ["download","upload"].includes(step) && (
+        {/* ── Шаги 2–4: Менеджер — документы + запуск ── */}
+        {isManager && ["download","upload","planning"].includes(step) && (
           <KpFlowManagerDocs
             step={step}
             cs={cs}
@@ -205,9 +211,6 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
             onClose={onClose}
           />
         )}
-
-        {/* ── Менеджер: финальный шаг "planning" — оплата подтверждена ── */}
-        {isManager && step === "upload" && cs === "payment_confirmed" && null /* handled inside KpFlowManagerDocs */}
 
         {/* ── Директор — проверка + оплата ── */}
         {isDirector && ["download","upload","review","payment"].includes(step) && (

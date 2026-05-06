@@ -137,27 +137,6 @@ export default function KpFlowManagerDocs({
             </div>
           )}
 
-          {cs === "payment_confirmed" && (
-            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
-              <div className="flex items-center gap-2">
-                <Icon name="BadgeCheck" size={18} className="text-emerald-600" />
-                <span className="text-[14px] font-bold text-emerald-900">Оплата подтверждена директором!</span>
-              </div>
-              <div className="text-[12px] text-emerald-800">
-                <ul className="space-y-1 list-disc list-inside">
-                  <li>Слот → <strong>«Зарезервирован»</strong> (жёлтый)</li>
-                  <li>Появится карточка проекта в «Строительстве»</li>
-                  <li>Сделка → «Планирование»</li>
-                </ul>
-              </div>
-              <button type="button" onClick={onToPlanning} disabled={saving}
-                className="w-full px-4 py-3 bg-emerald-600 text-white rounded-lg text-[14px] font-bold hover:bg-emerald-700 disabled:opacity-50 flex items-center justify-center gap-2">
-                {saving ? <div className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : <Icon name="PlayCircle" size={18} />}
-                {saving ? "Создание проекта..." : "Перевести в планирование →"}
-              </button>
-            </div>
-          )}
-
           {!requiredDone && !["docs_review","docs_approved","payment_pending","payment_confirmed"].includes(cs) && (
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
               <Icon name="AlertTriangle" size={13} className="text-amber-500 shrink-0 mt-0.5" />
@@ -189,6 +168,24 @@ export default function KpFlowManagerDocs({
                 className="flex-1 px-4 py-2 border border-border rounded-lg text-[13px] hover:bg-secondary">Закрыть (ожидание оплаты)</button>
             )}
           </div>
+        </div>
+      )}
+      {/* ── ШАГ: Итог — проект создан автоматически после оплаты ── */}
+      {step === "planning" && (
+        <div className="px-5 py-5 space-y-4">
+          <div className="text-[13px] font-semibold">Производство запущено</div>
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <Icon name="BadgeCheck" size={20} className="text-emerald-600" />
+              <span className="text-[14px] font-bold text-emerald-900">Оплата подтверждена — проект создан!</span>
+            </div>
+            <div className="text-[12px] text-emerald-800 space-y-1">
+              <div className="flex items-center gap-1.5"><Icon name="CheckCircle" size={12} className="text-emerald-600 shrink-0" /> Слот зарезервирован</div>
+              <div className="flex items-center gap-1.5"><Icon name="CheckCircle" size={12} className="text-emerald-600 shrink-0" /> Карточка проекта появилась в «Строительстве»</div>
+              <div className="flex items-center gap-1.5"><Icon name="CheckCircle" size={12} className="text-emerald-600 shrink-0" /> Сделка переведена в «Планирование»</div>
+            </div>
+          </div>
+          <button type="button" onClick={onClose} className="w-full px-4 py-2.5 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90">Закрыть</button>
         </div>
       )}
     </>

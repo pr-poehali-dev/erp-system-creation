@@ -1804,36 +1804,87 @@ def set_payment_pending(cur, deal_id: int):
 
 def confirm_payment(cur, deal_id: int):
     """
-    Директор подтверждает оплату → менеджер получает уведомление (шаг 4→финал).
+    Директор подтверждает оплату:
+    - слот (kp_slot_id) → booked (SELECT FOR UPDATE)
+    - создаётся проект со статусом planning
+    - сделка → stage=planning, contract_status=payment_confirmed
+    Автоматически, без кнопки «Перевести в планирование» у менеджера.
     """
     cur.execute(f"""
-        UPDATE {SCHEMA}.deals
-        SET contract_status='payment_confirmed', stage='planning', updated_at=now()
-        WHERE id=%s
-        RETURNING code, manager_id
+        SELECT d.id, d.client_id, d.kp_slot_id, d.code, d.manager_id,
+               d.configuration_id, d.selected_stages, d.buffer_days,
+               d.address, d.budget, d.project_id
+        FROM {SCHEMA}.deals d
+        WHERE d.id=%s
     """, (deal_id,))
     row = cur.fetchone()
     if not row:
         return None, "Сделка не найдена"
-    deal_code, manager_id = row
+    (did, client_id, kp_slot_id, deal_code, manager_id,
+     cfg_id, sel_stages, buf_days, address, budget, existing_project_id) = row
+
+    if not kp_slot_id:
+        return None, "Слот не выбран — невозможно подтвердить оплату"
+
+    # Блокируем и проверяем слот
+    cur.execute(f"""
+        SELECT id, year, month, start_date, status, monthly_limit
+        FROM {SCHEMA}.slots WHERE id=%s FOR UPDATE
+    """, (kp_slot_id,))
+    slot_row = cur.fetchone()
+    if not slot_row:
+        return None, "Слот не найден"
+    s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
+
+    if s_status not in ('free',):
+        return None, "Слот уже занят — выберите другой в настройках КП"
+
+    cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.slots WHERE year=%s AND month=%s AND status IN ('booked','busy')", (s_year, s_month))
+    if int(cur.fetchone()[0]) + 1 > s_limit:
+        return None, f"Месяц перегружен (лимит {s_limit})"
+
+    # Бронируем слот
+    cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, kp_slot_id))
+
+    slot_start = s_start_date if isinstance(s_start_date, date) else date.fromisoformat(str(s_start_date))
+    start_for_project = slot_start.isoformat()
+
+    # Обновляем сделку: слот, дата начала, статус контракта
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals
+        SET contract_status='payment_confirmed', payment_confirmed=true,
+            slot_id=%s, planned_start_date=%s, updated_at=now()
+        WHERE id=%s
+    """, (kp_slot_id, start_for_project, deal_id))
+
+    # Создаём проект если ещё не создан
+    project_id = existing_project_id
+    if not project_id:
+        project_id, perr = create_project_from_deal(cur, deal_id, client_id, start_for_project, kp_slot_id)
+        if perr:
+            return None, perr
+
+    # Переводим сделку в planning
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals SET stage='planning', updated_at=now() WHERE id=%s
+    """, (deal_id,))
 
     create_notification(cur,
         type_="payment_confirmed",
         title=f"Оплата подтверждена: {deal_code}",
-        body_text="Оплата получена! Сделка переходит в производство. Получите выплату комиссионного вознаграждения.",
+        body_text="Оплата получена! Проект автоматически создан в разделе «Строительство».",
         role="crm_manager",
         staff_id=manager_id,
         deal_id=deal_id,
     )
-    # Уведомление директору по строительству
     create_notification(cur,
         type_="payment_confirmed",
-        title=f"Проект готов к запуску: {deal_code}",
-        body_text="Оплата подтверждена, сделка в стадии планирования производства.",
+        title=f"Новый проект готов к производству: {deal_code}",
+        body_text="Оплата подтверждена, проект создан. Нажмите «Взять в производство».",
         role="construction_director",
         deal_id=deal_id,
     )
-    return {"deal_id": deal_id, "contract_status": "payment_confirmed", "stage": "planning"}, None
+    return {"deal_id": deal_id, "contract_status": "payment_confirmed", "stage": "planning", "project_id": project_id, "slot_id": kp_slot_id}, None
 
 def upload_signed_doc(cur, deal_id: int, template_id: int, body: dict):
     """Директор загружает подписанный вариант документа. UPSERT — создаёт запись если нет."""

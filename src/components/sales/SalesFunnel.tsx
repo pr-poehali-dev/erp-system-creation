@@ -1,21 +1,17 @@
 import { Deal } from "@/lib/api";
 
 const STAGES: Record<string, string> = {
-  new: "Новая",
-  qualification: "Квалификация",
-  proposal: "КП отправлено",
-  negotiation: "Переговоры",
-  contract: "Договор",
-  lost: "Отказ",
+  lead:     "Новый лид",
+  kp:       "КП отправлено",
+  planning: "Планирование",
+  closed:   "Закрыта",
 };
 
 const FUNNEL_COLORS: Record<string, string> = {
-  new: "bg-blue-500",
-  qualification: "bg-indigo-500",
-  proposal: "bg-violet-500",
-  negotiation: "bg-amber-500",
-  contract: "bg-emerald-500",
-  lost: "bg-gray-400",
+  lead:     "bg-blue-500",
+  kp:       "bg-violet-500",
+  planning: "bg-amber-500",
+  closed:   "bg-emerald-500",
 };
 
 const fmt = (n: number) =>
@@ -36,8 +32,8 @@ export default function SalesFunnel({ deals, loading }: Props) {
     {} as Record<string, number>
   );
   const totalDeals = deals.length;
-  const contractDeals = stageCounts["contract"] || 0;
-  const conversion = totalDeals > 0 ? ((contractDeals / totalDeals) * 100).toFixed(1) : "0.0";
+  const closedDeals = stageCounts["closed"] || 0;
+  const conversion = totalDeals > 0 ? ((closedDeals / totalDeals) * 100).toFixed(1) : "0.0";
   const totalBudget = deals.reduce((s, d) => s + (d.budget || 0), 0);
   const avgBudget = totalDeals > 0 ? Math.round(totalBudget / totalDeals) : 0;
   const maxCount = Math.max(...Object.values(stageCounts), 1);
@@ -67,19 +63,19 @@ export default function SalesFunnel({ deals, loading }: Props) {
       </div>
       <div className="grid grid-cols-3 gap-4 mt-5 pt-4 border-t border-border">
         <div>
-          <div className="text-hint">Конверсия (лид→договор)</div>
+          <div className="text-hint text-[12px]">Конверсия (лид→закрыта)</div>
           <div className="text-[18px] font-bold text-foreground mt-1">
             {loading ? "—" : `${conversion}%`}
           </div>
         </div>
         <div>
-          <div className="text-hint">Средний бюджет</div>
+          <div className="text-hint text-[12px]">Средний бюджет</div>
           <div className="text-[18px] font-bold text-foreground mt-1">
             {loading ? "—" : fmt(avgBudget)}
           </div>
         </div>
         <div>
-          <div className="text-hint">Всего сделок</div>
+          <div className="text-hint text-[12px]">Всего сделок</div>
           <div className="text-[18px] font-bold text-foreground mt-1">
             {loading ? "—" : totalDeals}
           </div>

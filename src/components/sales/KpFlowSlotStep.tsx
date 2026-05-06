@@ -74,7 +74,7 @@ export default function KpFlowSlotStep({
                 </div>
                 {!isFull && (
                   <div className="grid grid-cols-2 gap-2 p-3">
-                    {monthSlots.filter(s => s.available).map(slot => {
+                    {monthSlots.filter(s => s.available).slice(0, limit - occupied).map(slot => {
                       const isSel = slotId === String(slot.id);
                       return (
                         <button key={slot.id} type="button" onClick={() => onSlotChange(String(slot.id))}
