@@ -2516,12 +2516,30 @@ def handler(event: dict, context) -> dict:
                     return ok(result)
                 elif action == "archive":
                     deal_id = int(body["deal_id"])
-                    cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=TRUE, updated_at=now() WHERE id=%s RETURNING code", (deal_id,))
+                    # Читаем слоты сделки
+                    cur.execute(f"SELECT slot_id, kp_slot_id FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+                    drow = cur.fetchone()
+                    if not drow:
+                        return err("Сделка не найдена")
+                    slot_id_val, kp_slot_id_val = drow
+                    # Освобождаем слоты (booked или busy → free)
+                    for sid in set(filter(None, [slot_id_val, kp_slot_id_val])):
+                        cur.execute(f"""
+                            UPDATE {SCHEMA}.slots SET status='free', deal_id=NULL
+                            WHERE id=%s AND status IN ('booked','busy')
+                        """, (sid,))
+                    # Архивируем связанный проект если есть
+                    cur.execute(f"""
+                        UPDATE {SCHEMA}.projects SET status='archived', updated_at=now()
+                        WHERE deal_id=%s AND status NOT IN ('archived','completed')
+                    """, (deal_id,))
+                    # Архивируем сделку
+                    cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=TRUE, slot_id=NULL, updated_at=now() WHERE id=%s RETURNING code", (deal_id,))
                     row = cur.fetchone()
                     if not row:
                         return err("Сделка не найдена")
                     conn.commit()
-                    return ok({"success": True, "code": row[0]})
+                    return ok({"success": True, "code": row[0], "slots_freed": list(filter(None, [slot_id_val, kp_slot_id_val]))})
                 elif action == "restore":
                     deal_id = int(body["deal_id"])
                     cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=FALSE, updated_at=now() WHERE id=%s RETURNING code", (deal_id,))

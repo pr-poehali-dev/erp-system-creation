@@ -111,10 +111,14 @@ export default function Sales({ role }: Props) {
   };
 
   const handleArchiveDeal = async (deal: Deal) => {
-    if (!confirm(`Архивировать сделку "${deal.code}"?`)) return;
+    const hasSlot = !!(deal.slot_id || deal.kp_slot_id);
+    const msg = hasSlot
+      ? `Архивировать сделку "${deal.code}"?\n\nПривязанный производственный слот будет освобождён (станет доступным для новых сделок).`
+      : `Архивировать сделку "${deal.code}"?`;
+    if (!confirm(msg)) return;
     await api.deals.archive(deal.id);
     loadDeals();
-    notify(`Сделка ${deal.code} перемещена в архив`);
+    notify(hasSlot ? `Сделка ${deal.code} перемещена в архив, слот освобождён` : `Сделка ${deal.code} перемещена в архив`);
   };
 
   const handleRestoreDeal = async (deal: Deal) => {
@@ -124,10 +128,14 @@ export default function Sales({ role }: Props) {
   };
 
   const handleDeleteDeal = async (deal: Deal) => {
-    if (!confirm(`Удалить сделку "${deal.code}"? Привязанный слот будет освобождён.\nДействие необратимо!`)) return;
+    const hasSlot = !!(deal.slot_id || deal.kp_slot_id);
+    const msg = hasSlot
+      ? `Удалить сделку "${deal.code}"? Действие необратимо!\n\nПривязанный производственный слот будет освобождён.`
+      : `Удалить сделку "${deal.code}"? Действие необратимо!`;
+    if (!confirm(msg)) return;
     await api.deals.delete(deal.id);
     loadDeals();
-    notify(`Сделка ${deal.code} удалена, слот освобождён`);
+    notify(hasSlot ? `Сделка ${deal.code} удалена, слот освобождён` : `Сделка ${deal.code} удалена`);
   };
 
   // Фильтруем lost
