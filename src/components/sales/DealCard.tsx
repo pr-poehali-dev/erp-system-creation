@@ -25,6 +25,7 @@ interface Props {
   isArchiveView?: boolean;
   onToKp: () => void;
   onToContract: () => void;
+  onToPlanning?: () => void;
   onLost: () => void;
   onArchive?: () => void;
   onRestore?: () => void;
@@ -32,14 +33,14 @@ interface Props {
 
 export default function DealCard({
   deal, canEdit, isArchiveView,
-  onToKp, onToContract, onLost, onArchive, onRestore,
+  onToKp, onToContract, onToPlanning, onLost, onArchive, onRestore,
 }: Props) {
   const isSerial = deal.project_type === "serial" || !deal.project_type;
   const cs       = deal.contract_status || "none";
   const csBadge  = CONTRACT_STATUS_BADGE[cs];
 
-  // Кнопка «Подписать договор» — только на стадии kp
-  const showContractBtn = deal.stage === "kp";
+  // Кнопка «Подписать договор» — для стадии contract (если договор уже подписан напрямую)
+  const showContractBtn = deal.stage === "contract";
 
   const isInProduction = deal.stage === "planning";
 
@@ -147,6 +148,21 @@ export default function DealCard({
         </div>
       )}
 
+      {/* КП-флоу прогресс (только для kp) */}
+      {deal.stage === "kp" && (deal.kp_slot_id || deal.contract_signed || deal.payment_confirmed) && (
+        <div className="mb-2 flex items-center gap-1.5 flex-wrap">
+          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium border ${deal.kp_slot_id ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-secondary text-hint border-border"}`}>
+            1. Слот {deal.kp_slot_id ? "✓" : "–"}
+          </span>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium border ${deal.contract_signed ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-secondary text-hint border-border"}`}>
+            2. Договор {deal.contract_signed ? "✓" : "–"}
+          </span>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium border ${deal.payment_confirmed ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-secondary text-hint border-border"}`}>
+            3. Аванс {deal.payment_confirmed ? "✓" : "–"}
+          </span>
+        </div>
+      )}
+
       {/* Actions */}
       {!isArchiveView && canEdit && (
         <div className="border-t border-border pt-2 mt-1 flex gap-1.5 flex-wrap">
@@ -158,11 +174,16 @@ export default function DealCard({
             </button>
           )}
 
-          {showContractBtn && (
-            <button onClick={onToContract}
-              className="flex items-center gap-1 px-2 py-1 bg-violet-50 border border-violet-200 text-violet-700 rounded-md text-[11px] font-medium hover:bg-violet-100 transition-colors">
-              <Icon name="PenLine" size={10} />
-              {deal.stage === "kp" ? "Подписать договор" : "Договор →"}
+          {/* Кнопка «Договор и оплата» — главный флоу для kp */}
+          {deal.stage === "kp" && onToPlanning && (
+            <button onClick={onToPlanning}
+              className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                deal.payment_confirmed
+                  ? "bg-emerald-50 border border-emerald-300 text-emerald-700 hover:bg-emerald-100"
+                  : "bg-violet-50 border border-violet-200 text-violet-700 hover:bg-violet-100"
+              }`}>
+              <Icon name={deal.payment_confirmed ? "PlayCircle" : "PenLine"} size={10} />
+              {deal.payment_confirmed ? "Перевести в планирование →" : "Договор и оплата →"}
             </button>
           )}
 

@@ -210,12 +210,17 @@ def get_deals(cur, archived=False):
                d.kp_notes, d.address, d.planned_start_date,
                d.serial_project_id, d.configuration_id,
                COALESCE(d.contract_status, 'none') as contract_status,
-               d.is_archived
+               d.is_archived,
+               COALESCE(d.kp_slot_id, 0) as kp_slot_id,
+               COALESCE(d.payment_confirmed, false) as payment_confirmed,
+               COALESCE(d.contract_signed, false) as contract_signed,
+               ksl.start_date as kp_slot_start_date, ksl.year as kp_slot_year, ksl.month as kp_slot_month
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id
         LEFT JOIN {SCHEMA}.staff sr ON sr.id = d.realtor_id
         LEFT JOIN {SCHEMA}.slots sl ON sl.id = d.slot_id
+        LEFT JOIN {SCHEMA}.slots ksl ON ksl.id = d.kp_slot_id
         LEFT JOIN {SCHEMA}.serial_projects sp ON sp.id = d.serial_project_id
         LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
         {where}
@@ -534,6 +539,140 @@ def update_deal_contract(cur, deal_id, body):
         """, (deal_id,))
 
     return {"id": deal_id, "stage": "planning" if project_id else "contract", "project_id": project_id}, None
+
+def save_kp_slot(cur, deal_id: int, body: dict):
+    """
+    Шаг 1 КП: менеджер выбирает слот.
+    Слот НЕ бронируется — только сохраняется как kp_slot_id.
+    """
+    kp_slot_id = body.get("kp_slot_id")
+    if not kp_slot_id:
+        return None, "Укажите слот"
+
+    slot_id = int(kp_slot_id)
+    # Проверяем что слот свободен
+    cur.execute(f"SELECT id, status FROM {SCHEMA}.slots WHERE id=%s", (slot_id,))
+    slot_row = cur.fetchone()
+    if not slot_row:
+        return None, "Слот не найден"
+    if slot_row[1] not in ('free',):
+        return None, "Слот уже занят или зарезервирован — выберите другой"
+
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals SET kp_slot_id=%s, updated_at=now() WHERE id=%s RETURNING id
+    """, (slot_id, deal_id))
+    if not cur.fetchone():
+        return None, "Сделка не найдена"
+    return {"deal_id": deal_id, "kp_slot_id": slot_id}, None
+
+
+def confirm_kp_contract(cur, deal_id: int):
+    """
+    Шаг 2 КП: менеджер отмечает что договор подписан.
+    """
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals
+        SET contract_signed=true, contract_signed_at=now(), signed_date=CURRENT_DATE, updated_at=now()
+        WHERE id=%s AND kp_slot_id IS NOT NULL
+        RETURNING id
+    """, (deal_id,))
+    if not cur.fetchone():
+        return None, "Сначала выберите слот"
+    return {"deal_id": deal_id, "contract_signed": True}, None
+
+
+def confirm_kp_payment(cur, deal_id: int):
+    """
+    Шаг 3 КП: менеджер подтверждает оплату аванса.
+    """
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals
+        SET payment_confirmed=true, updated_at=now()
+        WHERE id=%s AND contract_signed=true
+        RETURNING id
+    """, (deal_id,))
+    if not cur.fetchone():
+        return None, "Сначала отметьте договор как подписанный"
+    return {"deal_id": deal_id, "payment_confirmed": True}, None
+
+
+def move_to_planning(cur, deal_id: int, body: dict):
+    """
+    Шаг 4 КП: кнопка «Перевести в планирование».
+    - слот (kp_slot_id) → booked (SELECT FOR UPDATE)
+    - создаётся проект со статусом planning
+    - сделка → stage=planning, slot_id=kp_slot_id
+    Условие: contract_signed=true AND payment_confirmed=true
+    """
+    # Читаем сделку
+    cur.execute(f"""
+        SELECT d.id, d.client_id, d.project_type, d.kp_slot_id,
+               d.contract_signed, d.payment_confirmed,
+               d.configuration_id, d.selected_stages, d.buffer_days,
+               d.address, d.budget
+        FROM {SCHEMA}.deals d
+        WHERE d.id=%s
+    """, (deal_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Сделка не найдена"
+    (did, client_id, project_type, kp_slot_id,
+     contract_signed, payment_confirmed,
+     cfg_id, sel_stages, buf_days, address, budget) = row
+
+    if not contract_signed:
+        return None, "Договор не отмечен как подписанный"
+    if not payment_confirmed:
+        return None, "Оплата не подтверждена"
+    if not kp_slot_id:
+        return None, "Слот не выбран"
+
+    buf_days = buf_days or 7
+
+    # Блокируем слот через SELECT FOR UPDATE
+    cur.execute(f"""
+        SELECT id, year, month, start_date, status, monthly_limit
+        FROM {SCHEMA}.slots WHERE id=%s FOR UPDATE
+    """, (kp_slot_id,))
+    slot_row = cur.fetchone()
+    if not slot_row:
+        return None, "Слот не найден"
+    s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
+
+    if s_status != 'free':
+        return None, "Слот уже занят — выберите другой в настройках КП"
+
+    # Проверяем лимит месяца
+    cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.slots WHERE year=%s AND month=%s AND status IN ('booked','busy')", (s_year, s_month))
+    if int(cur.fetchone()[0]) + 1 > s_limit:
+        return None, f"Месяц перегружен (лимит {s_limit})"
+
+    # Бронируем слот
+    cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, kp_slot_id))
+
+    slot_start = s_start_date if isinstance(s_start_date, date) else date.fromisoformat(str(s_start_date))
+    start_for_project = slot_start.isoformat()
+
+    # Обновляем сделку: slot_id = kp_slot_id, planned_start_date
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals
+        SET slot_id=%s, planned_start_date=%s, stage='contract', updated_at=now()
+        WHERE id=%s
+    """, (kp_slot_id, start_for_project, deal_id))
+
+    # Создаём проект
+    project_id, perr = create_project_from_deal(cur, deal_id, client_id, start_for_project, kp_slot_id)
+    if perr:
+        return None, perr
+
+    # Переводим в planning
+    if project_id:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.deals SET stage='planning', updated_at=now() WHERE id=%s
+        """, (deal_id,))
+
+    return {"deal_id": deal_id, "stage": "planning", "project_id": project_id, "slot_id": kp_slot_id}, None
+
 
 def update_deal_stage(cur, deal_id, new_stage, body=None):
     """Обобщённое изменение стадии (для lost и других простых переходов)."""
@@ -2292,6 +2431,30 @@ def handler(event: dict, context) -> dict:
                     result, error = update_deal_stage(cur, deal_id, stage, body)
                     if error:
                         return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "save_kp_slot":
+                    deal_id = int(body["deal_id"])
+                    result, error = save_kp_slot(cur, deal_id, body)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "confirm_kp_contract":
+                    deal_id = int(body["deal_id"])
+                    result, error = confirm_kp_contract(cur, deal_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "confirm_kp_payment":
+                    deal_id = int(body["deal_id"])
+                    result, error = confirm_kp_payment(cur, deal_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "to_planning":
+                    deal_id = int(body["deal_id"])
+                    result, error = move_to_planning(cur, deal_id, body)
+                    if error: return err(error)
                     conn.commit()
                     return ok(result)
                 elif action == "archive":

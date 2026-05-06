@@ -35,6 +35,15 @@ export const api = {
       request<any>("deals", "POST", { action: "archive", deal_id }),
     restore: (deal_id: number) =>
       request<any>("deals", "POST", { action: "restore", deal_id }),
+    // КП-флоу
+    saveKpSlot: (deal_id: number, kp_slot_id: number) =>
+      request<any>("deals", "POST", { action: "save_kp_slot", deal_id, kp_slot_id }),
+    confirmKpContract: (deal_id: number) =>
+      request<any>("deals", "POST", { action: "confirm_kp_contract", deal_id }),
+    confirmKpPayment: (deal_id: number) =>
+      request<any>("deals", "POST", { action: "confirm_kp_payment", deal_id }),
+    toPlanning: (deal_id: number) =>
+      request<any>("deals", "POST", { action: "to_planning", deal_id }),
   },
 
   stage_durations: {
@@ -229,6 +238,13 @@ export interface Deal {
   slot_start_date: string | null;
   slot_status: string | null; // free | booked | busy | archived
   is_archived: boolean;
+  // КП-флоу
+  kp_slot_id: number | null;
+  kp_slot_start_date: string | null;
+  kp_slot_year: number | null;
+  kp_slot_month: number | null;
+  payment_confirmed: boolean;
+  contract_signed: boolean;
 }
 
 export interface StageDuration {

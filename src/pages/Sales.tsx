@@ -5,6 +5,7 @@ import { api, Deal, Client, Staff, SerialProject, StageDuration } from "@/lib/ap
 import LeadModal from "@/components/sales/LeadModal";
 import KpModal from "@/components/sales/KpModal";
 import ContractModal from "@/components/sales/ContractModal";
+import KpPlanningFlow from "@/components/sales/KpPlanningFlow";
 import DealCard from "@/components/sales/DealCard";
 
 interface Props { role: Role; }
@@ -30,6 +31,7 @@ export default function Sales({ role }: Props) {
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [kpDeal, setKpDeal] = useState<Deal | null>(null);
   const [contractDeal, setContractDeal] = useState<Deal | null>(null);
+  const [planningDeal, setPlanningDeal] = useState<Deal | null>(null);
 
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
@@ -262,6 +264,7 @@ export default function Sales({ role }: Props) {
                         canEdit={canEdit}
                         onToKp={() => setKpDeal(deal)}
                         onToContract={() => setContractDeal(deal)}
+                        onToPlanning={() => setPlanningDeal(deal)}
                         onLost={() => handleLost(deal)}
                         onArchive={role === "director" ? () => handleArchiveDeal(deal) : undefined}
                       />
@@ -341,6 +344,15 @@ export default function Sales({ role }: Props) {
           saving={saving}
           onClose={() => setContractDeal(null)}
           onSubmit={(body) => handleSignContract(contractDeal, body)}
+        />
+      )}
+
+      {planningDeal && (
+        <KpPlanningFlow
+          deal={planningDeal}
+          cfgDur={planningDeal.configuration_duration || 115}
+          onDone={() => { setPlanningDeal(null); loadDeals(); notify("Обновлено"); }}
+          onClose={() => setPlanningDeal(null)}
         />
       )}
     </div>
