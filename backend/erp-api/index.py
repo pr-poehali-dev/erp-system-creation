@@ -125,7 +125,7 @@ def get_slot_plan(cur, show_archived: bool = False):
         d["overloaded"] = total_occupied >= int(d["monthly_limit"])
         months.append(d)
 
-    # Детальный список слотов
+    # Детальный список слотов — только активные проекты (не archived/completed)
     where_archived = "" if show_archived else "WHERE s.status != 'archived'"
     cur.execute(f"""
         SELECT
@@ -137,9 +137,9 @@ def get_slot_plan(cur, show_archived: bool = False):
             p.code AS project_code,
             p.status AS project_status
         FROM {SCHEMA}.slots s
-        LEFT JOIN {SCHEMA}.deals d ON d.id = s.deal_id
+        LEFT JOIN {SCHEMA}.deals d ON d.id = s.deal_id AND d.is_archived = FALSE
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
-        LEFT JOIN {SCHEMA}.projects p ON p.slot_id = s.id
+        LEFT JOIN {SCHEMA}.projects p ON p.slot_id = s.id AND p.status NOT IN ('archived', 'completed')
         {where_archived}
         ORDER BY s.start_date
     """)
