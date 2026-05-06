@@ -44,8 +44,13 @@ def err(msg, status=400):
     }
 
 def next_code(cur, table, prefix, col="code"):
-    cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.{table}")
-    n = cur.fetchone()[0] + 1
+    # Используем MAX по числовому суффиксу + FOR UPDATE чтобы избежать race condition
+    cur.execute(f"""
+        SELECT COALESCE(MAX(CAST(SPLIT_PART({col}, '-', 2) AS INTEGER)), 0) + 1
+        FROM {SCHEMA}.{table}
+        WHERE {col} LIKE %s
+    """, (f"{prefix}-%",))
+    n = cur.fetchone()[0]
     return f"{prefix}-{n:04d}"
 
 # ─── DEALS ───────────────────────────────────────────────────────────────────

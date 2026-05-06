@@ -29,6 +29,7 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     if (!clientId)  { setError("Выберите клиента"); return; }
     if (!managerId) { setError("Выберите менеджера"); return; }
     setError("");
