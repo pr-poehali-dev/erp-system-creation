@@ -1,0 +1,12 @@
+{
+  "tests": [
+    {
+      "name": "E2E: полный сценарий сделки",
+      "method": "GET",
+      "path": "/",
+      "expectedStatus": 200,
+      "expectedBody": { "status": "PASSED" },
+      "bodyMatcher": "partial"
+    }
+  ]
+}
