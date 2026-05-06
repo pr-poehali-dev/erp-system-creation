@@ -6,7 +6,6 @@ import LeadModal from "@/components/sales/LeadModal";
 import KpModal from "@/components/sales/KpModal";
 import ContractModal from "@/components/sales/ContractModal";
 import DealCard from "@/components/sales/DealCard";
-import PayoutTab from "@/components/sales/PayoutTab";
 
 interface Props { role: Role; }
 
@@ -34,9 +33,8 @@ export default function Sales({ role }: Props) {
 
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
-  const [tab, setTab] = useState<"funnel" | "payout" | "archive">("funnel");
+  const [tab, setTab] = useState<"funnel" | "archive">("funnel");
   const [currentManagerId, setCurrentManagerId] = useState<number | undefined>();
-  const [payoutCount, setPayoutCount] = useState(0);
   const [archivedDeals, setArchivedDeals] = useState<Deal[]>([]);
   const [archiveLoading, setArchiveLoading] = useState(false);
 
@@ -55,20 +53,6 @@ export default function Sales({ role }: Props) {
     api.deals.listArchived().then(setArchivedDeals).finally(() => setArchiveLoading(false));
   };
 
-  const loadPayoutCount = () => {
-    if (!["crm_manager", "director"].includes(role)) return;
-    api.payout_requests.list(role === "crm_manager" ? currentManagerId : undefined)
-      .then(r => {
-        if (role === "crm_manager") {
-          // Для менеджера: сделки без заявки (нужно подать счёт)
-          setPayoutCount(r.deals.filter(d => !d.payout_id).length);
-        } else {
-          // Для директора: заявки ожидающие согласования
-          setPayoutCount(r.deals.filter(d => d.payout_status === "pending").length);
-        }
-      });
-  };
-
   useEffect(() => {
     loadDeals();
     api.clients().then(setClients);
@@ -80,10 +64,6 @@ export default function Sales({ role }: Props) {
     api.serial_projects.list().then(setSerialProjects);
     api.stage_durations.list().then(setStageDurations);
   }, []);
-
-  useEffect(() => {
-    loadPayoutCount();
-  }, [currentManagerId, deals]);
 
   useEffect(() => {
     if (tab === "archive") loadArchivedDeals();
@@ -149,9 +129,6 @@ export default function Sales({ role }: Props) {
   const totalBudget  = (stage: string) => dealsByStage(stage).reduce((s, d) => s + (d.budget || 0), 0);
   const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)} млн ₽` : `${n.toLocaleString("ru")} ₽`;
 
-  // Показываем вкладку выплат для менеджеров и директора
-  const showPayoutTab = ["crm_manager", "director"].includes(role);
-
   return (
     <div className="space-y-6 max-w-[1600px]">
       {/* Header */}
@@ -181,21 +158,6 @@ export default function Sales({ role }: Props) {
           <Icon name="Kanban" size={14} />
           Воронка продаж
         </button>
-        {showPayoutTab && (
-          <button
-            onClick={() => { setTab("payout"); setPayoutCount(0); }}
-            className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
-              tab === "payout" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}>
-            <Icon name="Wallet" size={14} />
-            Заявка на выплату
-            {payoutCount > 0 && tab !== "payout" && (
-              <span className="min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center bg-red-500 text-white">
-                {payoutCount > 9 ? "9+" : payoutCount}
-              </span>
-            )}
-          </button>
-        )}
         {role === "director" && (
           <button
             onClick={() => setTab("archive")}
@@ -219,11 +181,6 @@ export default function Sales({ role }: Props) {
           <Icon name="CheckCircle" size={15} className="text-emerald-600 shrink-0" />
           <span className="text-[13px] text-emerald-800">{successMsg}</span>
         </div>
-      )}
-
-      {/* Вкладка: Заявка на выплату */}
-      {tab === "payout" && showPayoutTab && (
-        <PayoutTab key={`payout-${currentManagerId}`} role={role} managerId={currentManagerId} onReload={loadPayoutCount} />
       )}
 
       {/* Вкладка: Архив сделок */}

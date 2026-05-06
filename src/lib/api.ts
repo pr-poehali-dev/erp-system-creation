@@ -50,6 +50,8 @@ export const api = {
       request<any>("projects", "PUT", { action: "update_project", project_id, status: "archived" }),
     restore: (project_id: number) =>
       request<any>("projects", "PUT", { action: "update_project", project_id, status: "active" }),
+    approve: (project_id: number) =>
+      request<any>("projects", "PUT", { action: "approve_project", project_id }),
   },
 
   procurement: {
@@ -80,12 +82,15 @@ export const api = {
   },
 
   slots: {
-    // signed_date: фильтрует только слоты >= signed_date + 15 дней
     free: (signed_date?: string) => request<SlotItem[]>("slots", "GET", undefined,
       signed_date ? { signed_date } : {}),
-    plan: () => request<SlotMonth[]>("slots", "GET", undefined, { action: "plan" }),
+    plan: () => request<SlotPlan>("slots", "GET", undefined, { action: "plan" }),
     updateLimit: (year: number, month: number, monthly_limit: number) =>
-      request<any>("slots", "POST", { year, month, monthly_limit }),
+      request<any>("slots", "POST", { action: "update_limit", year, month, monthly_limit }),
+    createSlots: (year: number, month: number, count: number, monthly_limit: number) =>
+      request<any>("slots", "POST", { action: "create_slots", year, month, count, monthly_limit }),
+    deleteSlot: (slot_id: number) =>
+      request<any>("slots", "POST", { action: "delete_slot", slot_id }),
   },
 
   estimate: {
@@ -245,7 +250,7 @@ export interface Project {
   code: string;
   start_date: string;
   deadline: string;
-  status: string;
+  status: string; // planning | active | done | archived
   brigade: string | null;
   total_cost: number;
   client_name: string;
@@ -256,7 +261,7 @@ export interface Project {
   progress: number;
   days_left: number;
   stages: ProjectStage[];
-  // Данные из сделки (для директора по строительству)
+  // Данные из сделки
   deal_code: string | null;
   deal_budget: number | null;
   signed_date: string | null;
@@ -264,6 +269,10 @@ export interface Project {
   manager_name: string | null;
   serial_project_name: string | null;
   configuration_name: string | null;
+  // Данные слота
+  slot_id: number | null;
+  slot_status: string | null; // free | booked | busy
+  slot_start_date: string | null;
 }
 
 export interface MaterialRequest {
@@ -404,6 +413,26 @@ export interface SlotMonth {
   total_occupied: number;
   load_pct: number;
   overloaded: boolean;
+}
+
+export interface SlotDetail {
+  id: number;
+  year: number;
+  month: number;
+  start_date: string;
+  status: string; // free | booked | busy
+  monthly_limit: number;
+  deal_id: number | null;
+  deal_code: string | null;
+  client_name: string | null;
+  project_id: number | null;
+  project_code: string | null;
+  project_status: string | null;
+}
+
+export interface SlotPlan {
+  months: SlotMonth[];
+  slots: SlotDetail[];
 }
 
 export interface Configuration {

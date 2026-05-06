@@ -76,6 +76,15 @@ export default function Construction({ role }: Props) {
     } finally { setActionId(null); }
   };
 
+  const handleApprove = async (p: Project) => {
+    setActionId(p.id);
+    try {
+      await api.projects.approve(p.id);
+      load();
+    } finally { setActionId(null); }
+  };
+
+  const planningProjects = projects.filter(p => p.status === "planning");
   const activeProjects  = projects.filter(p => p.status === "active");
   const doneProjects    = projects.filter(p => p.status === "done");
   const onTimeProjects  = activeProjects.filter(p => p.days_left >= 7);
@@ -138,13 +147,13 @@ export default function Construction({ role }: Props) {
       {tab === "active" && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: "Активных домов",    value: loading ? "—" : String(activeProjects.length),  icon: "Home" },
-            { label: "Завершено",         value: loading ? "—" : String(doneProjects.length),     icon: "CheckCircle" },
-            { label: "В срок",            value: loading ? "—" : String(onTimeProjects.length),   icon: "Clock" },
-            { label: "С отставанием",     value: loading ? "—" : String(lateProjects.length),     icon: "AlertTriangle" },
+            { label: "В планировании",    value: loading ? "—" : String(planningProjects.length), icon: "CalendarCheck", cls: "text-amber-500" },
+            { label: "Активных домов",    value: loading ? "—" : String(activeProjects.length),   icon: "Home",          cls: "text-primary" },
+            { label: "В срок",            value: loading ? "—" : String(onTimeProjects.length),   icon: "Clock",         cls: "text-emerald-500" },
+            { label: "С отставанием",     value: loading ? "—" : String(lateProjects.length),     icon: "AlertTriangle", cls: "text-red-500" },
           ].map(c => (
             <div key={c.label} className="bg-white rounded-xl border border-border p-4 flex items-center gap-3">
-              <Icon name={c.icon} size={20} className="text-primary shrink-0" />
+              <Icon name={c.icon} size={20} className={`${c.cls} shrink-0`} />
               <div>
                 <div className={`text-[22px] font-bold text-foreground ${loading ? "animate-pulse text-muted-foreground" : ""}`}>
                   {c.value}
@@ -216,7 +225,13 @@ export default function Construction({ role }: Props) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 flex-wrap">
                       <span className="text-[13px] text-primary font-semibold">{p.code}</span>
-                      {tab === "active" && (
+                      {tab === "active" && p.status === "planning" && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200">
+                          <Icon name="CalendarCheck" size={11} />
+                          Планирование
+                        </span>
+                      )}
+                      {tab === "active" && p.status !== "planning" && (
                         <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium flex items-center gap-1 ${status.cls}`}>
                           <Icon name={status.icon} size={11} />
                           {status.label}
@@ -263,6 +278,23 @@ export default function Construction({ role }: Props) {
                       {p.done_stages}/{p.total_stages} этапов
                     </div>
                   </div>
+
+                  {/* Кнопка «Взять в производство» — только для директора по строительству */}
+                  {isConstructionDirector && tab === "active" && p.status === "planning" && p.slot_status === "booked" && (
+                    <div className="shrink-0">
+                      <button
+                        onClick={() => handleApprove(p)}
+                        disabled={isAction}
+                        className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-500 text-white text-[12px] font-semibold hover:bg-emerald-600 transition-colors disabled:opacity-50"
+                      >
+                        {isAction
+                          ? <Icon name="Loader" size={13} className="animate-spin" />
+                          : <Icon name="PlayCircle" size={14} />
+                        }
+                        Взять в производство
+                      </button>
+                    </div>
+                  )}
 
                   {/* Кнопки директора */}
                   {canArchive && (

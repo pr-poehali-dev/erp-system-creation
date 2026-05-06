@@ -88,7 +88,7 @@ def get_free_slots(cur, signed_date_str: str = None):
     return slots
 
 def get_slot_plan(cur):
-    """Полная картина слот-плана по месяцам (для директора/коммерческого)."""
+    """Полная картина слот-плана по месяцам + детальные слоты (для директора/производства)."""
     cur.execute(f"""
         SELECT
             s.year, s.month, s.monthly_limit,
@@ -108,7 +108,83 @@ def get_slot_plan(cur):
         d["load_pct"] = round(total_occupied / int(d["monthly_limit"]) * 100) if d["monthly_limit"] else 0
         d["overloaded"] = total_occupied >= int(d["monthly_limit"])
         months.append(d)
-    return months
+
+    # Детальный список всех слотов с привязкой к сделке/клиенту/проекту
+    cur.execute(f"""
+        SELECT
+            s.id, s.year, s.month, s.start_date, s.status, s.monthly_limit,
+            s.deal_id,
+            d.code AS deal_code,
+            c.name AS client_name,
+            p.id   AS project_id,
+            p.code AS project_code,
+            p.status AS project_status
+        FROM {SCHEMA}.slots s
+        LEFT JOIN {SCHEMA}.deals d ON d.id = s.deal_id
+        LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
+        LEFT JOIN {SCHEMA}.projects p ON p.slot_id = s.id
+        ORDER BY s.start_date
+    """)
+    scols = [desc[0] for desc in cur.description]
+    slots = [dict(zip(scols, r)) for r in cur.fetchall()]
+
+    return {"months": months, "slots": slots}
+
+def create_slots(cur, year: int, month: int, count: int, monthly_limit: int):
+    """
+    Создаёт слоты на выбранный месяц (каждую неделю).
+    Если слот на эту дату уже существует — пропускает.
+    """
+    import calendar
+    # Генерируем даты: первый понедельник месяца + каждые 7 дней, итого count штук
+    first_day = date(year, month, 1)
+    # Находим первый понедельник (или 1-е число если понедельник)
+    weekday = first_day.weekday()
+    if weekday != 0:
+        first_monday = first_day + timedelta(days=(7 - weekday))
+    else:
+        first_monday = first_day
+
+    created = []
+    current = first_monday
+    for i in range(count):
+        if current.month != month:
+            break
+        # Проверяем — есть ли уже слот на эту дату
+        cur.execute(f"""
+            SELECT id FROM {SCHEMA}.slots WHERE start_date = %s
+        """, (current,))
+        if not cur.fetchone():
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.slots (year, month, start_date, status, monthly_limit)
+                VALUES (%s, %s, %s, 'free', %s)
+                RETURNING id
+            """, (year, month, current, monthly_limit))
+            new_id = cur.fetchone()[0]
+            created.append({"id": new_id, "start_date": current.isoformat()})
+        # Обновляем monthly_limit для всех слотов этого месяца
+        cur.execute(f"""
+            UPDATE {SCHEMA}.slots SET monthly_limit = %s
+            WHERE year = %s AND month = %s
+        """, (monthly_limit, year, month))
+        current += timedelta(days=7)
+
+    return {"created": created, "count": len(created)}
+
+
+def delete_slot(cur, slot_id: int):
+    """Удаляет слот если он свободен."""
+    cur.execute(f"""
+        SELECT id, status FROM {SCHEMA}.slots WHERE id = %s
+    """, (slot_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Слот не найден"
+    if row[1] != 'free':
+        return None, "Нельзя удалить зарезервированный или занятый слот"
+    cur.execute(f"DELETE FROM {SCHEMA}.slots WHERE id = %s", (slot_id,))
+    return {"deleted": slot_id}, None
+
 
 def get_deals(cur, archived=False):
     where = "WHERE d.is_archived = TRUE" if archived else "WHERE d.is_archived = FALSE"
@@ -536,10 +612,10 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
     code = next_code(cur, "projects", "ДОМ")
 
     cur.execute(f"""
-        INSERT INTO {SCHEMA}.projects (code, deal_id, client_id, start_date, deadline, status, address)
-        VALUES (%s, %s, %s, %s, %s, 'active', %s)
+        INSERT INTO {SCHEMA}.projects (code, deal_id, client_id, start_date, deadline, status, address, slot_id)
+        VALUES (%s, %s, %s, %s, %s, 'planning', %s, %s)
         RETURNING id
-    """, (code, deal_id, client_id, start_date, deadline, address or ""))
+    """, (code, deal_id, client_id, start_date, deadline, address or "", slot_id))
     project_id = cur.fetchone()[0]
 
     # Разворачиваем этапы
@@ -552,17 +628,46 @@ def create_project_from_deal(cur, deal_id, client_id, start_date, slot_id):
         """, (project_id, name, order_num, snum, duration, ps, pe,
               par_group, deps if deps else None))
 
-    # Слот → занят
-    if slot_id:
-        cur.execute(f"UPDATE {SCHEMA}.slots SET status='busy' WHERE id=%s", (slot_id,))
+    # Слот остаётся 'booked' — станет 'busy' только после утверждения директором по строительству
 
-    # Привязать project_id к сделке (stage остаётся 'contract' — оплата ещё не подтверждена)
+    # Привязать project_id к сделке
     cur.execute(f"""
         UPDATE {SCHEMA}.deals SET project_id=%s, updated_at=now()
         WHERE id=%s
     """, (project_id, deal_id))
 
     return project_id, None
+
+
+def approve_project(cur, project_id: int):
+    """
+    Директор по строительству берёт проект в производство:
+    - статус проекта: planning → active
+    - статус слота: booked → busy
+    """
+    cur.execute(f"""
+        SELECT p.id, p.status, p.slot_id, s.status as slot_status
+        FROM {SCHEMA}.projects p
+        LEFT JOIN {SCHEMA}.slots s ON s.id = p.slot_id
+        WHERE p.id = %s
+    """, (project_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Проект не найден"
+    pid, pstatus, slot_id, slot_status = row
+    if pstatus != 'planning':
+        return None, "Проект уже в производстве или завершён"
+
+    cur.execute(f"""
+        UPDATE {SCHEMA}.projects SET status='active', updated_at=now() WHERE id=%s
+    """, (project_id,))
+
+    if slot_id and slot_status == 'booked':
+        cur.execute(f"""
+            UPDATE {SCHEMA}.slots SET status='busy' WHERE id=%s
+        """, (slot_id,))
+
+    return {"project_id": project_id, "status": "active"}, None
 
 def get_projects(cur, archived=False):
     where = "WHERE p.status = 'archived'" if archived else "WHERE p.status != 'archived'"
@@ -575,13 +680,17 @@ def get_projects(cur, archived=False):
                d.code as deal_code, d.budget as deal_budget, d.signed_date, d.contract_status,
                sm.name as manager_name,
                sp.name as serial_project_name,
-               cfg.name as configuration_name
+               cfg.name as configuration_name,
+               p.slot_id,
+               s.status as slot_status,
+               s.start_date as slot_start_date
         FROM {SCHEMA}.projects p
         LEFT JOIN {SCHEMA}.clients c ON c.id = p.client_id
         LEFT JOIN {SCHEMA}.deals d ON d.id = p.deal_id
         LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id
         LEFT JOIN {SCHEMA}.serial_projects sp ON sp.id = d.serial_project_id
         LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
+        LEFT JOIN {SCHEMA}.slots s ON s.id = p.slot_id
         {where}
         ORDER BY p.created_at DESC
         LIMIT 50
@@ -2150,6 +2259,12 @@ def handler(event: dict, context) -> dict:
                                     list(fields.values()) + [pid])
                         conn.commit()
                     return ok({"success": True})
+                elif action == "approve_project":
+                    pid = int(body["project_id"])
+                    result, error = approve_project(cur, pid)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
 
         # ── PROCUREMENT ────────────────────────────────────────────────────────
         elif resource == "procurement":
@@ -2234,10 +2349,26 @@ def handler(event: dict, context) -> dict:
                     signed_date = qs.get("signed_date")
                     return ok(get_free_slots(cur, signed_date))
             elif method == "POST":
-                # Обновить лимит месяца
-                result = update_slot_limit(cur, body["year"], body["month"], body["monthly_limit"])
-                conn.commit()
-                return ok(result)
+                action = body.get("action", "update_limit")
+                if action == "create_slots":
+                    year  = int(body["year"])
+                    month = int(body["month"])
+                    count = int(body.get("count", 4))
+                    limit = int(body.get("monthly_limit", 4))
+                    result = create_slots(cur, year, month, count, limit)
+                    conn.commit()
+                    return ok(result)
+                elif action == "delete_slot":
+                    slot_id = int(body["slot_id"])
+                    result, error = delete_slot(cur, slot_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                else:
+                    # Обновить лимит месяца
+                    result = update_slot_limit(cur, body["year"], body["month"], body["monthly_limit"])
+                    conn.commit()
+                    return ok(result)
 
         # ── SERIAL PROJECTS ────────────────────────────────────────────────────
         elif resource == "serial_projects":
