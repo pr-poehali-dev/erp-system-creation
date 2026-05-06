@@ -2632,11 +2632,47 @@ def handler(event: dict, context) -> dict:
             elif method == "POST":
                 action = body.get("action", "create")
                 if action == "update_status":
-                    ok_res = update_request_status(cur, int(body["id"]), body["status"])
+                    req_id     = int(body["id"])
+                    new_status = body["status"]
+                    ok_res = update_request_status(cur, req_id, new_status)
+                    # Уведомление прорабу при статусе "закуплено"
+                    if ok_res and new_status in ("purchased", "delivered"):
+                        cur.execute(f"""
+                            SELECT mr.code, mr.material, mr.foreman_id, p.code as project_code
+                            FROM {SCHEMA}.material_requests mr
+                            LEFT JOIN {SCHEMA}.projects p ON p.id = mr.project_id
+                            WHERE mr.id = %s
+                        """, (req_id,))
+                        mr_row = cur.fetchone()
+                        if mr_row:
+                            mr_code, material, foreman_id, project_code = mr_row
+                            create_notification(cur,
+                                type_="material_purchased",
+                                title=f"Материал закуплен: {material}",
+                                body_text=f"Заявка {mr_code} по проекту {project_code or '—'} переведена в статус «Закуплено».",
+                                role="foreman",
+                                staff_id=foreman_id,
+                            )
                     conn.commit()
                     return ok({"ok": ok_res})
                 else:
                     result = create_material_request(cur, body)
+                    # Уведомление снабженцу о новой заявке
+                    cur.execute(f"""
+                        SELECT mr.code, mr.material, p.code as project_code
+                        FROM {SCHEMA}.material_requests mr
+                        LEFT JOIN {SCHEMA}.projects p ON p.id = mr.project_id
+                        WHERE mr.id = %s
+                    """, (result["id"],))
+                    mr_row = cur.fetchone()
+                    if mr_row:
+                        mr_code, material, project_code = mr_row
+                        create_notification(cur,
+                            type_="material_request_new",
+                            title=f"Новая заявка на материалы по проекту {project_code or '—'}",
+                            body_text=f"{material} · заявка {mr_code}. Перейдите в раздел Снабжение для обработки.",
+                            role="supplier",
+                        )
                     conn.commit()
                     return ok(result, 201)
 
