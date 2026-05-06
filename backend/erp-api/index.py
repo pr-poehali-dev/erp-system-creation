@@ -110,7 +110,8 @@ def get_slot_plan(cur):
         months.append(d)
     return months
 
-def get_deals(cur):
+def get_deals(cur, archived=False):
+    where = "WHERE d.is_archived = TRUE" if archived else "WHERE d.is_archived = FALSE"
     cur.execute(f"""
         SELECT d.id, d.code, d.stage, d.budget, d.start_date, d.source, d.notes, d.created_at,
                c.name as client_name, c.phone as client_phone,
@@ -125,7 +126,8 @@ def get_deals(cur):
                d.selected_stages, d.signed_date, d.buffer_days,
                d.kp_notes, d.address, d.planned_start_date,
                d.serial_project_id, d.configuration_id,
-               COALESCE(d.contract_status, 'none') as contract_status
+               COALESCE(d.contract_status, 'none') as contract_status,
+               d.is_archived
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id
@@ -133,6 +135,7 @@ def get_deals(cur):
         LEFT JOIN {SCHEMA}.slots sl ON sl.id = d.slot_id
         LEFT JOIN {SCHEMA}.serial_projects sp ON sp.id = d.serial_project_id
         LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
+        {where}
         ORDER BY d.created_at DESC
         LIMIT 100
     """)
@@ -2085,7 +2088,7 @@ def handler(event: dict, context) -> dict:
         # ── DEALS ──────────────────────────────────────────────────────────────
         if resource == "deals":
             if method == "GET":
-                data = get_deals(cur)
+                data = get_deals(cur, archived=qs.get("archived") == "1")
                 return ok(data)
             elif method == "POST":
                 action = body.get("action", "create")
@@ -2097,6 +2100,22 @@ def handler(event: dict, context) -> dict:
                         return err(error)
                     conn.commit()
                     return ok(result)
+                elif action == "archive":
+                    deal_id = int(body["deal_id"])
+                    cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=TRUE, updated_at=now() WHERE id=%s RETURNING code", (deal_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return err("Сделка не найдена")
+                    conn.commit()
+                    return ok({"success": True, "code": row[0]})
+                elif action == "restore":
+                    deal_id = int(body["deal_id"])
+                    cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=FALSE, updated_at=now() WHERE id=%s RETURNING code", (deal_id,))
+                    row = cur.fetchone()
+                    if not row:
+                        return err("Сделка не найдена")
+                    conn.commit()
+                    return ok({"success": True, "code": row[0]})
                 else:
                     result, error = create_deal(cur, body)
                     if error:

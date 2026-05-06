@@ -23,16 +23,18 @@ export const api = {
 
   deals: {
     list: () => request<Deal[]>("deals"),
+    listArchived: () => request<Deal[]>("deals", "GET", undefined, { archived: "1" }),
     create: (body: object) => request<any>("deals", "POST", body),
-    // Переводим в КП — сохраняем серийный проект, комплектацию/этапы, бюджет
     toKp: (deal_id: number, body: object) =>
       request<any>("deals", "POST", { action: "kp", deal_id, ...body }),
-    // Подписание договора — слот, дата, адрес → автосоздание проекта
     toContract: (deal_id: number, body: object) =>
       request<any>("deals", "POST", { action: "contract", deal_id, ...body }),
-    // Простые переходы: lost, planning
     updateStage: (deal_id: number, stage: string, extra?: object) =>
       request<any>("deals", "POST", { action: "update_stage", deal_id, stage, ...extra }),
+    archive: (deal_id: number) =>
+      request<any>("deals", "POST", { action: "archive", deal_id }),
+    restore: (deal_id: number) =>
+      request<any>("deals", "POST", { action: "restore", deal_id }),
   },
 
   stage_durations: {
@@ -214,6 +216,8 @@ export interface Deal {
   address: string | null;
   planned_start_date: string | null;
   contract_status: string; // none | docs_uploaded | docs_review | docs_approved | payment_pending | payment_confirmed
+  slot_start_date: string | null;
+  is_archived: boolean;
 }
 
 export interface StageDuration {

@@ -34,9 +34,11 @@ export default function Sales({ role }: Props) {
 
   const [saving, setSaving] = useState(false);
   const [successMsg, setSuccessMsg] = useState("");
-  const [tab, setTab] = useState<"funnel" | "payout">("funnel");
+  const [tab, setTab] = useState<"funnel" | "payout" | "archive">("funnel");
   const [currentManagerId, setCurrentManagerId] = useState<number | undefined>();
   const [payoutCount, setPayoutCount] = useState(0);
+  const [archivedDeals, setArchivedDeals] = useState<Deal[]>([]);
+  const [archiveLoading, setArchiveLoading] = useState(false);
 
   const notify = (msg: string) => {
     setSuccessMsg(msg);
@@ -46,6 +48,11 @@ export default function Sales({ role }: Props) {
   const loadDeals = () => {
     setLoading(true);
     api.deals.list().then(setDeals).finally(() => setLoading(false));
+  };
+
+  const loadArchivedDeals = () => {
+    setArchiveLoading(true);
+    api.deals.listArchived().then(setArchivedDeals).finally(() => setArchiveLoading(false));
   };
 
   const loadPayoutCount = () => {
@@ -74,10 +81,13 @@ export default function Sales({ role }: Props) {
     api.stage_durations.list().then(setStageDurations);
   }, []);
 
-  // Подгружаем счётчик выплат после загрузки deals и managerId
   useEffect(() => {
     loadPayoutCount();
   }, [currentManagerId, deals]);
+
+  useEffect(() => {
+    if (tab === "archive") loadArchivedDeals();
+  }, [tab]);
 
   const canEdit = ["director", "commercial", "crm_manager", "realtor"].includes(role);
 
@@ -118,6 +128,19 @@ export default function Sales({ role }: Props) {
     loadDeals();
   };
 
+  const handleArchiveDeal = async (deal: Deal) => {
+    if (!confirm(`Архивировать сделку "${deal.code}"?`)) return;
+    await api.deals.archive(deal.id);
+    loadDeals();
+    notify(`Сделка ${deal.code} перемещена в архив`);
+  };
+
+  const handleRestoreDeal = async (deal: Deal) => {
+    await api.deals.restore(deal.id);
+    loadArchivedDeals();
+    notify(`Сделка ${deal.code} восстановлена`);
+  };
+
   // Фильтруем lost
   const activeDeals = deals.filter(d => d.stage !== "lost");
   const lostDeals   = deals.filter(d => d.stage === "lost");
@@ -149,16 +172,16 @@ export default function Sales({ role }: Props) {
       </div>
 
       {/* Вкладки */}
-      {showPayoutTab && (
-        <div className="flex border-b border-border gap-1">
-          <button
-            onClick={() => setTab("funnel")}
-            className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
-              tab === "funnel" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}>
-            <Icon name="Kanban" size={14} />
-            Воронка продаж
-          </button>
+      <div className="flex border-b border-border gap-1">
+        <button
+          onClick={() => setTab("funnel")}
+          className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
+            tab === "funnel" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}>
+          <Icon name="Kanban" size={14} />
+          Воронка продаж
+        </button>
+        {showPayoutTab && (
           <button
             onClick={() => { setTab("payout"); setPayoutCount(0); }}
             className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
@@ -167,15 +190,28 @@ export default function Sales({ role }: Props) {
             <Icon name="Wallet" size={14} />
             Заявка на выплату
             {payoutCount > 0 && tab !== "payout" && (
-              <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${
-                tab === "payout" ? "bg-primary text-white" : "bg-red-500 text-white"
-              }`}>
+              <span className="min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center bg-red-500 text-white">
                 {payoutCount > 9 ? "9+" : payoutCount}
               </span>
             )}
           </button>
-        </div>
-      )}
+        )}
+        {role === "director" && (
+          <button
+            onClick={() => setTab("archive")}
+            className={`flex items-center gap-2 px-4 py-2.5 text-[13px] font-medium border-b-2 transition-colors ${
+              tab === "archive" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}>
+            <Icon name="Archive" size={14} />
+            Архив сделок
+            {tab === "archive" && archivedDeals.length > 0 && (
+              <span className="text-[11px] px-1.5 py-0.5 rounded-full font-bold bg-secondary text-muted-foreground">
+                {archivedDeals.length}
+              </span>
+            )}
+          </button>
+        )}
+      </div>
 
       {/* Success notification */}
       {successMsg && (
@@ -188,6 +224,40 @@ export default function Sales({ role }: Props) {
       {/* Вкладка: Заявка на выплату */}
       {tab === "payout" && showPayoutTab && (
         <PayoutTab key={`payout-${currentManagerId}`} role={role} managerId={currentManagerId} onReload={loadPayoutCount} />
+      )}
+
+      {/* Вкладка: Архив сделок */}
+      {tab === "archive" && role === "director" && (
+        <div className="space-y-3">
+          {archiveLoading ? (
+            <div className="space-y-2">{[1,2,3].map(i => <div key={i} className="h-16 bg-secondary rounded-xl animate-pulse" />)}</div>
+          ) : archivedDeals.length === 0 ? (
+            <div className="bg-white rounded-xl border border-dashed border-border p-12 flex flex-col items-center gap-3 text-muted-foreground">
+              <Icon name="Archive" size={32} />
+              <span className="text-[14px] font-medium">Архив пуст</span>
+              <span className="text-hint text-center">Заархивированные сделки появятся здесь</span>
+            </div>
+          ) : (
+            <>
+              <div className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 flex items-center gap-2">
+                <Icon name="Archive" size={14} className="text-gray-500 shrink-0" />
+                <span className="text-[13px] text-gray-700">{archivedDeals.length} сделок в архиве · восстановление возвращает в воронку</span>
+              </div>
+              {archivedDeals.map(deal => (
+                <DealCard
+                  key={deal.id}
+                  deal={deal}
+                  canEdit={false}
+                  isArchiveView
+                  onToKp={() => {}}
+                  onToContract={() => {}}
+                  onLost={() => {}}
+                  onRestore={() => handleRestoreDeal(deal)}
+                />
+              ))}
+            </>
+          )}
+        </div>
       )}
 
       {/* Воронка — 4 колонки */}
@@ -236,6 +306,7 @@ export default function Sales({ role }: Props) {
                         onToKp={() => setKpDeal(deal)}
                         onToContract={() => setContractDeal(deal)}
                         onLost={() => handleLost(deal)}
+                        onArchive={role === "director" ? () => handleArchiveDeal(deal) : undefined}
                       />
                     ))
                   )}
