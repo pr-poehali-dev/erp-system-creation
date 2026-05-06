@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 import { api, Project, ProjectStage } from "@/lib/api";
+import MaterialRequestModal from "@/components/construction/MaterialRequestModal";
 
 interface Props { role: Role; }
 
@@ -35,6 +36,7 @@ export default function Construction({ role }: Props) {
   const [tab, setTab]                   = useState<"active" | "archive">("active");
   const [actionId, setActionId]         = useState<number | null>(null);
   const [confirmId, setConfirmId]       = useState<number | null>(null);
+  const [materialModalProject, setMaterialModalProject] = useState<Project | null>(null);
 
   const isDirector = role === "director";
   const isConstructionDirector = role === "construction_director";
@@ -407,6 +409,19 @@ export default function Construction({ role }: Props) {
                   </div>
                 )}
 
+                {/* Заявка на материалы — для прораба, директора по строительству и директора */}
+                {tab === "active" && ["foreman", "construction_director", "director", "project_manager"].includes(role) && (
+                  <div className="mx-5 mt-2 mb-1">
+                    <button
+                      onClick={() => setMaterialModalProject(p)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-[12px] text-blue-700 font-medium hover:bg-blue-100 transition-colors"
+                    >
+                      <Icon name="PackagePlus" size={13} />
+                      Создать заявку на материалы
+                    </button>
+                  </div>
+                )}
+
                 {/* Панель сделки — режим чтения для директора по строительству */}
                 {isConstructionDirector && (p.deal_code || p.manager_name) && (
                   <div className="mx-5 mb-0 mt-3 border border-blue-200 bg-blue-50/60 rounded-xl px-4 py-3">
@@ -460,6 +475,15 @@ export default function Construction({ role }: Props) {
           })
         )}
       </div>
+
+      {materialModalProject && (
+        <MaterialRequestModal
+          projectId={materialModalProject.id}
+          projectCode={materialModalProject.code}
+          onClose={() => setMaterialModalProject(null)}
+          onCreated={() => setMaterialModalProject(null)}
+        />
+      )}
     </div>
   );
 }
