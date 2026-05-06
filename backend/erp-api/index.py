@@ -2109,6 +2109,20 @@ def handler(event: dict, context) -> dict:
             if method == "GET":
                 data = get_projects(cur, archived=qs.get("archived") == "1")
                 return ok(data)
+            elif method == "PUT":
+                action = body.get("action")
+                if action == "update_project":
+                    pid    = int(body["project_id"])
+                    fields = {}
+                    if "status"  in body: fields["status"]  = body["status"]
+                    if "brigade" in body: fields["brigade"] = body["brigade"]
+                    if "address" in body: fields["address"] = body["address"]
+                    if fields:
+                        set_clause = ", ".join(f"{k}=%s" for k in fields)
+                        cur.execute(f"UPDATE {SCHEMA}.projects SET {set_clause}, updated_at=now() WHERE id=%s",
+                                    list(fields.values()) + [pid])
+                        conn.commit()
+                    return ok({"success": True})
 
         # ── PROCUREMENT ────────────────────────────────────────────────────────
         elif resource == "procurement":
