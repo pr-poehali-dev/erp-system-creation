@@ -4,6 +4,13 @@ import Icon from "@/components/ui/icon";
 const MONTH_NAMES = ["","Янв","Фев","Мар","Апр","Май","Июн","Июл","Авг","Сен","Окт","Ноя","Дек"];
 const fmt = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)} млн ₽` : `${n.toLocaleString("ru")} ₽`;
 
+const SLOT_STATUS: Record<string, { label: string; dot: string; cls: string }> = {
+  free:     { label: "Свободен",       dot: "bg-emerald-500", cls: "bg-emerald-50 border-emerald-200 text-emerald-700" },
+  booked:   { label: "Зарезервирован", dot: "bg-amber-400",   cls: "bg-amber-50 border-amber-200 text-amber-700" },
+  busy:     { label: "Занят",          dot: "bg-red-500",     cls: "bg-red-50 border-red-200 text-red-700" },
+  archived: { label: "Архив",          dot: "bg-gray-400",    cls: "bg-gray-50 border-gray-200 text-gray-600" },
+};
+
 const CONTRACT_STATUS_BADGE: Record<string, { label: string; cls: string; icon: string }> = {
   docs_uploaded:     { label: "Загружен",           cls: "bg-blue-50 text-blue-700 border-blue-200",          icon: "Upload" },
   docs_review:       { label: "На проверке",         cls: "bg-amber-50 text-amber-700 border-amber-200",       icon: "Clock" },
@@ -35,10 +42,17 @@ export default function DealCard({
     deal.stage === "kp" ||
     (deal.stage === "contract" && ["none","docs_uploaded","docs_review","docs_approved","payment_pending"].includes(cs));
 
-  const isInProduction = deal.stage === "planning";
+  const isInProduction = ["active", "done"].includes(deal.stage);
 
-  // Слот для контроля — показываем на этапе КП и Договора
-  const showSlot = !!deal.slot_month && ["kp", "contract", "planning"].includes(deal.stage);
+  // Слот — показываем всегда когда привязан
+  const showSlot = !!deal.slot_month;
+
+  // Получаем статус слота
+  const slotStatusKey = deal.slot_status ||
+    (deal.stage === "contract" || deal.stage === "payment" ? "booked" :
+     deal.stage === "active" ? "busy" :
+     deal.stage === "done" ? "archived" : "free");
+  const slotSt = SLOT_STATUS[slotStatusKey] || SLOT_STATUS.free;
 
   return (
     <div className={`border rounded-xl p-3 hover:shadow-sm transition-all ${
@@ -83,16 +97,17 @@ export default function DealCard({
         </div>
       )}
 
-      {/* Слот производства — контроль для менеджера */}
+      {/* Слот производства — цветовая индикация статуса */}
       {showSlot && (
-        <div className="flex items-center gap-1 text-[11px] font-medium mb-1 px-2 py-1 rounded-md bg-violet-50 border border-violet-200 text-violet-700 w-fit">
-          <Icon name="Factory" size={10} className="shrink-0" />
+        <div className={`flex items-center gap-1.5 text-[11px] font-medium mb-1 px-2 py-1 rounded-md border w-fit ${slotSt.cls}`}>
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${slotSt.dot}`} />
           Слот: {MONTH_NAMES[deal.slot_month!]} {deal.slot_year}
           {deal.slot_start_date && (
-            <span className="text-violet-500 ml-0.5">
-              · старт {new Date(deal.slot_start_date).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+            <span className="opacity-75 ml-0.5">
+              · {new Date(deal.slot_start_date).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
             </span>
           )}
+          <span className="opacity-60">· {slotSt.label}</span>
         </div>
       )}
 

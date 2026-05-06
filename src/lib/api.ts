@@ -52,6 +52,10 @@ export const api = {
       request<any>("projects", "PUT", { action: "update_project", project_id, status: "active" }),
     approve: (project_id: number) =>
       request<any>("projects", "PUT", { action: "approve_project", project_id }),
+    cancel: (project_id: number) =>
+      request<any>("projects", "PUT", { action: "cancel_project", project_id }),
+    complete: (project_id: number) =>
+      request<any>("projects", "PUT", { action: "complete_project", project_id }),
   },
 
   procurement: {
@@ -84,7 +88,8 @@ export const api = {
   slots: {
     free: (signed_date?: string) => request<SlotItem[]>("slots", "GET", undefined,
       signed_date ? { signed_date } : {}),
-    plan: () => request<SlotPlan>("slots", "GET", undefined, { action: "plan" }),
+    plan: (show_archived?: boolean) => request<SlotPlan>("slots", "GET", undefined,
+      { action: "plan", ...(show_archived ? { show_archived: "1" } : {}) }),
     updateLimit: (year: number, month: number, monthly_limit: number) =>
       request<any>("slots", "POST", { action: "update_limit", year, month, monthly_limit }),
     createSlots: (year: number, month: number, count: number, monthly_limit: number) =>
@@ -193,7 +198,7 @@ export interface Staff {
 export interface Deal {
   id: number;
   code: string;
-  stage: string; // lead | kp | contract | planning | lost
+  stage: string; // lead | kp | contract | payment | active | done | lost
   budget: number;
   start_date: string;
   source: string;
@@ -222,6 +227,7 @@ export interface Deal {
   planned_start_date: string | null;
   contract_status: string; // none | docs_uploaded | docs_review | docs_approved | payment_pending | payment_confirmed
   slot_start_date: string | null;
+  slot_status: string | null; // free | booked | busy | archived
   is_archived: boolean;
 }
 
@@ -420,7 +426,7 @@ export interface SlotDetail {
   year: number;
   month: number;
   start_date: string;
-  status: string; // free | booked | busy
+  status: string; // free | booked | busy | archived
   monthly_limit: number;
   deal_id: number | null;
   deal_code: string | null;

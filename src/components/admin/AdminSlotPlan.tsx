@@ -13,32 +13,34 @@ function fmtDate(d: string) {
 }
 
 const STATUS_MAP: Record<string, { label: string; cls: string; dot: string }> = {
-  free:   { label: "Свободен",       cls: "bg-emerald-50 text-emerald-700 border-emerald-200", dot: "bg-emerald-500" },
-  booked: { label: "Зарезервирован", cls: "bg-amber-50 text-amber-700 border-amber-200",       dot: "bg-amber-400"  },
-  busy:   { label: "Занят",          cls: "bg-red-50 text-red-700 border-red-200",              dot: "bg-red-500"    },
+  free:     { label: "Свободен",       cls: "bg-emerald-50 text-emerald-700 border-emerald-200", dot: "bg-emerald-500" },
+  booked:   { label: "Зарезервирован", cls: "bg-amber-50 text-amber-700 border-amber-200",       dot: "bg-amber-400"  },
+  busy:     { label: "Занят",          cls: "bg-red-50 text-red-700 border-red-200",              dot: "bg-red-500"    },
+  archived: { label: "Архив",          cls: "bg-gray-50 text-gray-500 border-gray-200",           dot: "bg-gray-400"   },
 };
 
 interface Props { readonly?: boolean; }
 
 export default function AdminSlotPlan({ readonly }: Props) {
-  const [plan, setPlan]           = useState<SlotPlan | null>(null);
-  const [loading, setLoading]     = useState(true);
-  const [editing, setEditing]     = useState<{ year: number; month: number; val: string } | null>(null);
-  const [saving, setSaving]       = useState(false);
-  const [deleting, setDeleting]   = useState<number | null>(null);
+  const [plan, setPlan]             = useState<SlotPlan | null>(null);
+  const [loading, setLoading]       = useState(true);
+  const [editing, setEditing]       = useState<{ year: number; month: number; val: string } | null>(null);
+  const [saving, setSaving]         = useState(false);
+  const [deleting, setDeleting]     = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const [createForm, setCreateForm] = useState({
     year: CURRENT_YEAR, month: CURRENT_MONTH, count: 4, monthly_limit: 4,
   });
-  const [creating, setCreating]   = useState(false);
+  const [creating, setCreating]     = useState(false);
   const [expandedMonth, setExpandedMonth] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
-    api.slots.plan().then(setPlan).finally(() => setLoading(false));
+    api.slots.plan(showArchived).then(setPlan).finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [showArchived]);
 
   const months: SlotMonth[]   = plan?.months ?? [];
   const slots: SlotDetail[]   = plan?.slots ?? [];
@@ -82,10 +84,16 @@ export default function AdminSlotPlan({ readonly }: Props) {
     <div className="p-5 space-y-4">
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2 text-[13px] text-hint">
+        <div className="flex items-center gap-3 text-[12px] text-hint flex-wrap">
           <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" />Свободен</span>
           <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-400 inline-block" />Зарезервирован</span>
           <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-red-500 inline-block" />Занят</span>
+          <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-gray-400 inline-block" />Архив</span>
+          <label className="flex items-center gap-1.5 cursor-pointer ml-2">
+            <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)}
+              className="w-3.5 h-3.5 accent-primary" />
+            <span className="text-[12px]">Показывать архивные</span>
+          </label>
         </div>
         <div className="flex gap-2">
           {!readonly && (

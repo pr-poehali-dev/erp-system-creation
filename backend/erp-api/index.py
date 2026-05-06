@@ -87,15 +87,20 @@ def get_free_slots(cur, signed_date_str: str = None):
         slots.append(d)
     return slots
 
-def get_slot_plan(cur):
-    """Полная картина слот-плана по месяцам + детальные слоты (для директора/производства)."""
+def get_slot_plan(cur, show_archived: bool = False):
+    """Полная картина слот-плана по месяцам + детальные слоты.
+    Архивные слоты не учитываются в загрузке (прогресс-бар).
+    """
+    # Месяцы — только не-архивные слоты для расчёта загрузки
     cur.execute(f"""
         SELECT
             s.year, s.month, s.monthly_limit,
-            COUNT(*) FILTER (WHERE s.status = 'free')   AS free_count,
-            COUNT(*) FILTER (WHERE s.status = 'booked') AS booked_count,
-            COUNT(*) FILTER (WHERE s.status = 'busy')   AS busy_count
+            COUNT(*) FILTER (WHERE s.status = 'free')     AS free_count,
+            COUNT(*) FILTER (WHERE s.status = 'booked')   AS booked_count,
+            COUNT(*) FILTER (WHERE s.status = 'busy')     AS busy_count,
+            COUNT(*) FILTER (WHERE s.status = 'archived') AS archived_count
         FROM {SCHEMA}.slots s
+        WHERE s.status != 'archived'
         GROUP BY s.year, s.month, s.monthly_limit
         ORDER BY s.year, s.month
     """)
@@ -109,7 +114,8 @@ def get_slot_plan(cur):
         d["overloaded"] = total_occupied >= int(d["monthly_limit"])
         months.append(d)
 
-    # Детальный список всех слотов с привязкой к сделке/клиенту/проекту
+    # Детальный список слотов
+    where_archived = "" if show_archived else "WHERE s.status != 'archived'"
     cur.execute(f"""
         SELECT
             s.id, s.year, s.month, s.start_date, s.status, s.monthly_limit,
@@ -123,6 +129,7 @@ def get_slot_plan(cur):
         LEFT JOIN {SCHEMA}.deals d ON d.id = s.deal_id
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.projects p ON p.slot_id = s.id
+        {where_archived}
         ORDER BY s.start_date
     """)
     scols = [desc[0] for desc in cur.description]
@@ -193,7 +200,7 @@ def get_deals(cur, archived=False):
                c.name as client_name, c.phone as client_phone,
                sm.name as manager_name, sr.name as realtor_name,
                sl.id as slot_id, sl.year as slot_year, sl.month as slot_month,
-               sl.start_date as slot_start_date,
+               sl.start_date as slot_start_date, sl.status as slot_status,
                d.project_id, d.project_type,
                sp.name as serial_project_name,
                cfg.name as configuration_name,
@@ -477,23 +484,27 @@ def update_deal_contract(cur, deal_id, body):
 
     sets, vals = [], []
 
-    # Обрабатываем слот (только для серийных)
+    # Обрабатываем слот (только для серийных) — защита от двойного бронирования через SELECT FOR UPDATE
     actual_start = planned_start
     if project_type == 'serial' and slot_id:
         slot_id = int(slot_id)
-        cur.execute(f"SELECT id, year, month, start_date, status, monthly_limit FROM {SCHEMA}.slots WHERE id=%s", (slot_id,))
+        # SELECT FOR UPDATE блокирует строку до конца транзакции — защита от race condition
+        cur.execute(f"""
+            SELECT id, year, month, start_date, status, monthly_limit
+            FROM {SCHEMA}.slots WHERE id=%s FOR UPDATE
+        """, (slot_id,))
         slot_row = cur.fetchone()
         if not slot_row:
             return None, "Слот не найден"
         s_id, s_year, s_month, s_start_date, s_status, s_limit = slot_row
         if s_status != 'free':
-            return None, "Выбранный слот уже занят"
+            return None, "Слот уже занят или зарезервирован — выберите другой"
         cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.slots WHERE year=%s AND month=%s AND status IN ('booked','busy')", (s_year, s_month))
         if int(cur.fetchone()[0]) + 1 > s_limit:
-            return None, f"Месяц перегружен. Выберите другой"
-        # start_date = дата слота + буфер на подписание
+            return None, f"Месяц перегружен (лимит {s_limit}). Выберите другой слот"
+        # start_date = дата слота (без буфера — буфер только для display)
         slot_start = s_start_date if isinstance(s_start_date, date) else date.fromisoformat(str(s_start_date))
-        actual_start = (slot_start + timedelta(days=buf_days)).isoformat()
+        actual_start = slot_start.isoformat()
         sets.append("slot_id=%s"); vals.append(slot_id)
         cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, slot_id))
 
@@ -668,6 +679,80 @@ def approve_project(cur, project_id: int):
         """, (slot_id,))
 
     return {"project_id": project_id, "status": "active"}, None
+
+
+def cancel_project(cur, project_id: int):
+    """
+    Расторжение договора / отмена проекта:
+    - проект → archived
+    - слот → free (освобождается для других сделок)
+    - сделка → lost
+    """
+    cur.execute(f"""
+        SELECT p.id, p.status, p.slot_id, p.deal_id, s.status as slot_status
+        FROM {SCHEMA}.projects p
+        LEFT JOIN {SCHEMA}.slots s ON s.id = p.slot_id
+        WHERE p.id = %s FOR UPDATE
+    """, (project_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Проект не найден"
+    pid, pstatus, slot_id, deal_id, slot_status = row
+
+    if pstatus in ('archived', 'completed'):
+        return None, "Проект уже архивирован или завершён"
+
+    # Архивируем проект
+    cur.execute(f"""
+        UPDATE {SCHEMA}.projects SET status='archived', updated_at=now() WHERE id=%s
+    """, (project_id,))
+
+    # Освобождаем слот
+    if slot_id and slot_status in ('booked', 'busy'):
+        cur.execute(f"""
+            UPDATE {SCHEMA}.slots SET status='free', deal_id=NULL WHERE id=%s
+        """, (slot_id,))
+
+    # Сделку переводим в lost
+    if deal_id:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.deals SET stage='lost', updated_at=now() WHERE id=%s
+        """, (deal_id,))
+
+    return {"project_id": project_id, "status": "archived", "slot_freed": bool(slot_id)}, None
+
+
+def complete_project(cur, project_id: int):
+    """
+    Завершение проекта (сдан):
+    - проект → completed
+    - слот → archived (не влияет на загрузку, не удаляется)
+    """
+    cur.execute(f"""
+        SELECT p.id, p.status, p.slot_id, s.status as slot_status
+        FROM {SCHEMA}.projects p
+        LEFT JOIN {SCHEMA}.slots s ON s.id = p.slot_id
+        WHERE p.id = %s FOR UPDATE
+    """, (project_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Проект не найден"
+    pid, pstatus, slot_id, slot_status = row
+
+    if pstatus not in ('active', 'planning'):
+        return None, "Можно завершить только активный проект"
+
+    cur.execute(f"""
+        UPDATE {SCHEMA}.projects SET status='completed', updated_at=now() WHERE id=%s
+    """, (project_id,))
+
+    if slot_id:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.slots SET status='archived' WHERE id=%s
+        """, (slot_id,))
+
+    return {"project_id": project_id, "status": "completed"}, None
+
 
 def get_projects(cur, archived=False):
     where = "WHERE p.status = 'archived'" if archived else "WHERE p.status != 'archived'"
@@ -2265,6 +2350,18 @@ def handler(event: dict, context) -> dict:
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
+                elif action == "cancel_project":
+                    pid = int(body["project_id"])
+                    result, error = cancel_project(cur, pid)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "complete_project":
+                    pid = int(body["project_id"])
+                    result, error = complete_project(cur, pid)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
 
         # ── PROCUREMENT ────────────────────────────────────────────────────────
         elif resource == "procurement":
@@ -2343,7 +2440,8 @@ def handler(event: dict, context) -> dict:
             if method == "GET":
                 action = qs.get("action", "free")
                 if action == "plan":
-                    return ok(get_slot_plan(cur))
+                    show_archived = qs.get("show_archived") == "1"
+                    return ok(get_slot_plan(cur, show_archived))
                 else:
                     # Передаём дату подписания для фильтрации: только слоты >= signed_date + 15д
                     signed_date = qs.get("signed_date")

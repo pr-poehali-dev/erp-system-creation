@@ -84,6 +84,24 @@ export default function Construction({ role }: Props) {
     } finally { setActionId(null); }
   };
 
+  const handleCancel = async (p: Project) => {
+    if (!confirm(`Расторгнуть договор и отменить проект ${p.code}?\nСлот будет освобождён, сделка переведена в «Отказ».`)) return;
+    setActionId(p.id);
+    try {
+      await api.projects.cancel(p.id);
+      load();
+    } finally { setActionId(null); }
+  };
+
+  const handleComplete = async (p: Project) => {
+    if (!confirm(`Отметить проект ${p.code} как завершённый (сдан клиенту)?`)) return;
+    setActionId(p.id);
+    try {
+      await api.projects.complete(p.id);
+      load();
+    } finally { setActionId(null); }
+  };
+
   const planningProjects = projects.filter(p => p.status === "planning");
   const activeProjects  = projects.filter(p => p.status === "active");
   const doneProjects    = projects.filter(p => p.status === "done");
@@ -348,9 +366,50 @@ export default function Construction({ role }: Props) {
                   )}
                 </div>
 
+                {/* Блок слота — для planning проектов */}
+                {p.status === "planning" && p.slot_start_date && tab === "active" && (() => {
+                  const today = new Date();
+                  const slotDate = new Date(p.slot_start_date);
+                  const daysUntil = Math.max(0, Math.round((slotDate.getTime() - today.getTime()) / 86400000));
+                  const totalDays = Math.max(1, Math.round((slotDate.getTime() - new Date(p.start_date || p.slot_start_date).getTime()) / 86400000) + daysUntil);
+                  const pct = Math.max(0, Math.min(100, 100 - Math.round(daysUntil / Math.max(totalDays, 60) * 100)));
+                  return (
+                    <div className="mx-5 mt-3 border border-amber-200 bg-amber-50/60 rounded-xl px-4 py-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                          <span className="text-[12px] font-semibold text-amber-800">Слот: {slotDate.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}</span>
+                        </div>
+                        <span className="text-[12px] font-bold text-amber-700">{daysUntil > 0 ? `${daysUntil} дн. до старта` : "Старт сегодня!"}</span>
+                      </div>
+                      <div className="h-1.5 bg-amber-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-amber-400 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Кнопки завершения и расторжения */}
+                {tab === "active" && (isConstructionDirector || isDirector) && p.status !== "archived" && p.status !== "completed" && (
+                  <div className="mx-5 mt-3 flex gap-2 flex-wrap">
+                    {p.status === "active" && (
+                      <button onClick={() => handleComplete(p)} disabled={isAction}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 border border-emerald-300 text-[12px] text-emerald-700 font-medium hover:bg-emerald-100 transition-colors disabled:opacity-50">
+                        {isAction ? <Icon name="Loader" size={12} className="animate-spin" /> : <Icon name="CheckCheck" size={12} />}
+                        Сдан клиенту
+                      </button>
+                    )}
+                    <button onClick={() => handleCancel(p)} disabled={isAction}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-red-200 text-[12px] text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50">
+                      {isAction ? <Icon name="Loader" size={12} className="animate-spin" /> : <Icon name="XCircle" size={12} />}
+                      Расторгнуть договор
+                    </button>
+                  </div>
+                )}
+
                 {/* Панель сделки — режим чтения для директора по строительству */}
                 {isConstructionDirector && (p.deal_code || p.manager_name) && (
-                  <div className="mx-5 mb-0 mt-0 border border-blue-200 bg-blue-50/60 rounded-xl px-4 py-3">
+                  <div className="mx-5 mb-0 mt-3 border border-blue-200 bg-blue-50/60 rounded-xl px-4 py-3">
                     <div className="flex items-center gap-2 mb-2">
                       <Icon name="ClipboardList" size={13} className="text-blue-600 shrink-0" />
                       <span className="text-[12px] font-semibold text-blue-800">Информация о сделке</span>
@@ -361,46 +420,12 @@ export default function Construction({ role }: Props) {
                       )}
                     </div>
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-[12px]">
-                      {p.deal_code && (
-                        <div>
-                          <span className="text-hint">Сделка:</span>
-                          <span className="font-medium text-foreground ml-1">{p.deal_code}</span>
-                        </div>
-                      )}
-                      {p.manager_name && (
-                        <div>
-                          <span className="text-hint">Менеджер:</span>
-                          <span className="font-medium text-foreground ml-1">{p.manager_name}</span>
-                        </div>
-                      )}
-                      {p.serial_project_name && (
-                        <div>
-                          <span className="text-hint">Проект:</span>
-                          <span className="font-medium text-foreground ml-1">{p.serial_project_name}</span>
-                        </div>
-                      )}
-                      {p.configuration_name && (
-                        <div>
-                          <span className="text-hint">Комплектация:</span>
-                          <span className="font-medium text-foreground ml-1">{p.configuration_name}</span>
-                        </div>
-                      )}
-                      {p.deal_budget && (
-                        <div>
-                          <span className="text-hint">Сумма договора:</span>
-                          <span className="font-medium text-emerald-700 ml-1">
-                            ₽ {p.deal_budget.toLocaleString("ru")}
-                          </span>
-                        </div>
-                      )}
-                      {p.signed_date && (
-                        <div>
-                          <span className="text-hint">Подписан:</span>
-                          <span className="font-medium text-foreground ml-1">
-                            {new Date(p.signed_date).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}
-                          </span>
-                        </div>
-                      )}
+                      {p.deal_code && <div><span className="text-hint">Сделка:</span><span className="font-medium ml-1">{p.deal_code}</span></div>}
+                      {p.manager_name && <div><span className="text-hint">Менеджер:</span><span className="font-medium ml-1">{p.manager_name}</span></div>}
+                      {p.serial_project_name && <div><span className="text-hint">Проект:</span><span className="font-medium ml-1">{p.serial_project_name}</span></div>}
+                      {p.configuration_name && <div><span className="text-hint">Комплектация:</span><span className="font-medium ml-1">{p.configuration_name}</span></div>}
+                      {p.deal_budget && <div><span className="text-hint">Сумма:</span><span className="font-medium text-emerald-700 ml-1">₽ {p.deal_budget.toLocaleString("ru")}</span></div>}
+                      {p.signed_date && <div><span className="text-hint">Подписан:</span><span className="font-medium ml-1">{new Date(p.signed_date).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}</span></div>}
                     </div>
                   </div>
                 )}
