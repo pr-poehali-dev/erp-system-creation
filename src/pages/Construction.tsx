@@ -52,8 +52,6 @@ export default function Construction({ role }: Props) {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, []);
-
   useEffect(() => {
     if (tab === "archive") loadArchived();
     else load();
