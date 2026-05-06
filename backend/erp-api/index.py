@@ -515,7 +515,7 @@ def update_deal_contract(cur, deal_id, body):
     if budget:
         sets.append("budget=%s"); vals.append(float(budget))
     sets.append("signed_date=%s");   vals.append(signed_date)
-    sets.append("stage='contract'")
+    sets.append("stage='contract'")  # Промежуточный статус — до создания проекта
     sets.append("updated_at=now()")
     vals.append(deal_id)
 
@@ -527,21 +527,13 @@ def update_deal_contract(cur, deal_id, body):
     if perr:
         return None, perr
 
-    # Автосоздание документа "Договор подряда"
-    cur.execute(f"""
-        SELECT d.code, c.name as client_name, d.budget, d.contractor_id
-        FROM {SCHEMA}.deals d
-        LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
-        WHERE d.id = %s
-    """, (deal_id,))
-    drow = cur.fetchone()
-    if drow:
-        auto_create_deal_documents(cur, deal_id, "contract", {
-            "code": drow[0], "client_name": drow[1],
-            "budget": drow[2], "contractor_id": drow[3],
-        })
+    # Если проект создан — переводим сделку в planning
+    if project_id:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.deals SET stage='planning', updated_at=now() WHERE id=%s
+        """, (deal_id,))
 
-    return {"id": deal_id, "stage": "contract", "project_id": project_id}, None
+    return {"id": deal_id, "stage": "planning" if project_id else "contract", "project_id": project_id}, None
 
 def update_deal_stage(cur, deal_id, new_stage, body=None):
     """Обобщённое изменение стадии (для lost и других простых переходов)."""

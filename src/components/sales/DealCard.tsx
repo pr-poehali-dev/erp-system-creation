@@ -38,20 +38,19 @@ export default function DealCard({
   const cs       = deal.contract_status || "none";
   const csBadge  = CONTRACT_STATUS_BADGE[cs];
 
-  const showContractBtn =
-    deal.stage === "kp" ||
-    (deal.stage === "contract" && ["none","docs_uploaded","docs_review","docs_approved","payment_pending"].includes(cs));
+  // Кнопка «Подписать договор» — только на стадии kp
+  const showContractBtn = deal.stage === "kp";
 
-  const isInProduction = ["active", "done"].includes(deal.stage);
+  const isInProduction = deal.stage === "planning";
 
   // Слот — показываем всегда когда привязан
   const showSlot = !!deal.slot_month;
 
   // Получаем статус слота
   const slotStatusKey = deal.slot_status ||
-    (deal.stage === "contract" || deal.stage === "payment" ? "booked" :
-     deal.stage === "active" ? "busy" :
-     deal.stage === "done" ? "archived" : "free");
+    (deal.stage === "planning" ? "booked" :
+     deal.stage === "active"   ? "busy"   :
+     deal.stage === "done"     ? "archived" : "free");
   const slotSt = SLOT_STATUS[slotStatusKey] || SLOT_STATUS.free;
 
   return (
@@ -138,12 +137,12 @@ export default function DealCard({
         </div>
       )}
 
-      {/* В производстве */}
+      {/* В планировании */}
       {isInProduction && (
-        <div className="bg-emerald-100 border border-emerald-300 rounded-lg px-2 py-1.5 mb-2 flex items-center gap-1.5">
-          <Icon name="Hammer" size={11} className="text-emerald-700 shrink-0" />
-          <span className="text-[11px] text-emerald-800 font-medium">
-            В производстве · подайте счёт на вознаграждение
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 mb-2 flex items-center gap-1.5">
+          <Icon name="CalendarCheck" size={11} className="text-amber-700 shrink-0" />
+          <span className="text-[11px] text-amber-800 font-medium">
+            Планирование производства · проект в разделе «Строительство»
           </span>
         </div>
       )}

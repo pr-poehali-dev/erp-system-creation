@@ -11,12 +11,10 @@ interface Props { role: Role; }
 
 // Воронка: 4 стадии (без "Квалификация")
 const STAGES = [
-  { key: "lead",     label: "Новый лид",          color: "bg-blue-500",    light: "bg-blue-50 border-blue-200",     icon: "UserPlus" },
-  { key: "kp",       label: "КП отправлено",       color: "bg-amber-500",   light: "bg-amber-50 border-amber-200",   icon: "FileText" },
-  { key: "contract", label: "Договор подписан",    color: "bg-violet-500",  light: "bg-violet-50 border-violet-200", icon: "PenLine" },
-  { key: "payment",  label: "Оплата (аванс)",      color: "bg-cyan-500",    light: "bg-cyan-50 border-cyan-200",     icon: "Banknote" },
-  { key: "active",   label: "В производстве",      color: "bg-orange-500",  light: "bg-orange-50 border-orange-200", icon: "HardHat" },
-  { key: "done",     label: "Сдан / Закрыт",       color: "bg-emerald-500", light: "bg-emerald-50 border-emerald-200", icon: "CheckCircle" },
+  { key: "lead",     label: "Новый лид",        color: "bg-blue-500",    light: "bg-blue-50 border-blue-200",     icon: "UserPlus" },
+  { key: "kp",       label: "КП отправлено",    color: "bg-amber-500",   light: "bg-amber-50 border-amber-200",   icon: "FileText" },
+  { key: "contract", label: "Договор подписан", color: "bg-violet-500",  light: "bg-violet-50 border-violet-200", icon: "PenLine" },
+  { key: "planning", label: "Планирование",     color: "bg-emerald-500", light: "bg-emerald-50 border-emerald-200", icon: "CalendarCheck" },
 ];
 
 export default function Sales({ role }: Props) {
