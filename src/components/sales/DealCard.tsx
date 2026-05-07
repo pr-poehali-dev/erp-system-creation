@@ -40,22 +40,41 @@ export default function DealCard({
   const [tokenLoading, setTokenLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const getClientLink = () => `${window.location.origin}/client/${clientToken}`;
+  const copyToClipboard = (text: string) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+      } else {
+        fallbackCopy(text);
+      }
+    } catch {
+      fallbackCopy(text);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  const fallbackCopy = (text: string) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  };
 
   const handleGetToken = async () => {
     if (clientToken) {
-      await navigator.clipboard.writeText(getClientLink());
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      copyToClipboard(`${window.location.origin}/client/${clientToken}`);
       return;
     }
     setTokenLoading(true);
     try {
       const res = await api.client_portal.getToken(deal.id);
       setClientToken(res.client_token);
-      await navigator.clipboard.writeText(`${window.location.origin}/client/${res.client_token}`);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      copyToClipboard(`${window.location.origin}/client/${res.client_token}`);
     } finally {
       setTokenLoading(false);
     }
