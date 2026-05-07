@@ -5,6 +5,7 @@ import { api, Project } from "@/lib/api";
 import MaterialRequestModal from "@/components/construction/MaterialRequestModal";
 import ConstructionHeader from "@/components/construction/ConstructionHeader";
 import ProjectCard from "@/components/construction/ProjectCard";
+import CreateActModal from "@/components/construction/CreateActModal";
 
 interface Props { role: Role; }
 
@@ -16,6 +17,7 @@ export default function Construction({ role }: Props) {
   const [actionId, setActionId]         = useState<number | null>(null);
   const [confirmId, setConfirmId]       = useState<number | null>(null);
   const [materialModalProject, setMaterialModalProject] = useState<Project | null>(null);
+  const [actModalProject, setActModalProject] = useState<Project | null>(null);
 
   const isDirector = role === "director";
   const isConstructionDirector = role === "construction_director";
@@ -156,6 +158,7 @@ export default function Construction({ role }: Props) {
               onComplete={() => handleComplete(p)}
               onCancel={() => handleCancel(p)}
               onMaterialRequest={() => setMaterialModalProject(p)}
+              onCreateAct={() => setActModalProject(p)}
               onAddressSaved={load}
             />
           ))
@@ -168,6 +171,14 @@ export default function Construction({ role }: Props) {
           projectCode={materialModalProject.code}
           onClose={() => setMaterialModalProject(null)}
           onCreated={() => setMaterialModalProject(null)}
+        />
+      )}
+
+      {actModalProject && (
+        <CreateActModal
+          project={actModalProject}
+          onClose={() => setActModalProject(null)}
+          onCreated={() => { setActModalProject(null); load(); }}
         />
       )}
     </div>

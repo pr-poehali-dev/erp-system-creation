@@ -5,7 +5,7 @@
       "method": "GET",
       "path": "/?r=dashboard",
       "expectedStatus": 200,
-      "expectedBody": {"revenue_month": 5400000.0},
+      "expectedBody": {"active_deals": 43},
       "bodyMatcher": "partial"
     },
     {

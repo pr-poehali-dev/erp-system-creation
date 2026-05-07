@@ -198,6 +198,8 @@ export const api = {
       request<any>("client_portal", "POST", { action: "sign_act", act_id }),
     getToken: (deal_id: number) =>
       request<{ client_token: string }>("client_portal", "POST", { action: "get_token", deal_id }),
+    createAct: (project_id: number, stage_id: number, amount: number, title: string) =>
+      request<ClientAct>("client_portal", "POST", { action: "create_act", project_id, stage_id, amount, title }),
   },
 };
 

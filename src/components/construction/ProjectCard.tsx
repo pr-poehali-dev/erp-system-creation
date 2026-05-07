@@ -43,6 +43,7 @@ interface Props {
   onComplete: () => void;
   onCancel: () => void;
   onMaterialRequest: () => void;
+  onCreateAct: () => void;
   onAddressSaved: () => void;
 }
 
@@ -50,7 +51,7 @@ export default function ProjectCard({
   project: p, tab, isAction, isConfirm,
   isConstructionDirector, isDirector, canArchive, role,
   onApprove, onArchive, onRestoreConfirm, onCancelConfirm,
-  onRestore, onComplete, onCancel, onMaterialRequest, onAddressSaved,
+  onRestore, onComplete, onCancel, onMaterialRequest, onCreateAct, onAddressSaved,
 }: Props) {
   const status = getProjectStatus(p);
 
@@ -228,9 +229,9 @@ export default function ProjectCard({
         </div>
       )}
 
-      {/* Заявка на материалы */}
+      {/* Заявка на материалы + Создать акт */}
       {tab === "active" && ["foreman", "construction_director", "director", "project_manager"].includes(role) && (
-        <div className="mx-5 mt-2 mb-1">
+        <div className="mx-5 mt-2 mb-1 flex gap-2 flex-wrap">
           <button
             onClick={onMaterialRequest}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-[12px] text-blue-700 font-medium hover:bg-blue-100 transition-colors"
@@ -238,6 +239,15 @@ export default function ProjectCard({
             <Icon name="PackagePlus" size={13} />
             Создать заявку на материалы
           </button>
+          {["foreman", "construction_director"].includes(role) && p.stages && p.stages.length > 0 && (
+            <button
+              onClick={onCreateAct}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-violet-200 bg-violet-50 text-[12px] text-violet-700 font-medium hover:bg-violet-100 transition-colors"
+            >
+              <Icon name="FileSignature" size={13} />
+              Создать акт
+            </button>
+          )}
         </div>
       )}
 

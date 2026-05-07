@@ -1099,6 +1099,35 @@ def get_client_portal(cur, token: str):
         "budget": budget,
     }
 
+def create_client_act(cur, project_id: int, stage_id: int, amount: float, title: str = ""):
+    """Директор/прораб создаёт акт по этапу для подписания клиентом."""
+    cur.execute(f"""
+        SELECT d.id, ps.name, p.code
+        FROM {SCHEMA}.projects p
+        JOIN {SCHEMA}.deals d ON d.id = p.deal_id
+        JOIN {SCHEMA}.project_stages ps ON ps.id = %s AND ps.project_id = p.id
+        WHERE p.id = %s
+    """, (stage_id, project_id))
+    row = cur.fetchone()
+    if not row:
+        return None, "Проект или этап не найден"
+    deal_id, stage_name, project_code = row
+    act_title = title.strip() or f"Акт по этапу «{stage_name}»"
+    act_code = "АКТ-" + "".join(random.choices(string.digits, k=4))
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.client_acts
+            (code, deal_id, project_id, stage_id, title, amount, status)
+        VALUES (%s, %s, %s, %s, %s, %s, 'pending_signature')
+        RETURNING id, code, title, amount, status, signed_at, created_at
+    """, (act_code, deal_id, project_id, stage_id, act_title, amount))
+    row = cur.fetchone()
+    cols = ["id","code","title","amount","status","signed_at","created_at"]
+    act = dict(zip(cols, row))
+    for k, v in act.items():
+        if hasattr(v, 'isoformat'):
+            act[k] = v.isoformat()
+    return act, None
+
 def sign_client_act(cur, act_id: int):
     """Клиент подписывает акт → статус signed."""
     cur.execute(f"""
@@ -3228,6 +3257,15 @@ def handler(event: dict, context) -> dict:
                     token = ensure_client_token(cur, deal_id)
                     conn.commit()
                     return ok({"client_token": token})
+                elif action == "create_act":
+                    project_id = int(body["project_id"])
+                    stage_id   = int(body["stage_id"])
+                    amount     = float(body.get("amount", 0))
+                    title      = body.get("title", "")
+                    act, error = create_client_act(cur, project_id, stage_id, amount, title)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(act, 201)
 
         return err("Маршрут не найден", 404)
 
