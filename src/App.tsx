@@ -19,6 +19,7 @@ import Reports from "@/pages/Reports";
 import Admin from "@/pages/Admin";
 import Estimate from "@/pages/Estimate";
 import NotificationBell from "@/components/NotificationBell";
+import ClientPortal from "@/pages/ClientPortal";
 
 export type Role =
   | "director"
@@ -251,6 +252,17 @@ function ERPApp() {
 }
 
 export default function App() {
+  // Клиентский ЛК — публичная страница по ссылке /client/TOKEN
+  const path = window.location.pathname;
+  const clientMatch = path.match(/^\/client\/([A-Z0-9-]+)$/i);
+  if (clientMatch) {
+    return (
+      <QueryClientProvider client={queryClient}>
+        <ClientPortal token={clientMatch[1]} />
+      </QueryClientProvider>
+    );
+  }
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>

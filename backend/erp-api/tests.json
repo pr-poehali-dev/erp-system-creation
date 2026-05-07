@@ -84,6 +84,13 @@
       "path": "/?r=slots&action=plan",
       "expectedStatus": 200,
       "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET client_portal invalid token",
+      "method": "GET",
+      "path": "/?r=client_portal&token=INVALID-TOKEN",
+      "expectedStatus": 404,
+      "bodyMatcher": "partial"
     }
   ]
 }

@@ -1,0 +1,271 @@
+import { useEffect, useState } from "react";
+import { api, ClientPortalData, ClientAct, ClientPortalStage } from "@/lib/api";
+import Icon from "@/components/ui/icon";
+
+const PROJECT_STATUS_MAP: Record<string, { label: string; cls: string; icon: string }> = {
+  planning: { label: "Планирование",  cls: "bg-blue-100 text-blue-700 border-blue-200",      icon: "ClipboardList" },
+  active:   { label: "Строительство", cls: "bg-amber-100 text-amber-700 border-amber-200",   icon: "HardHat" },
+  done:     { label: "Сдан",          cls: "bg-emerald-100 text-emerald-700 border-emerald-200", icon: "CheckCircle2" },
+  archived: { label: "Архив",         cls: "bg-gray-100 text-gray-600 border-gray-200",       icon: "Archive" },
+};
+
+const STAGE_STATUS_MAP: Record<string, { label: string; cls: string }> = {
+  pending:     { label: "Ожидает",    cls: "bg-gray-100 text-gray-500" },
+  in_progress: { label: "Выполняется", cls: "bg-amber-100 text-amber-700" },
+  done:        { label: "Завершён",   cls: "bg-emerald-100 text-emerald-700" },
+};
+
+function fmt(iso: string | null) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+}
+
+function fmtMoney(n: number) {
+  return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 }).format(n);
+}
+
+interface Props { token: string; }
+
+export default function ClientPortal({ token }: Props) {
+  const [data, setData] = useState<ClientPortalData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [signing, setSigning] = useState<number | null>(null);
+  const [signedIds, setSignedIds] = useState<number[]>([]);
+
+  const load = () => {
+    setLoading(true);
+    api.client_portal.get(token)
+      .then(setData)
+      .catch(() => setError("Страница не найдена. Проверьте ссылку."))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { load(); }, [token]);
+
+  const handleSign = async (act: ClientAct) => {
+    setSigning(act.id);
+    try {
+      await api.client_portal.signAct(act.id);
+      setSignedIds(prev => [...prev, act.id]);
+      load();
+    } finally {
+      setSigning(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#f5f6fa] flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <div className="w-10 h-10 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
+          <div className="text-muted-foreground text-sm">Загружаем данные...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <div className="min-h-screen bg-[#f5f6fa] flex items-center justify-center p-4">
+        <div className="text-center space-y-4 max-w-sm">
+          <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto">
+            <Icon name="AlertCircle" size={32} className="text-red-500" />
+          </div>
+          <h1 className="text-xl font-semibold">Страница не найдена</h1>
+          <p className="text-muted-foreground text-sm">{error || "Ссылка недействительна или устарела."}</p>
+        </div>
+      </div>
+    );
+  }
+
+  const { deal, stages, acts, paid, balance, budget } = data;
+  const pstatus = PROJECT_STATUS_MAP[deal.project_status || "planning"] || PROJECT_STATUS_MAP["planning"];
+  const paidPct = budget > 0 ? Math.min(100, Math.round((paid / budget) * 100)) : 0;
+  const pendingActs = acts.filter(a => a.status === "pending_signature");
+
+  // Прогресс строительства
+  const doneStages = stages.filter(s => s.status === "done").length;
+  const buildPct = stages.length > 0 ? Math.round((doneStages / stages.length) * 100) : 0;
+
+  return (
+    <div className="min-h-screen bg-[#f5f6fa]">
+      {/* Header */}
+      <div className="bg-white border-b border-border">
+        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div>
+            <div className="text-xs text-muted-foreground mb-0.5">Личный кабинет клиента</div>
+            <div className="font-semibold text-[15px]">{deal.client_name}</div>
+          </div>
+          <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-[12px] font-medium ${pstatus.cls}`}>
+            <Icon name={pstatus.icon as Parameters<typeof Icon>[0]["name"]} size={13} />
+            {pstatus.label}
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-2xl mx-auto px-4 py-6 space-y-4">
+
+        {/* Карточка проекта */}
+        <div className="bg-white rounded-xl border border-border p-5">
+          <div className="flex items-start justify-between gap-3 mb-4">
+            <div>
+              <div className="text-xs text-muted-foreground">Проект</div>
+              <div className="font-semibold text-[17px] mt-0.5">{deal.project_code || deal.deal_code}</div>
+              {deal.address && <div className="text-[13px] text-muted-foreground mt-0.5">{deal.address}</div>}
+            </div>
+            <div className="text-right shrink-0">
+              <div className="text-xs text-muted-foreground">Сумма договора</div>
+              <div className="font-bold text-[17px] mt-0.5">{fmtMoney(budget)}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 text-[13px]">
+            {deal.start_date && (
+              <div>
+                <div className="text-xs text-muted-foreground mb-0.5">Начало строительства</div>
+                <div className="font-medium">{fmt(deal.start_date)}</div>
+              </div>
+            )}
+            {deal.deadline && (
+              <div>
+                <div className="text-xs text-muted-foreground mb-0.5">Плановая сдача</div>
+                <div className="font-medium">{fmt(deal.deadline)}</div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Оплата */}
+        <div className="bg-white rounded-xl border border-border p-5">
+          <h2 className="font-semibold text-[14px] mb-4 flex items-center gap-2">
+            <Icon name="CreditCard" size={16} className="text-muted-foreground" />
+            Оплата
+          </h2>
+          <div className="space-y-3">
+            <div className="flex justify-between text-[13px]">
+              <span className="text-muted-foreground">Оплачено</span>
+              <span className="font-semibold text-emerald-600">{fmtMoney(paid)}</span>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div
+                className="bg-emerald-500 h-2 rounded-full transition-all"
+                style={{ width: `${paidPct}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-[13px]">
+              <span className="text-muted-foreground">Остаток</span>
+              <span className={`font-semibold ${balance > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                {balance > 0 ? fmtMoney(balance) : "Оплачено полностью"}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Акты на подпись */}
+        {pendingActs.length > 0 && (
+          <div className="bg-amber-50 rounded-xl border border-amber-200 p-5">
+            <h2 className="font-semibold text-[14px] mb-3 flex items-center gap-2 text-amber-800">
+              <Icon name="FileSignature" size={16} />
+              Требуют вашей подписи ({pendingActs.length})
+            </h2>
+            <div className="space-y-3">
+              {pendingActs.map(act => (
+                <div key={act.id} className="bg-white rounded-lg border border-amber-200 p-4 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-medium text-[13px]">{act.title}</div>
+                    <div className="text-[12px] text-muted-foreground mt-0.5">{act.code} · {fmtMoney(act.amount)}</div>
+                  </div>
+                  <button
+                    onClick={() => handleSign(act)}
+                    disabled={signing === act.id || signedIds.includes(act.id)}
+                    className="shrink-0 px-4 py-2 bg-emerald-600 text-white rounded-lg text-[13px] font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {signing === act.id
+                      ? <><Icon name="Loader2" size={13} className="animate-spin" /> Подписываем...</>
+                      : <><Icon name="Check" size={13} /> Подтвердить</>
+                    }
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Все акты */}
+        {acts.filter(a => a.status !== "pending_signature").length > 0 && (
+          <div className="bg-white rounded-xl border border-border p-5">
+            <h2 className="font-semibold text-[14px] mb-3 flex items-center gap-2">
+              <Icon name="FileCheck" size={16} className="text-muted-foreground" />
+              Подписанные акты
+            </h2>
+            <div className="divide-y divide-border">
+              {acts.filter(a => a.status !== "pending_signature").map(act => (
+                <div key={act.id} className="py-3 flex items-center justify-between gap-3 first:pt-0 last:pb-0">
+                  <div>
+                    <div className="font-medium text-[13px]">{act.title}</div>
+                    <div className="text-[12px] text-muted-foreground mt-0.5">{act.code} · {fmtMoney(act.amount)}</div>
+                  </div>
+                  <span className="text-[11px] px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 font-medium whitespace-nowrap">
+                    Подписан {act.signed_at ? fmt(act.signed_at) : ""}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Этапы строительства */}
+        {stages.length > 0 && (
+          <div className="bg-white rounded-xl border border-border p-5">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-[14px] flex items-center gap-2">
+                <Icon name="Layers" size={16} className="text-muted-foreground" />
+                Этапы строительства
+              </h2>
+              <div className="text-[13px] text-muted-foreground">
+                {doneStages} из {stages.length} · {buildPct}%
+              </div>
+            </div>
+            <div className="w-full bg-gray-100 rounded-full h-1.5 mb-4">
+              <div
+                className="bg-primary h-1.5 rounded-full transition-all"
+                style={{ width: `${buildPct}%` }}
+              />
+            </div>
+            <div className="space-y-2">
+              {stages.map((s: ClientPortalStage) => {
+                const st = STAGE_STATUS_MAP[s.status] || STAGE_STATUS_MAP["pending"];
+                return (
+                  <div key={s.id} className="flex items-start gap-3 py-2.5 border-b border-border/50 last:border-0">
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
+                      s.status === "done" ? "bg-emerald-500" :
+                      s.status === "in_progress" ? "bg-amber-400" : "bg-gray-200"
+                    }`}>
+                      {s.status === "done" && <Icon name="Check" size={11} className="text-white" />}
+                      {s.status === "in_progress" && <div className="w-2 h-2 bg-white rounded-full" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[13px] font-medium">{s.name}</div>
+                      <div className="text-[11px] text-muted-foreground mt-0.5">
+                        {s.planned_start ? fmt(s.planned_start) : "—"}
+                        {s.planned_end ? ` — ${fmt(s.planned_end)}` : ""}
+                      </div>
+                    </div>
+                    <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${st.cls}`}>
+                      {st.label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div className="text-center text-[11px] text-muted-foreground pb-4">
+          По вопросам свяжитесь с вашим менеджером
+        </div>
+      </div>
+    </div>
+  );
+}

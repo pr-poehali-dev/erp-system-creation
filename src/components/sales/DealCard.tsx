@@ -1,4 +1,5 @@
-import { Deal } from "@/lib/api";
+import { useState } from "react";
+import { Deal, api } from "@/lib/api";
 import Icon from "@/components/ui/icon";
 
 const MONTH_NAMES = ["","Янв","Фев","Мар","Апр","Май","Июн","Июл","Авг","Сен","Окт","Ноя","Дек"];
@@ -35,6 +36,31 @@ export default function DealCard({
   deal, canEdit, isArchiveView,
   onToKp, onToPlanning, onLost, onArchive, onRestore, onDelete,
 }: Props) {
+  const [clientToken, setClientToken] = useState<string | null>(deal.client_token || null);
+  const [tokenLoading, setTokenLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const getClientLink = () => `${window.location.origin}/client/${clientToken}`;
+
+  const handleGetToken = async () => {
+    if (clientToken) {
+      await navigator.clipboard.writeText(getClientLink());
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      return;
+    }
+    setTokenLoading(true);
+    try {
+      const res = await api.client_portal.getToken(deal.id);
+      setClientToken(res.client_token);
+      await navigator.clipboard.writeText(`${window.location.origin}/client/${res.client_token}`);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } finally {
+      setTokenLoading(false);
+    }
+  };
+
   const isSerial = deal.project_type === "serial" || !deal.project_type;
   const cs       = deal.contract_status || "none";
   const csBadge  = CONTRACT_STATUS_BADGE[cs];
@@ -123,6 +149,25 @@ export default function DealCard({
           <Icon name="HardHat" size={10} className="shrink-0" />
           Проект привязан · план-график в разделе «Строительство»
         </div>
+      )}
+
+      {/* Ссылка ЛК клиента — показываем для сделок с подписанным договором */}
+      {(deal.stage === "planning" || deal.stage === "closed" || deal.stage === "kp") && deal.payment_confirmed && (
+        <button
+          onClick={handleGetToken}
+          disabled={tokenLoading}
+          className={`mb-1 w-full flex items-center gap-1.5 px-2 py-1.5 rounded-lg border text-[11px] font-medium transition-colors ${
+            copied
+              ? "bg-emerald-50 border-emerald-200 text-emerald-700"
+              : "bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100"
+          }`}
+        >
+          {tokenLoading
+            ? <Icon name="Loader2" size={10} className="animate-spin shrink-0" />
+            : <Icon name={copied ? "Check" : "Link"} size={10} className="shrink-0" />
+          }
+          {copied ? "Ссылка скопирована!" : clientToken ? "Скопировать ссылку ЛК" : "Получить ссылку ЛК клиента"}
+        </button>
       )}
 
       {/* Manager */}

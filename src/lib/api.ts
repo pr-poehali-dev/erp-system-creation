@@ -188,6 +188,15 @@ export const api = {
     markRead: (ids: number[]) =>
       request<any>("notifications", "POST", { action: "read", ids }),
   },
+
+  client_portal: {
+    get: (token: string) =>
+      request<ClientPortalData>("client_portal", "GET", undefined, { token }),
+    signAct: (act_id: number) =>
+      request<any>("client_portal", "POST", { action: "sign_act", act_id }),
+    getToken: (deal_id: number) =>
+      request<{ client_token: string }>("client_portal", "POST", { action: "get_token", deal_id }),
+  },
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -247,6 +256,7 @@ export interface Deal {
   kp_slot_month: number | null;
   payment_confirmed: boolean;
   contract_signed: boolean;
+  client_token: string | null;
 }
 
 export interface StageDuration {
@@ -663,4 +673,51 @@ export interface PayoutDeal {
   invoice_file_url: string | null;
   invoice_file_name: string | null;
   reject_comment: string | null;
+}
+
+export interface ClientAct {
+  id: number;
+  code: string;
+  title: string;
+  amount: number;
+  status: string; // pending_signature | signed
+  signed_at: string | null;
+  created_at: string;
+}
+
+export interface ClientPortalStage {
+  id: number;
+  name: string;
+  order_num: number;
+  planned_start: string | null;
+  planned_end: string | null;
+  actual_start: string | null;
+  actual_end: string | null;
+  status: string; // pending | in_progress | done
+}
+
+export interface ClientPortalDeal {
+  deal_id: number;
+  deal_code: string;
+  stage: string;
+  budget: number;
+  address: string | null;
+  signed_date: string | null;
+  client_token: string;
+  project_id: number | null;
+  client_name: string;
+  client_phone: string;
+  project_status: string | null;
+  start_date: string | null;
+  deadline: string | null;
+  project_code: string | null;
+}
+
+export interface ClientPortalData {
+  deal: ClientPortalDeal;
+  stages: ClientPortalStage[];
+  acts: ClientAct[];
+  paid: number;
+  balance: number;
+  budget: number;
 }

@@ -5,6 +5,8 @@ ERP API — универсальный endpoint для всех операций
 import json
 import os
 import base64
+import random
+import string
 import psycopg2
 import boto3
 from datetime import date, datetime, timedelta
@@ -225,7 +227,8 @@ def get_deals(cur, archived=False):
                COALESCE(d.kp_slot_id, 0) as kp_slot_id,
                COALESCE(d.payment_confirmed, false) as payment_confirmed,
                COALESCE(d.contract_signed, false) as contract_signed,
-               ksl.start_date as kp_slot_start_date, ksl.year as kp_slot_year, ksl.month as kp_slot_month
+               ksl.start_date as kp_slot_start_date, ksl.year as kp_slot_year, ksl.month as kp_slot_month,
+               d.client_token
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id
@@ -549,7 +552,16 @@ def update_deal_contract(cur, deal_id, body):
             UPDATE {SCHEMA}.deals SET stage='planning', updated_at=now() WHERE id=%s
         """, (deal_id,))
 
-    return {"id": deal_id, "stage": "planning" if project_id else "contract", "project_id": project_id}, None
+    # Генерируем client_token если ещё нет
+    cur.execute(f"SELECT client_token FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+    row = cur.fetchone()
+    if not row or not row[0]:
+        token = "CL-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4)) + "-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        cur.execute(f"UPDATE {SCHEMA}.deals SET client_token=%s WHERE id=%s", (token, deal_id))
+    else:
+        token = row[0]
+
+    return {"id": deal_id, "stage": "planning" if project_id else "contract", "project_id": project_id, "client_token": token}, None
 
 def save_kp_slot(cur, deal_id: int, body: dict):
     """
@@ -987,6 +999,103 @@ def update_request_status(cur, req_id, new_status):
         UPDATE {SCHEMA}.material_requests SET status=%s, updated_at=now() WHERE id=%s RETURNING id
     """, (new_status, req_id))
     return bool(cur.fetchone())
+
+# ─── CLIENT PORTAL ────────────────────────────────────────────────────────────
+
+def get_client_portal(cur, token: str):
+    """Возвращает данные ЛК клиента по токену."""
+    cur.execute(f"""
+        SELECT d.id, d.code, d.stage, d.budget, d.address, d.signed_date,
+               d.client_token, d.project_id,
+               c.name as client_name, c.phone as client_phone,
+               p.status as project_status, p.start_date, p.deadline, p.code as project_code
+        FROM {SCHEMA}.deals d
+        LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
+        LEFT JOIN {SCHEMA}.projects p ON p.id = d.project_id
+        WHERE d.client_token = %s
+    """, (token,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    cols = ["deal_id","deal_code","stage","budget","address","signed_date",
+            "client_token","project_id","client_name","client_phone",
+            "project_status","start_date","deadline","project_code"]
+    deal = dict(zip(cols, row))
+
+    # Этапы проекта
+    stages = []
+    if deal["project_id"]:
+        cur.execute(f"""
+            SELECT id, name, order_num, planned_start, planned_end, actual_start, actual_end, status
+            FROM {SCHEMA}.project_stages
+            WHERE project_id = %s ORDER BY order_num, id
+        """, (deal["project_id"],))
+        scols = ["id","name","order_num","planned_start","planned_end","actual_start","actual_end","status"]
+        stages = [dict(zip(scols, r)) for r in cur.fetchall()]
+
+    # Акты
+    cur.execute(f"""
+        SELECT id, code, title, amount, status, signed_at, created_at
+        FROM {SCHEMA}.client_acts WHERE deal_id = %s ORDER BY created_at
+    """, (deal["deal_id"],))
+    acols = ["id","code","title","amount","status","signed_at","created_at"]
+    acts = [dict(zip(acols, r)) for r in cur.fetchall()]
+
+    # Сумма оплат
+    cur.execute(f"""
+        SELECT COALESCE(SUM(amount),0) FROM {SCHEMA}.payments
+        WHERE deal_id = %s AND type = 'income'
+    """, (deal["deal_id"],))
+    paid = float(cur.fetchone()[0] or 0)
+    budget = float(deal["budget"] or 0)
+
+    for d in [deal] + stages + acts:
+        for k, v in d.items():
+            if hasattr(v, 'isoformat'):
+                d[k] = v.isoformat()
+
+    return {
+        "deal": deal,
+        "stages": stages,
+        "acts": acts,
+        "paid": paid,
+        "balance": round(budget - paid, 2),
+        "budget": budget,
+    }
+
+def sign_client_act(cur, act_id: int):
+    """Клиент подписывает акт → статус signed."""
+    cur.execute(f"""
+        UPDATE {SCHEMA}.client_acts
+        SET status='signed', signed_at=now()
+        WHERE id=%s AND status='pending_signature'
+        RETURNING id, deal_id, amount, code
+    """, (act_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Акт не найден или уже подписан"
+    act_id, deal_id, amount, code = row
+
+    # Создаём платёж-счёт (invoice) на следующий этап
+    next_code = "".join(["СЧ-"] + ["".join(random.choices(string.digits, k=4))])
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.payments (code, deal_id, type, category, amount, payment_date, description)
+        VALUES (%s, %s, 'income', 'По акту', %s, CURRENT_DATE, %s)
+        RETURNING id
+    """, (next_code, deal_id, float(amount), f"Счёт по акту {code}"))
+    payment_id = cur.fetchone()[0]
+
+    return {"ok": True, "act_id": act_id, "payment_id": payment_id}, None
+
+def ensure_client_token(cur, deal_id: int) -> str:
+    """Генерирует и сохраняет client_token если ещё нет."""
+    cur.execute(f"SELECT client_token FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+    row = cur.fetchone()
+    if row and row[0]:
+        return row[0]
+    token = "CL-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4)) + "-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    cur.execute(f"UPDATE {SCHEMA}.deals SET client_token=%s WHERE id=%s", (token, deal_id))
+    return token
 
 # ─── PAYMENTS ────────────────────────────────────────────────────────────────
 
@@ -3058,6 +3167,30 @@ def handler(event: dict, context) -> dict:
                     mark_notifications_read(cur, ids)
                     conn.commit()
                     return ok({"ok": True})
+
+        # ── CLIENT PORTAL ──────────────────────────────────────────────────────
+        elif resource == "client_portal":
+            if method == "GET":
+                token = qs.get("token", "")
+                if not token:
+                    return err("token обязателен", 400)
+                data = get_client_portal(cur, token)
+                if not data:
+                    return err("Страница не найдена", 404)
+                return ok(data)
+            elif method == "POST":
+                action = body.get("action")
+                if action == "sign_act":
+                    act_id = int(body["act_id"])
+                    result, error = sign_client_act(cur, act_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "get_token":
+                    deal_id = int(body["deal_id"])
+                    token = ensure_client_token(cur, deal_id)
+                    conn.commit()
+                    return ok({"client_token": token})
 
         return err("Маршрут не найден", 404)
 
