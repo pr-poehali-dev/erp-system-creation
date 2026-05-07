@@ -2526,6 +2526,21 @@ def get_clients(cur):
     cols = [desc[0] for desc in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+def create_client(cur, name: str, phone: str, email: str = "", source: str = "CRM"):
+    """Создаёт нового клиента-заказчика из формы лида."""
+    name  = name.strip()
+    phone = phone.strip()
+    if not name:
+        return None, "Укажите ФИО"
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.clients (name, phone, email, source)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id, name, phone, email, source
+    """, (name, phone, email.strip(), source))
+    row = cur.fetchone()
+    cols = ["id","name","phone","email","source"]
+    return dict(zip(cols, row)), None
+
 def get_staff(cur, role_filter=None):
     if role_filter:
         cur.execute(f"SELECT id, name, role FROM {SCHEMA}.staff WHERE role=%s ORDER BY name", (role_filter,))
@@ -2956,7 +2971,22 @@ def handler(event: dict, context) -> dict:
 
         # ── CLIENTS ────────────────────────────────────────────────────────────
         elif resource == "clients":
-            return ok(get_clients(cur))
+            if method == "GET":
+                return ok(get_clients(cur))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "create":
+                    client, err_msg = create_client(
+                        cur,
+                        name=body.get("name",""),
+                        phone=body.get("phone",""),
+                        email=body.get("email",""),
+                        source=body.get("source","CRM"),
+                    )
+                    if err_msg:
+                        return err(err_msg, 400)
+                    conn.commit()
+                    return ok(client, 201)
 
         # ── STAFF ──────────────────────────────────────────────────────────────
         elif resource == "staff":

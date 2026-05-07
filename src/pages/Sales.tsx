@@ -325,6 +325,7 @@ export default function Sales({ role }: Props) {
           saving={saving}
           onClose={() => setLeadModalOpen(false)}
           onSubmit={handleCreateLead}
+          onClientCreated={c => setClients(prev => [...prev, c].sort((a, b) => a.name.localeCompare(b.name)))}
         />
       )}
 

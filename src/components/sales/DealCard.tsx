@@ -240,21 +240,27 @@ export default function DealCard({
             <button onClick={onToKp}
               className="flex items-center gap-1 px-2 py-1 bg-amber-50 border border-amber-200 text-amber-700 rounded-md text-[11px] font-medium hover:bg-amber-100 transition-colors">
               <Icon name="FileText" size={10} />
-              Оформить КП
+              Оформить КП →
             </button>
           )}
 
           {/* Кнопка «Договор и оплата» — главный флоу для kp */}
           {deal.stage === "kp" && onToPlanning && (
-            <button onClick={onToPlanning}
-              className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                deal.payment_confirmed
-                  ? "bg-emerald-50 border border-emerald-300 text-emerald-700 hover:bg-emerald-100"
-                  : "bg-violet-50 border border-violet-200 text-violet-700 hover:bg-violet-100"
-              }`}>
-              <Icon name={deal.payment_confirmed ? "PlayCircle" : "PenLine"} size={10} />
-              Договор и оплата →
-            </button>
+            <>
+              {deal.payment_confirmed ? (
+                <button onClick={onToPlanning}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors bg-emerald-50 border border-emerald-300 text-emerald-700 hover:bg-emerald-100">
+                  <Icon name="PlayCircle" size={10} />
+                  Запустить в производство →
+                </button>
+              ) : (
+                <button onClick={onToPlanning}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors bg-violet-50 border border-violet-200 text-violet-700 hover:bg-violet-100">
+                  <Icon name="PenLine" size={10} />
+                  Договор и оплата →
+                </button>
+              )}
+            </>
           )}
 
           {deal.stage === "kp" && (
@@ -263,6 +269,14 @@ export default function DealCard({
               <Icon name="Edit2" size={10} />
               Ред. КП
             </button>
+          )}
+
+          {/* Этапы «planning» и «closed» — только просмотр, переход назад не нужен */}
+          {deal.stage === "planning" && (
+            <div className="flex items-center gap-1 px-2 py-1 bg-amber-50 border border-amber-200 text-amber-700 rounded-md text-[11px] font-medium">
+              <Icon name="CalendarCheck" size={10} />
+              В производстве
+            </div>
           )}
 
           {["lead", "kp"].includes(deal.stage) && (

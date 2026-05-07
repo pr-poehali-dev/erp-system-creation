@@ -1,6 +1,6 @@
 import { useState } from "react";
 import Icon from "@/components/ui/icon";
-import { Client, Staff, SerialProject } from "@/lib/api";
+import { Client, Staff, SerialProject, api } from "@/lib/api";
 
 const SOURCES = ["Авито", "Сайт", "Рекомендация", "Инстаграм", "ВКонтакте", "Другое"];
 
@@ -12,9 +12,10 @@ interface Props {
   saving: boolean;
   onClose: () => void;
   onSubmit: (body: object) => void;
+  onClientCreated?: (c: Client) => void;
 }
 
-export default function LeadModal({ clients, managers, realtors, serialProjects, saving, onClose, onSubmit }: Props) {
+export default function LeadModal({ clients, managers, realtors, serialProjects, saving, onClose, onSubmit, onClientCreated }: Props) {
   const [clientId, setClientId]       = useState("");
   const [managerId, setManagerId]     = useState("");
   const [realtorId, setRealtorId]     = useState("");
@@ -27,10 +28,36 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
   const [specReq, setSpecReq]         = useState("");
   const [error, setError]             = useState("");
 
+  // Форма нового заказчика
+  const [showNewClient, setShowNewClient] = useState(false);
+  const [newName, setNewName]   = useState("");
+  const [newPhone, setNewPhone] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [newClientSaving, setNewClientSaving] = useState(false);
+  const [newClientError, setNewClientError]   = useState("");
+
+  const handleCreateClient = async () => {
+    if (!newName.trim()) { setNewClientError("Укажите ФИО"); return; }
+    if (!newPhone.trim()) { setNewClientError("Укажите телефон"); return; }
+    setNewClientSaving(true);
+    setNewClientError("");
+    try {
+      const created = await api.clientCreate({ name: newName.trim(), phone: newPhone.trim(), email: newEmail.trim() });
+      onClientCreated?.(created);
+      setClientId(String(created.id));
+      setShowNewClient(false);
+      setNewName(""); setNewPhone(""); setNewEmail("");
+    } catch (e: unknown) {
+      setNewClientError(e instanceof Error ? e.message : "Ошибка");
+    } finally {
+      setNewClientSaving(false);
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
-    if (!clientId)  { setError("Выберите клиента"); return; }
+    if (!clientId)  { setError("Выберите или создайте клиента"); return; }
     if (!managerId) { setError("Выберите менеджера"); return; }
     setError("");
     onSubmit({
@@ -121,9 +148,51 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
               className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
           </div>
 
-          {/* Клиент */}
+          {/* Заказчик */}
           <div>
-            <label className="block text-[13px] font-medium mb-1">Клиент <span className="text-red-500">*</span></label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[13px] font-medium">Заказчик <span className="text-red-500">*</span></label>
+              <button type="button" onClick={() => { setShowNewClient(v => !v); setNewClientError(""); }}
+                className="flex items-center gap-1 text-[12px] text-primary hover:text-primary/80 transition-colors">
+                <Icon name={showNewClient ? "X" : "UserPlus"} size={13} />
+                {showNewClient ? "Отмена" : "+ Новый заказчик"}
+              </button>
+            </div>
+
+            {/* Inline-форма создания заказчика */}
+            {showNewClient && (
+              <div className="mb-2 p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-2">
+                <div className="text-[12px] font-semibold text-blue-800 mb-1">Новый заказчик</div>
+                <input
+                  type="text" value={newName} onChange={e => setNewName(e.target.value)}
+                  placeholder="ФИО *"
+                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                />
+                <input
+                  type="tel" value={newPhone} onChange={e => setNewPhone(e.target.value)}
+                  placeholder="Телефон *"
+                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                />
+                <input
+                  type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)}
+                  placeholder="Email (необязательно)"
+                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                />
+                {newClientError && (
+                  <div className="text-[12px] text-red-600 flex items-center gap-1">
+                    <Icon name="AlertCircle" size={12} />{newClientError}
+                  </div>
+                )}
+                <button type="button" onClick={handleCreateClient} disabled={newClientSaving}
+                  className="w-full px-3 py-1.5 bg-blue-600 text-white rounded-lg text-[12px] font-medium hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center gap-1.5">
+                  {newClientSaving
+                    ? <><Icon name="Loader2" size={12} className="animate-spin" /> Создаём...</>
+                    : <><Icon name="UserCheck" size={12} /> Создать и выбрать</>
+                  }
+                </button>
+              </div>
+            )}
+
             <select value={clientId} onChange={e => setClientId(e.target.value)}
               className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
               <option value="">— Выберите клиента —</option>
@@ -180,8 +249,8 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
               Отмена
             </button>
             <button type="submit" disabled={saving}
-              className="flex-1 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors disabled:opacity-50">
-              {saving ? "Создание..." : "Создать лид"}
+              className="flex-1 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-2">
+              {saving ? <><Icon name="Loader2" size={14} className="animate-spin" /> Создаём...</> : "Создать лид"}
             </button>
           </div>
         </form>

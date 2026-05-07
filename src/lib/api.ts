@@ -19,6 +19,8 @@ async function request<T = any>(route: string, method = "GET", body?: object, ex
 export const api = {
   dashboard: () => request<DashboardData>("dashboard"),
   clients: () => request<Client[]>("clients"),
+  clientCreate: (body: { name: string; phone: string; email?: string; source?: string }) =>
+    request<Client>("clients", "POST", { action: "create", ...body }),
   staff: (role?: string) => request<Staff[]>("staff", "GET", undefined, role ? { role } : {}),
 
   deals: {
