@@ -1005,7 +1005,9 @@ def update_request_status(cur, req_id, new_status):
 def get_client_portal(cur, token: str):
     """Возвращает данные ЛК клиента по токену."""
     cur.execute(f"""
-        SELECT d.id, d.code, d.stage, d.budget, d.address, d.signed_date,
+        SELECT d.id, d.code, d.stage, d.budget,
+               COALESCE(p.address, d.address) as address,
+               d.signed_date,
                d.client_token, d.project_id,
                c.name as client_name, c.phone as client_phone,
                p.status as project_status, p.start_date, p.deadline, p.code as project_code
@@ -1024,6 +1026,7 @@ def get_client_portal(cur, token: str):
 
     # Этапы проекта
     stages = []
+    today = date.today().isoformat()
     if deal["project_id"]:
         cur.execute(f"""
             SELECT id, name, order_num, planned_start, planned_end, actual_start, actual_end, status
@@ -1031,7 +1034,23 @@ def get_client_portal(cur, token: str):
             WHERE project_id = %s ORDER BY order_num, id
         """, (deal["project_id"],))
         scols = ["id","name","order_num","planned_start","planned_end","actual_start","actual_end","status"]
-        stages = [dict(zip(scols, r)) for r in cur.fetchall()]
+        rows = cur.fetchall()
+        for r in rows:
+            s = dict(zip(scols, r))
+            # Вычисляем effective_status для фронтенда
+            pe = s["planned_end"].isoformat() if s["planned_end"] else None
+            if s["status"] == "done" or s["actual_end"]:
+                s["effective_status"] = "done"
+            elif s["status"] == "in_progress" or s["actual_start"]:
+                s["effective_status"] = "in_progress"
+                if pe and pe < today:
+                    s["effective_status"] = "overdue"
+            else:
+                if pe and pe < today:
+                    s["effective_status"] = "overdue"
+                else:
+                    s["effective_status"] = "pending"
+            stages.append(s)
 
     # Акты
     cur.execute(f"""
@@ -1040,6 +1059,23 @@ def get_client_portal(cur, token: str):
     """, (deal["deal_id"],))
     acols = ["id","code","title","amount","status","signed_at","created_at"]
     acts = [dict(zip(acols, r)) for r in cur.fetchall()]
+
+    # Если нет актов и есть проект — создаём демо-акт по первому этапу
+    if not acts and deal["project_id"] and stages:
+        first_stage = stages[0]
+        act_code = "АКТ-" + "".join(random.choices(string.digits, k=4))
+        budget_val = float(deal["budget"] or 0)
+        act_amount = round(budget_val * 0.3, 2) if budget_val > 0 else 0
+        stage_name = first_stage.get("name", "Первый этап")
+        cur.execute(f"""
+            INSERT INTO {SCHEMA}.client_acts
+                (code, deal_id, project_id, stage_id, title, amount, status)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending_signature')
+            RETURNING id, code, title, amount, status, signed_at, created_at
+        """, (act_code, deal["deal_id"], deal["project_id"],
+              first_stage["id"], f"Акт по этапу «{stage_name}»", act_amount))
+        arow = cur.fetchone()
+        acts = [dict(zip(acols, arow))]
 
     # Сумма оплат
     cur.execute(f"""
@@ -3177,6 +3213,7 @@ def handler(event: dict, context) -> dict:
                 data = get_client_portal(cur, token)
                 if not data:
                     return err("Страница не найдена", 404)
+                conn.commit()  # сохраняем авто-созданный акт если был
                 return ok(data)
             elif method == "POST":
                 action = body.get("action")

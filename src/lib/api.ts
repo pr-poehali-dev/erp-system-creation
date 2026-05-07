@@ -67,6 +67,8 @@ export const api = {
       request<any>("projects", "PUT", { action: "cancel_project", project_id }),
     complete: (project_id: number) =>
       request<any>("projects", "PUT", { action: "complete_project", project_id }),
+    updateAddress: (project_id: number, address: string) =>
+      request<any>("projects", "PUT", { action: "update_project", project_id, address }),
   },
 
   procurement: {

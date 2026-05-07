@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 import { api, Project, ProjectStage } from "@/lib/api";
@@ -37,6 +37,9 @@ export default function Construction({ role }: Props) {
   const [actionId, setActionId]         = useState<number | null>(null);
   const [confirmId, setConfirmId]       = useState<number | null>(null);
   const [materialModalProject, setMaterialModalProject] = useState<Project | null>(null);
+  const [editAddressId, setEditAddressId] = useState<number | null>(null);
+  const [editAddressVal, setEditAddressVal] = useState("");
+  const addressInputRef = useRef<HTMLInputElement>(null);
 
   const isDirector = role === "director";
   const isConstructionDirector = role === "construction_director";
@@ -102,6 +105,18 @@ export default function Construction({ role }: Props) {
       await api.projects.complete(p.id);
       load();
     } finally { setActionId(null); }
+  };
+
+  const startEditAddress = (p: Project) => {
+    setEditAddressId(p.id);
+    setEditAddressVal(p.address || "");
+    setTimeout(() => addressInputRef.current?.focus(), 50);
+  };
+
+  const saveAddress = async (projectId: number) => {
+    await api.projects.updateAddress(projectId, editAddressVal.trim());
+    setEditAddressId(null);
+    load();
   };
 
   const planningProjects = projects.filter(p => p.status === "planning");
@@ -265,7 +280,33 @@ export default function Construction({ role }: Props) {
                       )}
                     </div>
                     <div className="text-[14px] font-semibold mt-0.5 truncate">{p.client_name}</div>
-                    <div className="text-hint truncate">{p.address || "Адрес не указан"}</div>
+                    {editAddressId === p.id ? (
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <input
+                          ref={addressInputRef}
+                          value={editAddressVal}
+                          onChange={e => setEditAddressVal(e.target.value)}
+                          onKeyDown={e => { if (e.key === "Enter") saveAddress(p.id); if (e.key === "Escape") setEditAddressId(null); }}
+                          className="text-[12px] border border-primary rounded px-2 py-0.5 outline-none flex-1 min-w-0"
+                          placeholder="Введите адрес объекта"
+                        />
+                        <button onClick={() => saveAddress(p.id)} className="text-emerald-600 hover:text-emerald-700 shrink-0">
+                          <Icon name="Check" size={14} />
+                        </button>
+                        <button onClick={() => setEditAddressId(null)} className="text-muted-foreground hover:text-foreground shrink-0">
+                          <Icon name="X" size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => startEditAddress(p)}
+                        className="flex items-center gap-1 text-hint text-[12px] hover:text-foreground group transition-colors"
+                      >
+                        <Icon name="MapPin" size={10} className="shrink-0" />
+                        <span className="truncate">{p.address || "Адрес не указан"}</span>
+                        <Icon name="Pencil" size={10} className="opacity-0 group-hover:opacity-50 transition-opacity shrink-0" />
+                      </button>
+                    )}
                   </div>
 
                   <div className="text-right text-[13px] shrink-0">

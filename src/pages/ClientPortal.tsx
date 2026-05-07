@@ -2,17 +2,20 @@ import { useEffect, useState } from "react";
 import { api, ClientPortalData, ClientAct, ClientPortalStage } from "@/lib/api";
 import Icon from "@/components/ui/icon";
 
+// Статус проекта — синхронизирован с project.status из БД
 const PROJECT_STATUS_MAP: Record<string, { label: string; cls: string; icon: string }> = {
-  planning: { label: "Планирование",  cls: "bg-blue-100 text-blue-700 border-blue-200",      icon: "ClipboardList" },
-  active:   { label: "Строительство", cls: "bg-amber-100 text-amber-700 border-amber-200",   icon: "HardHat" },
+  planning: { label: "Планирование",  cls: "bg-blue-100 text-blue-700 border-blue-200",         icon: "ClipboardList" },
+  active:   { label: "Строительство", cls: "bg-amber-100 text-amber-700 border-amber-200",      icon: "HardHat" },
   done:     { label: "Сдан",          cls: "bg-emerald-100 text-emerald-700 border-emerald-200", icon: "CheckCircle2" },
-  archived: { label: "Архив",         cls: "bg-gray-100 text-gray-600 border-gray-200",       icon: "Archive" },
+  archived: { label: "Архив",         cls: "bg-gray-100 text-gray-600 border-gray-200",          icon: "Archive" },
 };
 
-const STAGE_STATUS_MAP: Record<string, { label: string; cls: string }> = {
-  pending:     { label: "Ожидает",    cls: "bg-gray-100 text-gray-500" },
-  in_progress: { label: "Выполняется", cls: "bg-amber-100 text-amber-700" },
-  done:        { label: "Завершён",   cls: "bg-emerald-100 text-emerald-700" },
+// Цвет этапа по effective_status (вычисляется на бэкенде с учётом дат)
+const STAGE_CFG: Record<string, { label: string; badgeCls: string; dotCls: string; icon: string }> = {
+  done:        { label: "Завершён",    badgeCls: "bg-emerald-100 text-emerald-700", dotCls: "bg-emerald-500",  icon: "Check" },
+  in_progress: { label: "Выполняется", badgeCls: "bg-amber-100 text-amber-700",    dotCls: "bg-amber-400",    icon: "Dot" },
+  overdue:     { label: "Просрочен",   badgeCls: "bg-red-100 text-red-700",         dotCls: "bg-red-500",      icon: "AlertCircle" },
+  pending:     { label: "Ожидает",     badgeCls: "bg-gray-100 text-gray-500",       dotCls: "bg-gray-300",     icon: "Dot" },
 };
 
 function fmt(iso: string | null) {
@@ -31,7 +34,6 @@ export default function ClientPortal({ token }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [signing, setSigning] = useState<number | null>(null);
-  const [signedIds, setSignedIds] = useState<number[]>([]);
 
   const load = () => {
     setLoading(true);
@@ -47,7 +49,6 @@ export default function ClientPortal({ token }: Props) {
     setSigning(act.id);
     try {
       await api.client_portal.signAct(act.id);
-      setSignedIds(prev => [...prev, act.id]);
       load();
     } finally {
       setSigning(null);
@@ -80,12 +81,19 @@ export default function ClientPortal({ token }: Props) {
   }
 
   const { deal, stages, acts, paid, balance, budget } = data;
-  const pstatus = PROJECT_STATUS_MAP[deal.project_status || "planning"] || PROJECT_STATUS_MAP["planning"];
+
+  // Статус проекта — из project.status (planning/active/done/archived)
+  const projectStatus = deal.project_status || "planning";
+  const pstatus = PROJECT_STATUS_MAP[projectStatus] || PROJECT_STATUS_MAP["planning"];
+
   const paidPct = budget > 0 ? Math.min(100, Math.round((paid / budget) * 100)) : 0;
   const pendingActs = acts.filter(a => a.status === "pending_signature");
+  const signedActs  = acts.filter(a => a.status !== "pending_signature");
 
-  // Прогресс строительства
-  const doneStages = stages.filter(s => s.status === "done").length;
+  // Прогресс строительства по effective_status
+  const doneStages = stages.filter((s: ClientPortalStage & { effective_status?: string }) =>
+    s.effective_status === "done" || s.status === "done"
+  ).length;
   const buildPct = stages.length > 0 ? Math.round((doneStages / stages.length) * 100) : 0;
 
   return (
@@ -112,7 +120,17 @@ export default function ClientPortal({ token }: Props) {
             <div>
               <div className="text-xs text-muted-foreground">Проект</div>
               <div className="font-semibold text-[17px] mt-0.5">{deal.project_code || deal.deal_code}</div>
-              {deal.address && <div className="text-[13px] text-muted-foreground mt-0.5">{deal.address}</div>}
+              {deal.address
+                ? (
+                  <div className="flex items-center gap-1 text-[13px] text-muted-foreground mt-1">
+                    <Icon name="MapPin" size={12} className="shrink-0" />
+                    {deal.address}
+                  </div>
+                )
+                : (
+                  <div className="text-[12px] text-muted-foreground/50 mt-1 italic">Адрес не указан</div>
+                )
+              }
             </div>
             <div className="text-right shrink-0">
               <div className="text-xs text-muted-foreground">Сумма договора</div>
@@ -174,11 +192,13 @@ export default function ClientPortal({ token }: Props) {
                 <div key={act.id} className="bg-white rounded-lg border border-amber-200 p-4 flex items-center justify-between gap-3">
                   <div>
                     <div className="font-medium text-[13px]">{act.title}</div>
-                    <div className="text-[12px] text-muted-foreground mt-0.5">{act.code} · {fmtMoney(act.amount)}</div>
+                    <div className="text-[12px] text-muted-foreground mt-0.5">
+                      {act.code} · {fmtMoney(act.amount)}
+                    </div>
                   </div>
                   <button
                     onClick={() => handleSign(act)}
-                    disabled={signing === act.id || signedIds.includes(act.id)}
+                    disabled={signing === act.id}
                     className="shrink-0 px-4 py-2 bg-emerald-600 text-white rounded-lg text-[13px] font-medium hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
                   >
                     {signing === act.id
@@ -192,19 +212,21 @@ export default function ClientPortal({ token }: Props) {
           </div>
         )}
 
-        {/* Все акты */}
-        {acts.filter(a => a.status !== "pending_signature").length > 0 && (
+        {/* Подписанные акты */}
+        {signedActs.length > 0 && (
           <div className="bg-white rounded-xl border border-border p-5">
             <h2 className="font-semibold text-[14px] mb-3 flex items-center gap-2">
               <Icon name="FileCheck" size={16} className="text-muted-foreground" />
               Подписанные акты
             </h2>
             <div className="divide-y divide-border">
-              {acts.filter(a => a.status !== "pending_signature").map(act => (
+              {signedActs.map(act => (
                 <div key={act.id} className="py-3 flex items-center justify-between gap-3 first:pt-0 last:pb-0">
                   <div>
                     <div className="font-medium text-[13px]">{act.title}</div>
-                    <div className="text-[12px] text-muted-foreground mt-0.5">{act.code} · {fmtMoney(act.amount)}</div>
+                    <div className="text-[12px] text-muted-foreground mt-0.5">
+                      {act.code} · {fmtMoney(act.amount)}
+                    </div>
                   </div>
                   <span className="text-[11px] px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 font-medium whitespace-nowrap">
                     Подписан {act.signed_at ? fmt(act.signed_at) : ""}
@@ -227,33 +249,46 @@ export default function ClientPortal({ token }: Props) {
                 {doneStages} из {stages.length} · {buildPct}%
               </div>
             </div>
+
             <div className="w-full bg-gray-100 rounded-full h-1.5 mb-4">
               <div
                 className="bg-primary h-1.5 rounded-full transition-all"
                 style={{ width: `${buildPct}%` }}
               />
             </div>
-            <div className="space-y-2">
-              {stages.map((s: ClientPortalStage) => {
-                const st = STAGE_STATUS_MAP[s.status] || STAGE_STATUS_MAP["pending"];
+
+            <div className="space-y-1">
+              {(stages as (ClientPortalStage & { effective_status?: string })[]).map(s => {
+                const effStatus = s.effective_status || s.status || "pending";
+                const cfg = STAGE_CFG[effStatus] || STAGE_CFG["pending"];
                 return (
-                  <div key={s.id} className="flex items-start gap-3 py-2.5 border-b border-border/50 last:border-0">
-                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
-                      s.status === "done" ? "bg-emerald-500" :
-                      s.status === "in_progress" ? "bg-amber-400" : "bg-gray-200"
-                    }`}>
-                      {s.status === "done" && <Icon name="Check" size={11} className="text-white" />}
-                      {s.status === "in_progress" && <div className="w-2 h-2 bg-white rounded-full" />}
+                  <div key={s.id} className={`flex items-start gap-3 py-2.5 px-3 rounded-lg transition-colors ${
+                    effStatus === "in_progress" ? "bg-amber-50/60" :
+                    effStatus === "overdue"     ? "bg-red-50/60"   : ""
+                  }`}>
+                    {/* Dot-индикатор */}
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${cfg.dotCls}`}>
+                      {effStatus === "done" && (
+                        <Icon name="Check" size={11} className="text-white" />
+                      )}
+                      {effStatus === "overdue" && (
+                        <Icon name="AlertCircle" size={11} className="text-white" />
+                      )}
+                      {(effStatus === "in_progress") && (
+                        <div className="w-2 h-2 bg-white rounded-full" />
+                      )}
                     </div>
+
                     <div className="flex-1 min-w-0">
                       <div className="text-[13px] font-medium">{s.name}</div>
                       <div className="text-[11px] text-muted-foreground mt-0.5">
                         {s.planned_start ? fmt(s.planned_start) : "—"}
-                        {s.planned_end ? ` — ${fmt(s.planned_end)}` : ""}
+                        {s.planned_end   ? ` — ${fmt(s.planned_end)}` : ""}
                       </div>
                     </div>
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${st.cls}`}>
-                      {st.label}
+
+                    <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${cfg.badgeCls}`}>
+                      {cfg.label}
                     </span>
                   </div>
                 );
