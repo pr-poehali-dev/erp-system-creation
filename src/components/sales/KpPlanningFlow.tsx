@@ -5,9 +5,8 @@ import { Role } from "@/App";
 import KpFlowSlotStep from "./KpFlowSlotStep";
 import KpFlowManagerDocs from "./KpFlowManagerDocs";
 import KpFlowDirectorReview from "./KpFlowDirectorReview";
-import PaymentScheduleEditor from "./PaymentScheduleEditor";
 
-export type Step = "slot" | "download" | "upload" | "review" | "payment" | "planning" | "schedule";
+export type Step = "slot" | "download" | "upload" | "review" | "payment" | "planning";
 
 export function resolveStep(deal: Deal, cs: string, role: Role): Step {
   if (!deal.kp_slot_id) return "slot";
@@ -21,10 +20,9 @@ export function resolveStep(deal: Deal, cs: string, role: Role): Step {
 
 const STEP_LABELS: Record<Step, string> = {
   slot: "Слот", download: "Скачать", upload: "Загрузить",
-  review: "Проверка", payment: "Оплата", planning: "Запуск", schedule: "График",
+  review: "Проверка", payment: "Оплата", planning: "Запуск",
 };
 const ALL_STEPS: Step[] = ["slot","download","upload","review","payment","planning"];
-const EXTRA_TABS: Step[] = ["schedule"]; // всегда видимые боковые вкладки
 
 interface Props {
   deal: Deal;
@@ -151,7 +149,7 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
           </button>
         </div>
 
-        {/* Шаг-индикатор + вкладка «График» */}
+        {/* Шаг-индикатор */}
         <div className="flex border-b border-border overflow-x-auto">
           {ALL_STEPS.map((s, i) => {
             const isDone   = stepDone(s);
@@ -167,19 +165,6 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
               </div>
             );
           })}
-          {/* Вкладка График — отдельно */}
-          {EXTRA_TABS.map(s => (
-            <div key={s} onClick={() => setStep(s)} className={`flex-1 min-w-[72px] flex flex-col items-center gap-1 px-1 py-2.5 text-center border-b-2 transition-colors cursor-pointer ${
-              step === s ? "border-violet-500 text-violet-600" : "border-transparent text-muted-foreground hover:text-foreground"
-            }`}>
-              <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                step === s ? "bg-violet-500 text-white" : "bg-secondary text-muted-foreground"
-              }`}>
-                <Icon name="CreditCard" size={10} />
-              </span>
-              <span className="text-[10px] font-medium leading-tight">{STEP_LABELS[s]}</span>
-            </div>
-          ))}
         </div>
 
         {/* ── ШАГ 1: Выбор слота ── */}
@@ -239,23 +224,6 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
             onConfirmPayment={handleConfirmPayment}
             onClose={onClose}
           />
-        )}
-
-        {/* ── График оплат ── */}
-        {step === "schedule" && (
-          <div className="px-5 py-5">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <div className="text-[13px] font-semibold">График оплат</div>
-                <div className="text-hint text-[12px] mt-0.5">
-                  {deal.stage === "planning"
-                    ? "Договор подписан — редактирование недоступно"
-                    : "Добавьте строки до подписания договора"}
-                </div>
-              </div>
-            </div>
-            <PaymentScheduleEditor deal={deal} readonly={deal.stage === "planning" || deal.stage === "closed"} />
-          </div>
         )}
 
       </div>

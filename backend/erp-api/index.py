@@ -1077,22 +1077,27 @@ def get_client_portal(cur, token: str):
         arow = cur.fetchone()
         acts = [dict(zip(acols, arow))]
 
-    # График оплат
-    cur.execute(f"""
-        SELECT id, order_index, stage_name, amount, status, stage_id
-        FROM {SCHEMA}.payment_schedule
-        WHERE deal_id=%s AND status != 'cancelled'
-        ORDER BY order_index, id
-    """, (deal["deal_id"],))
-    ps_cols = ["id","order_index","stage_name","amount","status","stage_id"]
-    payment_schedule = [dict(zip(ps_cols, r)) for r in cur.fetchall()]
-
-    # Полоса оплаты по графику
+    # Платежи по сделке (история)
     budget = float(deal["budget"] or 0)
-    total_scheduled = sum(float(p["amount"] or 0) for p in payment_schedule)
-    paid_scheduled  = sum(float(p["amount"] or 0) for p in payment_schedule if p["status"] == "paid")
-    pay_base = total_scheduled if total_scheduled > 0 else budget
-    paid_pct = round(paid_scheduled / pay_base * 100, 1) if pay_base > 0 else 0
+    cur.execute(f"""
+        SELECT id, code, amount, category, payment_date, description
+        FROM {SCHEMA}.payments
+        WHERE deal_id=%s AND type='income'
+        ORDER BY payment_date DESC, created_at DESC
+    """, (deal["deal_id"],))
+    pcols = ["id","code","amount","category","payment_date","description"]
+    payments_history = [dict(zip(pcols, r)) for r in cur.fetchall()]
+
+    # Полоса оплаты: только «Основной договор»
+    paid_main = sum(float(p["amount"] or 0) for p in payments_history if p["category"] == "Основной договор")
+    paid_extra = sum(float(p["amount"] or 0) for p in payments_history if p["category"] != "Основной договор")
+    balance = round(budget - paid_main, 2)
+    paid_pct = round(paid_main / budget * 100, 1) if budget > 0 else 0
+
+    for p in payments_history:
+        for k, v in p.items():
+            if hasattr(v, 'isoformat'):
+                p[k] = v.isoformat()
 
     for d in [deal] + stages + acts:
         for k, v in d.items():
@@ -1103,9 +1108,10 @@ def get_client_portal(cur, token: str):
         "deal": deal,
         "stages": stages,
         "acts": acts,
-        "payment_schedule": payment_schedule,
-        "paid_scheduled": paid_scheduled,
-        "total_scheduled": total_scheduled,
+        "payments_history": payments_history,
+        "paid_main": paid_main,
+        "paid_extra": paid_extra,
+        "balance": balance,
         "paid_pct": paid_pct,
         "budget": budget,
     }
@@ -3295,32 +3301,6 @@ def handler(event: dict, context) -> dict:
                 if action == "read":
                     ids = body.get("ids", [])
                     mark_notifications_read(cur, ids)
-                    conn.commit()
-                    return ok({"ok": True})
-
-        # ── PAYMENT SCHEDULE ───────────────────────────────────────────────────
-        elif resource == "payment_schedule":
-            if method == "GET":
-                deal_id = int(qs["deal_id"])
-                return ok(get_payment_schedule(cur, deal_id))
-            elif method == "POST":
-                action = body.get("action", "save")
-                deal_id = int(body["deal_id"])
-                if action == "save":
-                    items = body.get("items", [])
-                    upsert_payment_schedule(cur, deal_id, items)
-                    conn.commit()
-                    return ok(get_payment_schedule(cur, deal_id))
-                elif action == "set_status":
-                    item_id = int(body["id"])
-                    new_status = body["status"]
-                    cur.execute(f"""
-                        UPDATE {SCHEMA}.payment_schedule
-                        SET status=%s, updated_at=now()
-                        WHERE id=%s AND deal_id=%s RETURNING id
-                    """, (new_status, item_id, deal_id))
-                    if not cur.fetchone():
-                        return err("Строка не найдена", 404)
                     conn.commit()
                     return ok({"ok": True})
 

@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
-import { api, ClientPortalData, ClientAct, ClientPortalStage, PaymentScheduleItem } from "@/lib/api";
+import { api, ClientPortalData, ClientAct, ClientPortalStage, ClientPaymentHistoryItem } from "@/lib/api";
 import Icon from "@/components/ui/icon";
 
-// Статус проекта — синхронизирован с project.status из БД
 const PROJECT_STATUS_MAP: Record<string, { label: string; cls: string; icon: string }> = {
   planning: { label: "Планирование",  cls: "bg-blue-100 text-blue-700 border-blue-200",         icon: "ClipboardList" },
   active:   { label: "Строительство", cls: "bg-amber-100 text-amber-700 border-amber-200",      icon: "HardHat" },
@@ -10,7 +9,6 @@ const PROJECT_STATUS_MAP: Record<string, { label: string; cls: string; icon: str
   archived: { label: "Архив",         cls: "bg-gray-100 text-gray-600 border-gray-200",          icon: "Archive" },
 };
 
-// Цвет этапа по effective_status (вычисляется на бэкенде с учётом дат)
 const STAGE_CFG: Record<string, { label: string; badgeCls: string; dotCls: string; icon: string }> = {
   done:        { label: "Завершён",    badgeCls: "bg-emerald-100 text-emerald-700", dotCls: "bg-emerald-500",  icon: "Check" },
   in_progress: { label: "Выполняется", badgeCls: "bg-amber-100 text-amber-700",    dotCls: "bg-amber-400",    icon: "Dot" },
@@ -18,11 +16,18 @@ const STAGE_CFG: Record<string, { label: string; badgeCls: string; dotCls: strin
   pending:     { label: "Ожидает",     badgeCls: "bg-gray-100 text-gray-500",       dotCls: "bg-gray-300",     icon: "Dot" },
 };
 
+const fmtMoney = (n: number) =>
+  new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(n) + " ₽";
+
 function fmt(iso: string | null) {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
 }
 
+function fmtDate(iso: string | null) {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+}
 
 interface Props { token: string; }
 
@@ -77,23 +82,22 @@ export default function ClientPortal({ token }: Props) {
     );
   }
 
-  const { deal, stages, acts, payment_schedule, paid_scheduled, total_scheduled, paid_pct } = data;
+  const { deal, stages, acts, payments_history, paid_main, paid_extra, balance, paid_pct, budget } = data;
+  const _pmh: ClientPaymentHistoryItem[] = payments_history || [];
 
-  // Статус проекта — из project.status (planning/active/done/archived)
   const projectStatus = deal.project_status || "planning";
   const pstatus = PROJECT_STATUS_MAP[projectStatus] || PROJECT_STATUS_MAP["planning"];
 
   const pendingActs = acts.filter(a => a.status === "pending_signature");
   const signedActs  = acts.filter(a => a.status !== "pending_signature");
 
-  const fmtMoney = (n: number) =>
-    new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(n) + " ₽";
-
-  // Прогресс строительства по effective_status
   const doneStages = stages.filter((s: ClientPortalStage & { effective_status?: string }) =>
     s.effective_status === "done" || s.status === "done"
   ).length;
   const buildPct = stages.length > 0 ? Math.round((doneStages / stages.length) * 100) : 0;
+
+  const mainPayments  = _pmh.filter(p => p.category === "Основной договор");
+  const extraPayments = _pmh.filter(p => p.category !== "Основной договор");
 
   return (
     <div className="min-h-screen bg-[#f5f6fa]">
@@ -119,18 +123,21 @@ export default function ClientPortal({ token }: Props) {
             <div>
               <div className="text-xs text-muted-foreground">Проект</div>
               <div className="font-semibold text-[17px] mt-0.5">{deal.project_code || deal.deal_code}</div>
-              {deal.address
-                ? (
-                  <div className="flex items-center gap-1 text-[13px] text-muted-foreground mt-1">
-                    <Icon name="MapPin" size={12} className="shrink-0" />
-                    {deal.address}
-                  </div>
-                )
-                : (
-                  <div className="text-[12px] text-muted-foreground/50 mt-1 italic">Адрес не указан</div>
-                )
-              }
+              {deal.address ? (
+                <div className="flex items-center gap-1 text-[13px] text-muted-foreground mt-1">
+                  <Icon name="MapPin" size={12} className="shrink-0" />
+                  {deal.address}
+                </div>
+              ) : (
+                <div className="text-[12px] text-muted-foreground/50 mt-1 italic">Адрес не указан</div>
+              )}
             </div>
+            {budget > 0 && (
+              <div className="text-right shrink-0">
+                <div className="text-xs text-muted-foreground">Сумма договора</div>
+                <div className="font-bold text-[17px] mt-0.5">{fmtMoney(budget)}</div>
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3 text-[13px]">
@@ -149,43 +156,81 @@ export default function ClientPortal({ token }: Props) {
           </div>
         </div>
 
-
-
-        {/* График оплат — если задан */}
-        {payment_schedule.length > 0 && (
+        {/* Оплата по основному договору */}
+        {budget > 0 && (
           <div className="bg-white rounded-xl border border-border p-5">
             <h2 className="font-semibold text-[14px] mb-4 flex items-center gap-2">
               <Icon name="CreditCard" size={16} className="text-muted-foreground" />
-              График оплат
+              Оплата по договору
             </h2>
-            {/* Полоса оплаты */}
+
+            {/* Полоса */}
             <div className="space-y-1.5 mb-4">
               <div className="flex justify-between text-[12px] text-muted-foreground">
-                <span>Оплачено: <span className="font-semibold text-emerald-600">{fmtMoney(paid_scheduled)}</span></span>
-                <span>Всего: <span className="font-semibold">{fmtMoney(total_scheduled)}</span> · {paid_pct}%</span>
+                <span>Оплачено: <span className="font-semibold text-emerald-600">{fmtMoney(paid_main)}</span></span>
+                <span>{paid_pct}%</span>
               </div>
-              <div className="w-full bg-gray-100 rounded-full h-2">
-                <div className="bg-emerald-500 h-2 rounded-full transition-all" style={{ width: `${paid_pct}%` }} />
+              <div className="w-full bg-gray-100 rounded-full h-2.5">
+                <div
+                  className="bg-emerald-500 h-2.5 rounded-full transition-all"
+                  style={{ width: `${Math.min(paid_pct, 100)}%` }}
+                />
               </div>
             </div>
-            {/* Список */}
+
+            {/* Цифры */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-emerald-50 rounded-lg p-3">
+                <div className="text-[11px] text-muted-foreground mb-1">Оплачено</div>
+                <div className="font-bold text-[16px] text-emerald-700">{fmtMoney(paid_main)}</div>
+              </div>
+              <div className={`rounded-lg p-3 ${balance > 0 ? "bg-amber-50" : "bg-emerald-50"}`}>
+                <div className="text-[11px] text-muted-foreground mb-1">Остаток</div>
+                <div className={`font-bold text-[16px] ${balance > 0 ? "text-amber-700" : "text-emerald-700"}`}>
+                  {balance > 0 ? fmtMoney(balance) : "Оплачено полностью"}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* История платежей */}
+        {mainPayments.length > 0 && (
+          <div className="bg-white rounded-xl border border-border p-5">
+            <h2 className="font-semibold text-[14px] mb-3 flex items-center gap-2">
+              <Icon name="Receipt" size={16} className="text-muted-foreground" />
+              История платежей
+            </h2>
             <div className="divide-y divide-border">
-              {(payment_schedule as PaymentScheduleItem[]).map((item, idx) => (
-                <div key={item.id ?? idx} className="py-2.5 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-[11px] text-muted-foreground shrink-0">{item.order_index}.</span>
-                    <span className="text-[13px] font-medium truncate">{item.stage_name || "—"}</span>
+              {mainPayments.map(p => (
+                <div key={p.id} className="py-3 flex items-center justify-between gap-3 first:pt-0 last:pb-0">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium">{p.description || p.category}</div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">{fmtDate(p.payment_date)} · {p.code}</div>
                   </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    <span className="text-[13px] font-semibold">{fmtMoney(Number(item.amount))}</span>
-                    <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${
-                      item.status === "paid"
-                        ? "bg-emerald-100 text-emerald-700"
-                        : "bg-gray-100 text-gray-500"
-                    }`}>
-                      {item.status === "paid" ? "Оплачен" : "Ожидает"}
-                    </span>
+                  <span className="font-semibold text-[14px] text-emerald-600 shrink-0">+{fmtMoney(p.amount)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Доп. услуги */}
+        {extraPayments.length > 0 && (
+          <div className="bg-white rounded-xl border border-border p-5">
+            <h2 className="font-semibold text-[14px] mb-3 flex items-center gap-2">
+              <Icon name="PlusCircle" size={16} className="text-muted-foreground" />
+              Дополнительные услуги
+              <span className="text-[12px] text-muted-foreground font-normal ml-auto">{fmtMoney(paid_extra)}</span>
+            </h2>
+            <div className="divide-y divide-border">
+              {extraPayments.map(p => (
+                <div key={p.id} className="py-3 flex items-center justify-between gap-3 first:pt-0 last:pb-0">
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium">{p.description || p.category}</div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">{fmtDate(p.payment_date)} · {p.code}</div>
                   </div>
+                  <span className="font-semibold text-[14px] text-blue-600 shrink-0">+{fmtMoney(p.amount)}</span>
                 </div>
               ))}
             </div>
@@ -274,19 +319,11 @@ export default function ClientPortal({ token }: Props) {
                     effStatus === "in_progress" ? "bg-amber-50/60" :
                     effStatus === "overdue"     ? "bg-red-50/60"   : ""
                   }`}>
-                    {/* Dot-индикатор */}
                     <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${cfg.dotCls}`}>
-                      {effStatus === "done" && (
-                        <Icon name="Check" size={11} className="text-white" />
-                      )}
-                      {effStatus === "overdue" && (
-                        <Icon name="AlertCircle" size={11} className="text-white" />
-                      )}
-                      {(effStatus === "in_progress") && (
-                        <div className="w-2 h-2 bg-white rounded-full" />
-                      )}
+                      {effStatus === "done" && <Icon name="Check" size={11} className="text-white" />}
+                      {effStatus === "overdue" && <Icon name="AlertCircle" size={11} className="text-white" />}
+                      {effStatus === "in_progress" && <div className="w-2 h-2 bg-white rounded-full" />}
                     </div>
-
                     <div className="flex-1 min-w-0">
                       <div className="text-[13px] font-medium">{s.name}</div>
                       <div className="text-[11px] text-muted-foreground mt-0.5">
@@ -294,7 +331,6 @@ export default function ClientPortal({ token }: Props) {
                         {s.planned_end   ? ` — ${fmt(s.planned_end)}` : ""}
                       </div>
                     </div>
-
                     <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${cfg.badgeCls}`}>
                       {cfg.label}
                     </span>

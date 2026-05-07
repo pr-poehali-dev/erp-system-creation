@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
-import { api, Payment, PLSummary, Project } from "@/lib/api";
+import { api, Payment, PLSummary, Project, Deal } from "@/lib/api";
 
 interface Props { role: Role; }
 
@@ -12,10 +12,13 @@ const fmt = (n: number) =>
     ? `₽ ${n.toLocaleString("ru")}`
     : `₽ ${n}`;
 
+const CONTRACT_CATEGORIES = ["Основной договор", "Дополнительные услуги"] as const;
+
 const EMPTY_FORM = {
   project_id: "",
+  deal_id: "",
   type: "income",
-  category: "",
+  category: "Основной договор",
   amount: "",
   payment_date: "",
   description: "",
@@ -25,6 +28,7 @@ export default function Finance({ role }: Props) {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [pl, setPl] = useState<PLSummary | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [deals, setDeals] = useState<Deal[]>([]);
   const [loading, setLoading] = useState(true);
   const [plLoading, setPlLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -52,6 +56,7 @@ export default function Finance({ role }: Props) {
     loadPayments();
     loadPl();
     api.projects.list().then(setProjects);
+    api.deals.list().then(setDeals);
   }, []);
 
   const handleOpenModal = () => {
@@ -75,7 +80,6 @@ export default function Finance({ role }: Props) {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.category.trim()) { setFormError("Укажите категорию"); return; }
     if (!form.amount || Number(form.amount) <= 0) { setFormError("Укажите сумму"); return; }
     if (!form.payment_date) { setFormError("Укажите дату платежа"); return; }
 
@@ -84,8 +88,9 @@ export default function Finance({ role }: Props) {
     try {
       await api.payments.create({
         project_id: form.project_id ? Number(form.project_id) : null,
+        deal_id: form.deal_id ? Number(form.deal_id) : null,
         type: form.type,
-        category: form.category.trim(),
+        category: form.category,
         amount: Number(form.amount),
         payment_date: form.payment_date,
         description: form.description.trim(),
@@ -127,8 +132,8 @@ export default function Finance({ role }: Props) {
             onClick={handleOpenModal}
             className="flex items-center gap-2 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors"
           >
-            <Icon name="Plus" size={14} />
-            Новый платёж
+            <Icon name="BadgeCheck" size={14} />
+            Зафиксировать оплату
           </button>
         </div>
       </div>
@@ -335,7 +340,7 @@ export default function Finance({ role }: Props) {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white rounded-xl border border-border shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto animate-fade-in">
             <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h2 className="font-semibold text-[15px]">Новый платёж</h2>
+              <h2 className="font-semibold text-[15px]">Зафиксировать оплату</h2>
               <button
                 onClick={handleCloseModal}
                 className="text-muted-foreground hover:text-foreground transition-colors"
@@ -344,25 +349,43 @@ export default function Finance({ role }: Props) {
               </button>
             </div>
             <form onSubmit={handleCreate} className="px-5 py-4 space-y-4">
+              {/* Сделка */}
               <div>
                 <label className="block text-[13px] font-medium text-foreground mb-1">
-                  Проект (опционально)
+                  Сделка / Проект <span className="text-red-500">*</span>
                 </label>
                 <select
-                  name="project_id"
-                  value={form.project_id}
+                  name="deal_id"
+                  value={form.deal_id}
                   onChange={handleField}
                   className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary"
                 >
-                  <option value="">— Без проекта —</option>
-                  {projects.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.code} · {p.client_name}
+                  <option value="">— Выберите сделку —</option>
+                  {deals.filter(d => !d.is_archived).map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.code} · {d.client_name}
                     </option>
                   ))}
                 </select>
+                {!form.deal_id && (
+                  <div className="text-[11px] text-muted-foreground mt-1">
+                    Или выберите проект:
+                    <select
+                      name="project_id"
+                      value={form.project_id}
+                      onChange={handleField}
+                      className="ml-1 border border-border rounded px-2 py-0.5 text-[11px] bg-white outline-none"
+                    >
+                      <option value="">— без проекта —</option>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>{p.code} · {p.client_name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
 
+              {/* Тип */}
               <div>
                 <label className="block text-[13px] font-medium text-foreground mb-1">
                   Тип платежа <span className="text-red-500">*</span>
@@ -378,18 +401,22 @@ export default function Finance({ role }: Props) {
                 </select>
               </div>
 
+              {/* Назначение */}
               <div>
                 <label className="block text-[13px] font-medium text-foreground mb-1">
-                  Категория <span className="text-red-500">*</span>
+                  Назначение <span className="text-red-500">*</span>
                 </label>
-                <input
-                  type="text"
+                <select
                   name="category"
                   value={form.category}
                   onChange={handleField}
-                  placeholder="Оплата от клиента / Закупка материалов"
-                  className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary"
-                />
+                  className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary"
+                >
+                  {CONTRACT_CATEGORIES.map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                  <option value="Другое">Другое</option>
+                </select>
               </div>
 
               <div>
