@@ -201,6 +201,15 @@ export const api = {
     createAct: (project_id: number, stage_id: number, amount: number, title: string) =>
       request<ClientAct>("client_portal", "POST", { action: "create_act", project_id, stage_id, amount, title }),
   },
+
+  payment_schedule: {
+    list: (deal_id: number) =>
+      request<PaymentScheduleItem[]>("payment_schedule", "GET", undefined, { deal_id: String(deal_id) }),
+    save: (deal_id: number, items: Partial<PaymentScheduleItem>[]) =>
+      request<PaymentScheduleItem[]>("payment_schedule", "POST", { action: "save", deal_id, items }),
+    setStatus: (deal_id: number, id: number, status: string) =>
+      request<any>("payment_schedule", "POST", { action: "set_status", deal_id, id, status }),
+  },
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -717,11 +726,23 @@ export interface ClientPortalDeal {
   project_code: string | null;
 }
 
+export interface PaymentScheduleItem {
+  id?: number;
+  deal_id?: number;
+  order_index: number;
+  stage_name: string;
+  amount: number;
+  status: string; // pending | paid | cancelled
+  stage_id?: number | null;
+}
+
 export interface ClientPortalData {
   deal: ClientPortalDeal;
   stages: ClientPortalStage[];
   acts: ClientAct[];
-  paid: number;
-  balance: number;
+  payment_schedule: PaymentScheduleItem[];
+  paid_scheduled: number;
+  total_scheduled: number;
+  paid_pct: number;
   budget: number;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, ClientPortalData, ClientAct, ClientPortalStage } from "@/lib/api";
+import { api, ClientPortalData, ClientAct, ClientPortalStage, PaymentScheduleItem } from "@/lib/api";
 import Icon from "@/components/ui/icon";
 
 // Статус проекта — синхронизирован с project.status из БД
@@ -77,7 +77,7 @@ export default function ClientPortal({ token }: Props) {
     );
   }
 
-  const { deal, stages, acts } = data;
+  const { deal, stages, acts, payment_schedule, paid_scheduled, total_scheduled, paid_pct } = data;
 
   // Статус проекта — из project.status (planning/active/done/archived)
   const projectStatus = deal.project_status || "planning";
@@ -85,6 +85,9 @@ export default function ClientPortal({ token }: Props) {
 
   const pendingActs = acts.filter(a => a.status === "pending_signature");
   const signedActs  = acts.filter(a => a.status !== "pending_signature");
+
+  const fmtMoney = (n: number) =>
+    new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(n) + " ₽";
 
   // Прогресс строительства по effective_status
   const doneStages = stages.filter((s: ClientPortalStage & { effective_status?: string }) =>
@@ -147,6 +150,47 @@ export default function ClientPortal({ token }: Props) {
         </div>
 
 
+
+        {/* График оплат — если задан */}
+        {payment_schedule.length > 0 && (
+          <div className="bg-white rounded-xl border border-border p-5">
+            <h2 className="font-semibold text-[14px] mb-4 flex items-center gap-2">
+              <Icon name="CreditCard" size={16} className="text-muted-foreground" />
+              График оплат
+            </h2>
+            {/* Полоса оплаты */}
+            <div className="space-y-1.5 mb-4">
+              <div className="flex justify-between text-[12px] text-muted-foreground">
+                <span>Оплачено: <span className="font-semibold text-emerald-600">{fmtMoney(paid_scheduled)}</span></span>
+                <span>Всего: <span className="font-semibold">{fmtMoney(total_scheduled)}</span> · {paid_pct}%</span>
+              </div>
+              <div className="w-full bg-gray-100 rounded-full h-2">
+                <div className="bg-emerald-500 h-2 rounded-full transition-all" style={{ width: `${paid_pct}%` }} />
+              </div>
+            </div>
+            {/* Список */}
+            <div className="divide-y divide-border">
+              {(payment_schedule as PaymentScheduleItem[]).map((item, idx) => (
+                <div key={item.id ?? idx} className="py-2.5 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-[11px] text-muted-foreground shrink-0">{item.order_index}.</span>
+                    <span className="text-[13px] font-medium truncate">{item.stage_name || "—"}</span>
+                  </div>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-[13px] font-semibold">{fmtMoney(Number(item.amount))}</span>
+                    <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium whitespace-nowrap ${
+                      item.status === "paid"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : "bg-gray-100 text-gray-500"
+                    }`}>
+                      {item.status === "paid" ? "Оплачен" : "Ожидает"}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Акты на подпись */}
         {pendingActs.length > 0 && (

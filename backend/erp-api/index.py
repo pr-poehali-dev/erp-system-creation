@@ -1077,13 +1077,22 @@ def get_client_portal(cur, token: str):
         arow = cur.fetchone()
         acts = [dict(zip(acols, arow))]
 
-    # Сумма оплат
+    # График оплат
     cur.execute(f"""
-        SELECT COALESCE(SUM(amount),0) FROM {SCHEMA}.payments
-        WHERE deal_id = %s AND type = 'income'
+        SELECT id, order_index, stage_name, amount, status, stage_id
+        FROM {SCHEMA}.payment_schedule
+        WHERE deal_id=%s AND status != 'cancelled'
+        ORDER BY order_index, id
     """, (deal["deal_id"],))
-    paid = float(cur.fetchone()[0] or 0)
+    ps_cols = ["id","order_index","stage_name","amount","status","stage_id"]
+    payment_schedule = [dict(zip(ps_cols, r)) for r in cur.fetchall()]
+
+    # Полоса оплаты по графику
     budget = float(deal["budget"] or 0)
+    total_scheduled = sum(float(p["amount"] or 0) for p in payment_schedule)
+    paid_scheduled  = sum(float(p["amount"] or 0) for p in payment_schedule if p["status"] == "paid")
+    pay_base = total_scheduled if total_scheduled > 0 else budget
+    paid_pct = round(paid_scheduled / pay_base * 100, 1) if pay_base > 0 else 0
 
     for d in [deal] + stages + acts:
         for k, v in d.items():
@@ -1094,8 +1103,10 @@ def get_client_portal(cur, token: str):
         "deal": deal,
         "stages": stages,
         "acts": acts,
-        "paid": paid,
-        "balance": round(budget - paid, 2),
+        "payment_schedule": payment_schedule,
+        "paid_scheduled": paid_scheduled,
+        "total_scheduled": total_scheduled,
+        "paid_pct": paid_pct,
         "budget": budget,
     }
 
@@ -1129,17 +1140,82 @@ def create_client_act(cur, project_id: int, stage_id: int, amount: float, title:
     return act, None
 
 def sign_client_act(cur, act_id: int):
-    """Клиент подписывает акт → статус signed."""
+    """Клиент подписывает акт → статус signed. Если привязан stage_id — переводим платёж в paid."""
     cur.execute(f"""
         UPDATE {SCHEMA}.client_acts
         SET status='signed', signed_at=now()
         WHERE id=%s AND status='pending_signature'
-        RETURNING id
+        RETURNING id, stage_id
     """, (act_id,))
     row = cur.fetchone()
     if not row:
         return None, "Акт не найден или уже подписан"
-    return {"ok": True, "act_id": row[0]}, None
+    act_id_val, stage_id = row
+    # Если у акта есть stage_id — переводим соответствующий платёж в paid
+    if stage_id:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.payment_schedule
+            SET status='paid', updated_at=now()
+            WHERE stage_id=%s AND status='pending'
+        """, (stage_id,))
+    return {"ok": True, "act_id": act_id_val}, None
+
+# ─── PAYMENT SCHEDULE ─────────────────────────────────────────────────────────
+
+def get_payment_schedule(cur, deal_id: int):
+    """Возвращает график оплат по сделке."""
+    cur.execute(f"""
+        SELECT id, deal_id, order_index, stage_name, amount, status, stage_id, created_at
+        FROM {SCHEMA}.payment_schedule
+        WHERE deal_id=%s ORDER BY order_index, id
+    """, (deal_id,))
+    cols = ["id","deal_id","order_index","stage_name","amount","status","stage_id","created_at"]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        for k, v in r.items():
+            if hasattr(v, 'isoformat'):
+                r[k] = v.isoformat()
+    return rows
+
+def upsert_payment_schedule(cur, deal_id: int, items: list):
+    """Полная замена графика оплат для сделки (идемпотентно по deal_id)."""
+    # Удаляем старые строки через UPDATE статуса невозможно — используем INSERT/UPDATE по id
+    # Получаем текущие id
+    cur.execute(f"SELECT id FROM {SCHEMA}.payment_schedule WHERE deal_id=%s", (deal_id,))
+    existing_ids = {r[0] for r in cur.fetchall()}
+    incoming_ids = {item["id"] for item in items if item.get("id")}
+
+    # Удаляем строки которых нет в новом списке — через UPDATE status=deleted нельзя, просто пропускаем
+    # На самом деле даём менеджеру явно управлять через add/update/delete actions
+    result = []
+    for item in items:
+        iid = item.get("id")
+        order_index = int(item.get("order_index", 1))
+        stage_name  = item.get("stage_name", "")
+        amount      = float(item.get("amount", 0))
+        status      = item.get("status", "pending")
+        stage_id    = item.get("stage_id") or None
+        if iid and iid in existing_ids:
+            cur.execute(f"""
+                UPDATE {SCHEMA}.payment_schedule
+                SET order_index=%s, stage_name=%s, amount=%s, status=%s, stage_id=%s, updated_at=now()
+                WHERE id=%s AND deal_id=%s RETURNING id
+            """, (order_index, stage_name, amount, status, stage_id, iid, deal_id))
+        else:
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.payment_schedule (deal_id, order_index, stage_name, amount, status, stage_id)
+                VALUES (%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (deal_id, order_index, stage_name, amount, status, stage_id))
+        row = cur.fetchone()
+        if row:
+            result.append(row[0])
+
+    # Удаляем строки которых не было в списке (менеджер убрал)
+    ids_to_keep = set(result) | incoming_ids
+    for old_id in existing_ids - ids_to_keep:
+        cur.execute(f"UPDATE {SCHEMA}.payment_schedule SET status='cancelled', updated_at=now() WHERE id=%s", (old_id,))
+
+    return result
 
 def ensure_client_token(cur, deal_id: int) -> str:
     """Генерирует и сохраняет client_token если ещё нет."""
@@ -3219,6 +3295,32 @@ def handler(event: dict, context) -> dict:
                 if action == "read":
                     ids = body.get("ids", [])
                     mark_notifications_read(cur, ids)
+                    conn.commit()
+                    return ok({"ok": True})
+
+        # ── PAYMENT SCHEDULE ───────────────────────────────────────────────────
+        elif resource == "payment_schedule":
+            if method == "GET":
+                deal_id = int(qs["deal_id"])
+                return ok(get_payment_schedule(cur, deal_id))
+            elif method == "POST":
+                action = body.get("action", "save")
+                deal_id = int(body["deal_id"])
+                if action == "save":
+                    items = body.get("items", [])
+                    upsert_payment_schedule(cur, deal_id, items)
+                    conn.commit()
+                    return ok(get_payment_schedule(cur, deal_id))
+                elif action == "set_status":
+                    item_id = int(body["id"])
+                    new_status = body["status"]
+                    cur.execute(f"""
+                        UPDATE {SCHEMA}.payment_schedule
+                        SET status=%s, updated_at=now()
+                        WHERE id=%s AND deal_id=%s RETURNING id
+                    """, (new_status, item_id, deal_id))
+                    if not cur.fetchone():
+                        return err("Строка не найдена", 404)
                     conn.commit()
                     return ok({"ok": True})
 
