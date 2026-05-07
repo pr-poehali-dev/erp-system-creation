@@ -1134,23 +1134,12 @@ def sign_client_act(cur, act_id: int):
         UPDATE {SCHEMA}.client_acts
         SET status='signed', signed_at=now()
         WHERE id=%s AND status='pending_signature'
-        RETURNING id, deal_id, amount, code
+        RETURNING id
     """, (act_id,))
     row = cur.fetchone()
     if not row:
         return None, "Акт не найден или уже подписан"
-    act_id, deal_id, amount, code = row
-
-    # Создаём платёж-счёт (invoice) на следующий этап
-    next_code = "".join(["СЧ-"] + ["".join(random.choices(string.digits, k=4))])
-    cur.execute(f"""
-        INSERT INTO {SCHEMA}.payments (code, deal_id, type, category, amount, payment_date, description)
-        VALUES (%s, %s, 'income', 'По акту', %s, CURRENT_DATE, %s)
-        RETURNING id
-    """, (next_code, deal_id, float(amount), f"Счёт по акту {code}"))
-    payment_id = cur.fetchone()[0]
-
-    return {"ok": True, "act_id": act_id, "payment_id": payment_id}, None
+    return {"ok": True, "act_id": row[0]}, None
 
 def ensure_client_token(cur, deal_id: int) -> str:
     """Генерирует и сохраняет client_token если ещё нет."""

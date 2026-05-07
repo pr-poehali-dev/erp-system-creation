@@ -23,9 +23,6 @@ function fmt(iso: string | null) {
   return new Date(iso).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
 }
 
-function fmtMoney(n: number) {
-  return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 }).format(n);
-}
 
 interface Props { token: string; }
 
@@ -80,13 +77,12 @@ export default function ClientPortal({ token }: Props) {
     );
   }
 
-  const { deal, stages, acts, paid, balance, budget } = data;
+  const { deal, stages, acts } = data;
 
   // Статус проекта — из project.status (planning/active/done/archived)
   const projectStatus = deal.project_status || "planning";
   const pstatus = PROJECT_STATUS_MAP[projectStatus] || PROJECT_STATUS_MAP["planning"];
 
-  const paidPct = budget > 0 ? Math.min(100, Math.round((paid / budget) * 100)) : 0;
   const pendingActs = acts.filter(a => a.status === "pending_signature");
   const signedActs  = acts.filter(a => a.status !== "pending_signature");
 
@@ -132,10 +128,6 @@ export default function ClientPortal({ token }: Props) {
                 )
               }
             </div>
-            <div className="text-right shrink-0">
-              <div className="text-xs text-muted-foreground">Сумма договора</div>
-              <div className="font-bold text-[17px] mt-0.5">{fmtMoney(budget)}</div>
-            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3 text-[13px]">
@@ -154,31 +146,7 @@ export default function ClientPortal({ token }: Props) {
           </div>
         </div>
 
-        {/* Оплата */}
-        <div className="bg-white rounded-xl border border-border p-5">
-          <h2 className="font-semibold text-[14px] mb-4 flex items-center gap-2">
-            <Icon name="CreditCard" size={16} className="text-muted-foreground" />
-            Оплата
-          </h2>
-          <div className="space-y-3">
-            <div className="flex justify-between text-[13px]">
-              <span className="text-muted-foreground">Оплачено</span>
-              <span className="font-semibold text-emerald-600">{fmtMoney(paid)}</span>
-            </div>
-            <div className="w-full bg-gray-100 rounded-full h-2">
-              <div
-                className="bg-emerald-500 h-2 rounded-full transition-all"
-                style={{ width: `${paidPct}%` }}
-              />
-            </div>
-            <div className="flex justify-between text-[13px]">
-              <span className="text-muted-foreground">Остаток</span>
-              <span className={`font-semibold ${balance > 0 ? "text-amber-600" : "text-emerald-600"}`}>
-                {balance > 0 ? fmtMoney(balance) : "Оплачено полностью"}
-              </span>
-            </div>
-          </div>
-        </div>
+
 
         {/* Акты на подпись */}
         {pendingActs.length > 0 && (
@@ -192,9 +160,7 @@ export default function ClientPortal({ token }: Props) {
                 <div key={act.id} className="bg-white rounded-lg border border-amber-200 p-4 flex items-center justify-between gap-3">
                   <div>
                     <div className="font-medium text-[13px]">{act.title}</div>
-                    <div className="text-[12px] text-muted-foreground mt-0.5">
-                      {act.code} · {fmtMoney(act.amount)}
-                    </div>
+                    <div className="text-[12px] text-muted-foreground mt-0.5">{act.code}</div>
                   </div>
                   <button
                     onClick={() => handleSign(act)}
@@ -224,9 +190,7 @@ export default function ClientPortal({ token }: Props) {
                 <div key={act.id} className="py-3 flex items-center justify-between gap-3 first:pt-0 last:pb-0">
                   <div>
                     <div className="font-medium text-[13px]">{act.title}</div>
-                    <div className="text-[12px] text-muted-foreground mt-0.5">
-                      {act.code} · {fmtMoney(act.amount)}
-                    </div>
+                    <div className="text-[12px] text-muted-foreground mt-0.5">{act.code}</div>
                   </div>
                   <span className="text-[11px] px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 font-medium whitespace-nowrap">
                     Подписан {act.signed_at ? fmt(act.signed_at) : ""}

@@ -12,7 +12,6 @@ export default function CreateActModal({ project, onClose, onCreated }: Props) {
   const [stages, setStages] = useState<ProjectStage[]>([]);
   const [stageId, setStageId] = useState<number | "">("");
   const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const firstRef = useRef<HTMLSelectElement>(null);
@@ -33,12 +32,10 @@ export default function CreateActModal({ project, onClose, onCreated }: Props) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!stageId) { setError("Выберите этап"); return; }
-    const amt = parseFloat(amount.replace(/\s/g, "").replace(",", "."));
-    if (isNaN(amt) || amt < 0) { setError("Введите корректную сумму"); return; }
     setSaving(true);
     setError("");
     try {
-      await api.client_portal.createAct(project.id, stageId as number, amt, title.trim());
+      await api.client_portal.createAct(project.id, stageId as number, 0, title.trim());
       onCreated();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Ошибка при создании акта");
@@ -113,25 +110,6 @@ export default function CreateActModal({ project, onClose, onCreated }: Props) {
             <div className="text-[11px] text-muted-foreground mt-1">
               Заполняется автоматически при выборе этапа
             </div>
-          </div>
-
-          {/* Сумма */}
-          <div>
-            <label className="block text-[12px] font-medium text-foreground mb-1.5">
-              Сумма акта, ₽
-            </label>
-            <input
-              type="text"
-              value={amount}
-              onChange={e => setAmount(e.target.value)}
-              placeholder="0"
-              className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:border-primary transition-colors"
-            />
-            {project.deal_budget && (
-              <div className="text-[11px] text-muted-foreground mt-1">
-                Сумма договора: {project.deal_budget.toLocaleString("ru")} ₽
-              </div>
-            )}
           </div>
 
           {error && (
