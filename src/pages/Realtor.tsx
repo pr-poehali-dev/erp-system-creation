@@ -13,11 +13,14 @@ import {
 interface Props { role: Role; }
 
 const STAGE_LABEL: Record<string, { text: string; cls: string }> = {
-  lead:       { text: "Новый лид",    cls: "bg-blue-100 text-blue-700" },
-  kp:         { text: "КП",          cls: "bg-amber-100 text-amber-700" },
-  contract:   { text: "Договор",     cls: "bg-violet-100 text-violet-700" },
-  planning:   { text: "Планирование",cls: "bg-emerald-100 text-emerald-700" },
-  closed:     { text: "Закрыта",     cls: "bg-gray-100 text-gray-600" },
+  lead:        { text: "Новый лид",    cls: "bg-blue-100 text-blue-700" },
+  kp:          { text: "КП",          cls: "bg-amber-100 text-amber-700" },
+  contract:    { text: "Договор",     cls: "bg-violet-100 text-violet-700" },
+  planning:    { text: "Планирование",cls: "bg-emerald-100 text-emerald-700" },
+  closed:      { text: "Закрыта",     cls: "bg-gray-100 text-gray-600" },
+  lost:        { text: "Отказ",       cls: "bg-red-100 text-red-600" },
+  negotiation: { text: "Переговоры",  cls: "bg-blue-100 text-blue-700" },
+  proposal:    { text: "Предложение", cls: "bg-amber-100 text-amber-700" },
 };
 
 export default function Realtor({ role: _role }: Props) {
@@ -31,9 +34,11 @@ export default function Realtor({ role: _role }: Props) {
     setLoading(true);
     Promise.all([
       api.deals.list(),
+      api.deals.listArchived(),
       api.staff("realtor"),
-    ]).then(([ds, realtors]) => {
-      setDeals(ds);
+    ]).then(([active, archived, realtors]) => {
+      // Объединяем активные и архивные — бэкенд уже отдаёт только сделки текущего риэлтора
+      setDeals([...active, ...archived]);
       const meRow = realtors.find(r => r.id === userId) || realtors[0] || null;
       setMe(meRow);
     }).finally(() => setLoading(false));
@@ -41,7 +46,8 @@ export default function Realtor({ role: _role }: Props) {
 
   useEffect(() => { load(); }, []);
 
-  const myDeals = useMemo(() => deals.filter(d => d.realtor_name), [deals]);
+  // Бэкенд уже фильтрует по realtor_id = user_id, поэтому все сделки — наши
+  const myDeals = useMemo(() => deals, [deals]);
 
   const closedCount  = me?.closed_deals_count ?? 0;
   const qualKey      = me?.qualification ?? qualificationFor(closedCount);
@@ -189,8 +195,11 @@ export default function Realtor({ role: _role }: Props) {
                         : `${rateUsed}%`;
 
                   return (
-                    <tr key={d.id} className="border-t border-border hover:bg-secondary/30 transition-colors">
-                      <td className="px-4 py-3 text-[13px] font-bold text-primary">{d.code}</td>
+                    <tr key={d.id} className={`border-t border-border hover:bg-secondary/30 transition-colors ${d.is_archived ? "opacity-70" : ""}`}>
+                      <td className="px-4 py-3 text-[13px] font-bold text-primary">
+                        {d.code}
+                        {d.is_archived && <span className="ml-1 text-[10px] text-hint font-normal">(архив)</span>}
+                      </td>
                       <td className="px-4 py-3 text-[13px]">
                         <div className="font-medium">{d.client_name}</div>
                         <div className="text-hint text-[11px]">{d.client_phone}</div>
@@ -199,7 +208,7 @@ export default function Realtor({ role: _role }: Props) {
                         {d.serial_project_name || (d.project_type === "individual" ? "Индивидуальный" : "—")}
                       </td>
                       <td className="px-4 py-3 text-[13px] font-semibold text-right">
-                        ₽ {(d.budget || 0).toLocaleString("ru")}
+                        {d.budget ? `₽ ${d.budget.toLocaleString("ru")}` : "—"}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`text-[11px] px-2 py-0.5 rounded-md font-medium ${stage.cls}`}>
