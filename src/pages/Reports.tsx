@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 import { api, ReportsData } from "@/lib/api";
+import RealtorsRanking from "@/components/reports/RealtorsRanking";
 
 interface Props { role: Role; }
 
@@ -24,7 +25,8 @@ const ROLE_LABELS: Record<string, string> = {
   crm_manager: "Менеджер CRM", realtor: "Риэлтор",
 };
 
-export default function Reports({ role: _role }: Props) {
+export default function Reports({ role }: Props) {
+  const showRealtorsRanking = role === "director" || role === "commercial";
   const [data, setData] = useState<ReportsData | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -69,6 +71,9 @@ export default function Reports({ role: _role }: Props) {
           ))}
         </div>
       )}
+
+      {/* Топ риэлторов — только для директора/коммерческого */}
+      {showRealtorsRanking && <RealtorsRanking />}
 
       {/* KPI Grid */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">

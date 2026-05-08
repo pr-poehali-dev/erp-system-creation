@@ -2743,6 +2743,61 @@ def get_staff(cur, role_filter=None):
     cols = [desc[0] for desc in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+
+def get_realtors_report(cur):
+    """Отчёт для коммерческого директора: топ риэлторов.
+    Для каждого активного риэлтора возвращаем агрегаты по сделкам:
+    - количество закрытых сделок (точная цифра из deals, не из staff-кэша),
+    - общая сумма закрытых сделок (revenue),
+    - общая зафиксированная комиссия,
+    - количество открытых сделок и их сумма,
+    - текущая квалификация и до следующего уровня.
+    """
+    cur.execute(f"""
+        SELECT
+            s.id,
+            s.name,
+            COALESCE(s.qualification, 'novice')              AS qualification,
+            COALESCE(s.closed_deals_count, 0)                AS closed_deals_count,
+            COUNT(d.id) FILTER (WHERE d.stage = 'closed')    AS closed_count,
+            COUNT(d.id) FILTER (WHERE d.stage <> 'closed' AND d.is_archived = FALSE) AS open_count,
+            COALESCE(SUM(d.budget) FILTER (WHERE d.stage = 'closed'), 0)             AS closed_revenue,
+            COALESCE(SUM(d.commission_amount) FILTER (WHERE d.stage = 'closed'), 0) AS commission_total,
+            COALESCE(SUM(d.budget) FILTER (WHERE d.stage <> 'closed' AND d.is_archived = FALSE), 0) AS open_revenue
+        FROM {SCHEMA}.staff s
+        LEFT JOIN {SCHEMA}.deals d ON d.realtor_id = s.id
+        WHERE s.role = 'realtor' AND COALESCE(s.is_active, TRUE) = TRUE
+        GROUP BY s.id, s.name, s.qualification, s.closed_deals_count
+        ORDER BY commission_total DESC, closed_count DESC, s.name
+    """)
+    cols = [desc[0] for desc in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    # Считаем "до следующего уровня"
+    for row in rows:
+        cnt = int(row["closed_deals_count"] or 0)
+        if cnt >= 9:
+            row["next_level"] = None
+            row["to_next"]    = 0
+            row["next_rate"]  = None
+        elif cnt >= 5:
+            row["next_level"] = "pro"
+            row["to_next"]    = 9 - cnt
+            row["next_rate"]  = 5.5
+        else:
+            row["next_level"] = "inTopic"
+            row["to_next"]    = 5 - cnt
+            row["next_rate"]  = 4.5
+
+    # Суммарные итоги
+    totals = {
+        "realtors":         len(rows),
+        "closed_total":     sum(int(r["closed_count"] or 0) for r in rows),
+        "revenue_total":    float(sum(float(r["closed_revenue"] or 0) for r in rows)),
+        "commission_total": float(sum(float(r["commission_total"] or 0) for r in rows)),
+    }
+    return {"realtors": rows, "totals": totals}
+
 # ─── EMPLOYEES ───────────────────────────────────────────────────────────────
 
 def get_employees(cur):
@@ -2927,7 +2982,7 @@ def handler(event: dict, context) -> dict:
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
               "stage_durations", "estimate_works", "estimate_materials", "estimate",
               "contractors", "documents", "doc_templates", "contract_docs",
-              "notifications", "payout_requests"}
+              "notifications", "payout_requests", "realtors_report"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -3017,18 +3072,27 @@ def handler(event: dict, context) -> dict:
                     return ok({"success": True, "code": row[0]})
                 elif action == "delete":
                     deal_id = int(body["deal_id"])
-                    # Читаем слоты привязанные к этой сделке (slot_id и kp_slot_id)
-                    cur.execute(f"SELECT slot_id, kp_slot_id FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+                    # Читаем слоты и текущую стадию
+                    cur.execute(f"SELECT slot_id, kp_slot_id, stage FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
                     drow = cur.fetchone()
                     if not drow:
                         return err("Сделка не найдена")
-                    slot_id_val, kp_slot_id_val = drow
-                    # Освобождаем слоты
-                    for sid in set(filter(None, [slot_id_val, kp_slot_id_val])):
-                        cur.execute(f"""
-                            UPDATE {SCHEMA}.slots SET status='free', deal_id=NULL
-                            WHERE id=%s AND status IN ('booked','busy','free')
-                        """, (sid,))
+                    slot_id_val, kp_slot_id_val, deal_stage = drow
+
+                    # Слоты освобождаем только если сделка не вышла в производство.
+                    # planning/closed = проект уже создан → слот занят реально, не трогаем.
+                    free_slots_allowed = deal_stage not in ("planning", "closed")
+                    freed = []
+                    if free_slots_allowed:
+                        for sid in set(filter(None, [slot_id_val, kp_slot_id_val])):
+                            cur.execute(f"""
+                                UPDATE {SCHEMA}.slots SET status='free', deal_id=NULL
+                                WHERE id=%s AND status IN ('booked','busy','free')
+                                RETURNING id
+                            """, (sid,))
+                            r = cur.fetchone()
+                            if r: freed.append(r[0])
+
                     # Архивируем связанный проект если есть
                     cur.execute(f"""
                         UPDATE {SCHEMA}.projects SET status='archived', updated_at=now()
@@ -3040,7 +3104,12 @@ def handler(event: dict, context) -> dict:
                     if not row:
                         return err("Сделка не найдена")
                     conn.commit()
-                    return ok({"success": True, "code": row[0]})
+                    return ok({
+                        "success": True,
+                        "code": row[0],
+                        "slots_freed": freed,
+                        "slots_kept": (not free_slots_allowed),
+                    })
                 else:
                     result, error = create_deal(cur, body, user_id=user_id, user_role=user_role)
                     if error:
@@ -3194,6 +3263,15 @@ def handler(event: dict, context) -> dict:
         elif resource == "staff":
             role_filter = qs.get("role")
             return ok(get_staff(cur, role_filter))
+
+        # ── REALTORS REPORT (для коммерческого директора) ─────────────────────
+        elif resource == "realtors_report":
+            # Доступ только директору и коммерческому директору.
+            allowed = {"director", "commercial", "general_director", "commercial_director"}
+            role_lower = (user_role or "").strip().lower()
+            if role_lower and role_lower not in allowed:
+                return err("Нет доступа", 403)
+            return ok(get_realtors_report(cur))
 
         # ── EMPLOYEES ──────────────────────────────────────────────────────────
         elif resource == "employees":

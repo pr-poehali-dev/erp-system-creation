@@ -44,6 +44,7 @@ export const api = {
   clientCreate: (body: { name: string; phone: string; email?: string; source?: string }) =>
     request<Client>("clients", "POST", { action: "create", ...body }),
   staff: (role?: string) => request<Staff[]>("staff", "GET", undefined, role ? { role } : {}),
+  realtorsReport: () => request<RealtorsReport>("realtors_report"),
 
   deals: {
     list: () => request<Deal[]>("deals"),
@@ -244,6 +245,31 @@ export interface Staff {
   role: string;
   closed_deals_count?: number;
   qualification?: "novice" | "inTopic" | "pro";
+}
+
+export interface RealtorReportRow {
+  id: number;
+  name: string;
+  qualification: "novice" | "inTopic" | "pro";
+  closed_deals_count: number;
+  closed_count: number;
+  open_count: number;
+  closed_revenue: number;
+  commission_total: number;
+  open_revenue: number;
+  next_level: "inTopic" | "pro" | null;
+  to_next: number;
+  next_rate: number | null;
+}
+
+export interface RealtorsReport {
+  realtors: RealtorReportRow[];
+  totals: {
+    realtors: number;
+    closed_total: number;
+    revenue_total: number;
+    commission_total: number;
+  };
 }
 
 export interface Deal {

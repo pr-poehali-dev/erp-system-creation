@@ -3,6 +3,7 @@ import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 import { api, SerialProject, Deal, SlotItem, Staff, getCurrentUser } from "@/lib/api";
 import RealtorNewDealModal from "@/components/realtor/RealtorNewDealModal";
+import RealtorDealActions from "@/components/realtor/RealtorDealActions";
 import {
   QUALIFICATIONS,
   qualificationFor,
@@ -30,6 +31,7 @@ export default function Realtor({ role }: Props) {
   const [loading, setLoading]               = useState(true);
   const [search, setSearch]                 = useState("");
   const [newDealProject, setNewDealProject] = useState<SerialProject | null>(null);
+  const [activeDeal, setActiveDeal]         = useState<Deal | null>(null);
 
   const loadAll = () => {
     setLoading(true);
@@ -277,6 +279,7 @@ export default function Realtor({ role }: Props) {
                     <th className="px-4 py-2.5 font-medium">Сумма</th>
                     <th className="px-4 py-2.5 font-medium">Этап</th>
                     <th className="px-4 py-2.5 font-medium text-right">Комиссия</th>
+                    <th className="px-4 py-2.5 font-medium text-right w-[140px]">Действие</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -287,8 +290,16 @@ export default function Realtor({ role }: Props) {
                     const commission = fixed
                       ? (d.commission_amount ?? 0)
                       : (d.budget || 0) * (currentRate / 100);
+                    const ctaLabel =
+                      d.stage === "lead"     ? "Отправить КП"
+                      : d.stage === "kp"       ? "Продолжить"
+                      : d.stage === "contract" ? "В планирование"
+                      : d.stage === "planning" ? "Закрыть сделку"
+                      : "Открыть";
                     return (
-                      <tr key={d.id} className="border-t border-border hover:bg-secondary/30 transition-colors">
+                      <tr key={d.id}
+                        className="border-t border-border hover:bg-secondary/30 transition-colors cursor-pointer"
+                        onClick={() => setActiveDeal(d)}>
                         <td className="px-4 py-3 text-[13px] font-bold text-primary">{d.code}</td>
                         <td className="px-4 py-3 text-[13px]">
                           <div className="font-medium">{d.client_name}</div>
@@ -313,6 +324,18 @@ export default function Realtor({ role }: Props) {
                             {fixed ? `зафикс. ${rateUsed}%` : `прогноз ${rateUsed}%`}
                           </div>
                         </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setActiveDeal(d); }}
+                            className={`text-[12px] px-3 py-1.5 rounded-md font-medium transition-colors ${
+                              d.stage === "closed"
+                                ? "bg-secondary text-muted-foreground"
+                                : "bg-primary text-white hover:bg-primary/90"
+                            }`}>
+                            {ctaLabel}
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -327,6 +350,7 @@ export default function Realtor({ role }: Props) {
                     <td className="px-4 py-3 text-[14px] font-bold text-emerald-700 text-right">
                       ₽ {Math.round(earnedCommission + forecastCommission).toLocaleString("ru")}
                     </td>
+                    <td></td>
                   </tr>
                 </tfoot>
               </table>
@@ -345,6 +369,22 @@ export default function Realtor({ role }: Props) {
             setNewDealProject(null);
             setTab("deals");
             loadAll();
+          }}
+        />
+      )}
+
+      {/* Управление этапами сделки */}
+      {activeDeal && (
+        <RealtorDealActions
+          deal={activeDeal}
+          onClose={() => setActiveDeal(null)}
+          onChanged={() => {
+            // обновить список и подменить активную сделку свежими данными
+            loadAll();
+            // окно оставляем открытым; сделку обновит useEffect ниже не нужен,
+            // но мы синхронизируем её при следующем openе. Чтобы UX был чище —
+            // закрываем модалку: пользователь снова откроет если что.
+            setActiveDeal(null);
           }}
         />
       )}
