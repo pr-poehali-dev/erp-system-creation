@@ -7,7 +7,7 @@ import KpModal from "@/components/sales/KpModal";
 import KpPlanningFlow from "@/components/sales/KpPlanningFlow";
 import DealCard from "@/components/sales/DealCard";
 
-interface Props { role: Role; }
+interface Props { role: Role; userId?: number | null; }
 
 const STAGES = [
   { key: "lead",     label: "Новый лид",    color: "bg-blue-500",    light: "bg-blue-50 border-blue-200",     icon: "UserPlus" },
@@ -24,7 +24,7 @@ const DIRECTOR_ROLES: Role[] = ["director", "commercial"];
 
 type FunnelFilter = "all" | "managers" | "realtors";
 
-export default function Sales({ role }: Props) {
+export default function Sales({ role, userId }: Props) {
   const [deals, setDeals]                   = useState<Deal[]>([]);
   const [clients, setClients]               = useState<Client[]>([]);
   const [managers, setManagers]             = useState<Staff[]>([]);
@@ -61,8 +61,14 @@ export default function Sales({ role }: Props) {
     api.deals.listArchived().then(setArchivedDeals).finally(() => setArchiveLoading(false));
   };
 
+  // Перезагружаем сделки при смене роли или userId — бэкенд фильтрует по X-User-Id/X-User-Role.
+  // userId приходит из App после того как staff-запрос разрешился, поэтому
+  // перезагрузка по userId гарантирует что заголовок уже выставлен корректно.
   useEffect(() => {
     loadDeals();
+  }, [role, userId]);
+
+  useEffect(() => {
     api.clients().then(setClients);
     api.staff("crm_manager").then(setManagers);
     api.staff("realtor").then(setRealtors);

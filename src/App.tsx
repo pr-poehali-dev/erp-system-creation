@@ -68,6 +68,7 @@ const queryClient = new QueryClient();
 function ERPApp() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [currentRole, setCurrentRole] = useState<Role>("director");
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -79,13 +80,16 @@ function ERPApp() {
   // в заголовках X-User-Role / X-User-Id, по которым бэкенд фильтрует данные.
   useEffect(() => {
     let cancelled = false;
-    setCurrentUser(currentRole, null); // сразу выставим роль, id появится ниже
+    setCurrentUser(currentRole, null);
+    setCurrentUserId(null);
     api.staff(currentRole).then((list) => {
       if (cancelled) return;
       const first = Array.isArray(list) && list.length > 0 ? list[0] : null;
-      setCurrentUser(currentRole, first ? first.id : null);
+      const uid = first ? first.id : null;
+      setCurrentUser(currentRole, uid);
+      setCurrentUserId(uid);
     }).catch(() => {
-      if (!cancelled) setCurrentUser(currentRole, null);
+      if (!cancelled) { setCurrentUser(currentRole, null); setCurrentUserId(null); }
     });
     return () => { cancelled = true; };
   }, [currentRole]);
@@ -110,7 +114,7 @@ function ERPApp() {
       id: "sales",
       label: "Продажи и CRM",
       icon: "TrendingUp",
-      component: <Sales role={currentRole} />,
+      component: <Sales role={currentRole} userId={currentUserId} />,
       roles: ["director", "commercial", "crm_manager", "realtor"],
     },
     {

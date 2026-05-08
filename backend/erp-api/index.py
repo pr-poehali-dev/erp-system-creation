@@ -250,18 +250,21 @@ def get_deals(cur, archived=False, user_id=None, user_role=""):
     role_where = ""
     params: tuple = ()
     if role in DEALS_FULL_ACCESS or role == "":
-        # Полный доступ. Пустая роль = демо/админ — пропускаем без фильтра.
+        # Полный доступ. Пустая роль = демо/админ — без фильтра.
         role_where = ""
     elif role == "crm_manager":
+        # Только сделки где manager_id = текущий пользователь.
+        # Если user_id не передан — пустой список (безопаснее чем показывать всё).
         if not user_id:
             return []
         role_where = " AND d.manager_id = %s"
-        params = (user_id,)
+        params = (int(user_id),)
     elif role == "realtor":
+        # Только сделки где realtor_id = текущий пользователь.
         if not user_id:
             return []
         role_where = " AND d.realtor_id = %s"
-        params = (user_id,)
+        params = (int(user_id),)
     else:
         # Неизвестная роль — ничего не показываем
         return []

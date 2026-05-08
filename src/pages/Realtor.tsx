@@ -170,10 +170,24 @@ export default function Realtor({ role: _role }: Props) {
               </thead>
               <tbody>
                 {myDeals.map(d => {
-                  const stage  = STAGE_LABEL[d.stage] || { text: d.stage, cls: "bg-secondary text-muted-foreground" };
-                  const fixed  = d.commission_amount != null;
+                  const stage    = STAGE_LABEL[d.stage] || { text: d.stage, cls: "bg-secondary text-muted-foreground" };
+                  const isClosed = d.stage === "closed";
+                  const fixed    = d.commission_amount != null;
                   const rateUsed = fixed ? (d.commission_rate ?? 0) : currentRate;
                   const commission = fixed ? (d.commission_amount ?? 0) : (d.budget || 0) * (currentRate / 100);
+
+                  // Подпись под суммой:
+                  // - закрыта → «к выплате N%»
+                  // - есть зафиксированная сумма (но не закрыта) → «зафикс. N%»
+                  // - остальные (lead/kp/contract/planning) → «прогноз N%»
+                  const commissionLabel = isClosed
+                    ? `к выплате · ${rateUsed}%`
+                    : fixed
+                      ? `зафикс. ${rateUsed}%`
+                      : ["planning", "contract"].includes(d.stage)
+                        ? `прогноз ${rateUsed}%`
+                        : `${rateUsed}%`;
+
                   return (
                     <tr key={d.id} className="border-t border-border hover:bg-secondary/30 transition-colors">
                       <td className="px-4 py-3 text-[13px] font-bold text-primary">{d.code}</td>
@@ -193,11 +207,11 @@ export default function Realtor({ role: _role }: Props) {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <div className="text-[13px] font-bold text-emerald-600">
+                        <div className={`text-[13px] font-bold ${isClosed ? "text-emerald-700" : "text-emerald-600"}`}>
                           ₽ {Math.round(commission).toLocaleString("ru")}
                         </div>
-                        <div className="text-[10px] text-hint">
-                          {fixed ? `зафикс. ${rateUsed}%` : `прогноз ${rateUsed}%`}
+                        <div className={`text-[10px] ${isClosed ? "text-emerald-600 font-medium" : "text-hint"}`}>
+                          {commissionLabel}
                         </div>
                       </td>
                     </tr>
