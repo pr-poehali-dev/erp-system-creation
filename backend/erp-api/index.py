@@ -460,11 +460,13 @@ def create_deal(cur, body, user_id=None, user_role=""):
     чтобы он не мог записать сделку на чужое имя.
     """
     client_id    = int(body["client_id"])
-    manager_id   = int(body.get("manager_id", 1))
+    # manager_id может быть null (когда сделку создаёт риэлтор без менеджера)
+    raw_mgr      = body.get("manager_id")
+    manager_id   = int(raw_mgr) if raw_mgr not in (None, "", "null") else None
     realtor_id   = body.get("realtor_id")
+    # Если запрос от риэлтора — принудительно фиксируем его как realtor_id
     if (user_role or "").strip() == "realtor" and user_id:
         realtor_id = user_id
-        manager_id = manager_id or 1
     source       = body.get("source", "")
     notes        = body.get("notes", "")
     project_type = body.get("project_type", "serial")
@@ -473,7 +475,7 @@ def create_deal(cur, body, user_id=None, user_role=""):
     slot_id      = body.get("slot_id")
 
     code = next_code(cur, "deals", "ЛД")
-    realtor_val = int(realtor_id) if realtor_id else None
+    realtor_val = int(realtor_id) if realtor_id not in (None, "", "null") else None
     sp_val      = int(sp_id) if sp_id else None
     slot_val    = int(slot_id) if slot_id else None
 
@@ -488,11 +490,15 @@ def create_deal(cur, body, user_id=None, user_role=""):
 
     deal_id, deal_code = cur.fetchone()
 
-    # Резервируем слот, если указан
+    # Резервируем слот атомарно — привязываем к deal_id сразу
     if slot_val:
         cur.execute(f"""
-            UPDATE {SCHEMA}.slots SET status='booked' WHERE id=%s AND status='free'
-        """, (slot_val,))
+            UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s
+            WHERE id=%s AND status='free'
+            RETURNING id
+        """, (deal_id, slot_val))
+        if not cur.fetchone():
+            return None, "Выбранный слот уже занят — пожалуйста, выберите другой"
 
     # Для индивидуального — сразу создаём карточку проектирования
     if project_type == 'individual':
