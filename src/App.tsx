@@ -199,8 +199,12 @@ function ERPApp() {
       {/* Боковая навигация */}
       <aside className={`bg-white border-r border-border flex flex-col sticky top-0 h-screen shrink-0 z-40 transition-[width] duration-200 ${sidebarCollapsed ? "w-16" : "w-60"}`}>
         <div className={`flex items-center h-14 border-b border-border shrink-0 ${sidebarCollapsed ? "justify-center px-2" : "gap-2 px-5"}`}>
-          <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shrink-0">
-            <Icon name="Building2" size={16} className="text-white" />
+          <div className="w-8 h-8 flex items-center justify-center shrink-0">
+            <img
+              src="https://cdn.poehali.dev/projects/d438d6d8-bf61-4250-9421-42cfcabf19eb/bucket/7a00091a-a799-415f-9f92-16c2352a1969.png"
+              alt="ГлобалСТ"
+              className="w-full h-full object-contain"
+            />
           </div>
           {!sidebarCollapsed && (
             <span className="text-slate-900 text-lg font-extralight">ГлобалСТ</span>
