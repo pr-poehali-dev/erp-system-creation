@@ -13,11 +13,12 @@ interface Props {
   onClose: () => void;
   onSubmit: (body: object) => void;
   onClientCreated?: (c: Client) => void;
+  presetRealtorId?: number | null;
 }
 
-export default function LeadModal({ clients, managers, realtors, serialProjects, saving, onClose, onSubmit, onClientCreated }: Props) {
+export default function LeadModal({ clients, managers, realtors, serialProjects, saving, onClose, onSubmit, onClientCreated, presetRealtorId }: Props) {
   const [managerId, setManagerId]     = useState("");
-  const [realtorId, setRealtorId]     = useState("");
+  const [realtorId, setRealtorId]     = useState(() => presetRealtorId != null ? String(presetRealtorId) : "");
   const [source, setSource]           = useState("");
   const [notes, setNotes]             = useState("");
   const [projectType, setProjectType] = useState<"serial" | "individual">("serial");
@@ -106,12 +107,13 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
-    if (!clientId)  { setError("Выберите или создайте клиента"); return; }
-    if (!managerId) { setError("Выберите менеджера"); return; }
+    if (!clientId) { setError("Выберите или создайте клиента"); return; }
+    // Менеджер обязателен только если не задан presetRealtorId (т.е. создаёт не риэлтор)
+    if (!managerId && presetRealtorId == null) { setError("Выберите менеджера"); return; }
     setError("");
     onSubmit({
       client_id:         clientId,
-      manager_id:        Number(managerId),
+      manager_id:        managerId ? Number(managerId) : null,
       realtor_id:        realtorId ? Number(realtorId) : null,
       source,
       notes,
@@ -296,25 +298,34 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
             </select>
           </div>
 
-          {/* Менеджер */}
-          <div>
-            <label className="block text-[13px] font-medium mb-1">Менеджер <span className="text-red-500">*</span></label>
-            <select value={managerId} onChange={e => setManagerId(e.target.value)}
-              className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
-              <option value="">— Выберите менеджера —</option>
-              {managers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
+          {/* Менеджер — не показываем если создаёт риэлтор */}
+          {presetRealtorId == null && (
+            <div>
+              <label className="block text-[13px] font-medium mb-1">Менеджер <span className="text-red-500">*</span></label>
+              <select value={managerId} onChange={e => setManagerId(e.target.value)}
+                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
+                <option value="">— Выберите менеджера —</option>
+                {managers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+          )}
 
           {/* Риэлтор */}
-          <div>
-            <label className="block text-[13px] font-medium mb-1">Риэлтор (если есть)</label>
-            <select value={realtorId} onChange={e => setRealtorId(e.target.value)}
-              className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
-              <option value="">— Без риэлтора —</option>
-              {realtors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </div>
+          {presetRealtorId == null ? (
+            <div>
+              <label className="block text-[13px] font-medium mb-1">Риэлтор (если есть)</label>
+              <select value={realtorId} onChange={e => setRealtorId(e.target.value)}
+                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
+                <option value="">— Без риэлтора —</option>
+                {realtors.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </div>
+          ) : (
+            <div className="px-3 py-2 rounded-lg bg-blue-50 border border-blue-200 text-[12px] text-blue-700 flex items-center gap-2">
+              <Icon name="UserSquare" size={13} />
+              Сделка создаётся от вашего имени как риэлтора
+            </div>
+          )}
 
           {/* Примечания */}
           <div>

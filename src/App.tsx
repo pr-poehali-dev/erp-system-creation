@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import Icon from "@/components/ui/icon";
 import Dashboard from "@/pages/Dashboard";
 import Sales from "@/pages/Sales";
+import Realtor from "@/pages/Realtor";
 import Warehouse from "@/pages/Warehouse";
 import Construction from "@/pages/Construction";
 import Rental from "@/pages/Rental";
@@ -19,7 +20,7 @@ import Employees from "@/pages/Employees";
 import Reports from "@/pages/Reports";
 import Admin from "@/pages/Admin";
 import Estimate from "@/pages/Estimate";
-import Realtor from "@/pages/Realtor";
+
 import NotificationBell from "@/components/NotificationBell";
 import ClientPortal from "@/pages/ClientPortal";
 
@@ -106,18 +107,18 @@ function ERPApp() {
       roles: ["director", "commercial", "construction_director", "supply_director", "finance_director", "foreman", "project_manager"],
     },
     {
-      id: "realtor",
-      label: "ЛК риэлтора",
-      icon: "UserSquare",
-      component: <Realtor role={currentRole} />,
-      roles: ["realtor"],
-    },
-    {
       id: "sales",
       label: "Продажи и CRM",
       icon: "TrendingUp",
       component: <Sales role={currentRole} />,
-      roles: ["director", "commercial", "crm_manager"],
+      roles: ["director", "commercial", "crm_manager", "realtor"],
+    },
+    {
+      id: "realtor_kpi",
+      label: "Мои KPI",
+      icon: "Award",
+      component: <Realtor role={currentRole} />,
+      roles: ["realtor"],
     },
     {
       id: "construction",

@@ -600,7 +600,9 @@ def update_deal_contract(cur, deal_id, body):
         slot_start = s_start_date if isinstance(s_start_date, date) else date.fromisoformat(str(s_start_date))
         actual_start = slot_start.isoformat()
         sets.append("slot_id=%s"); vals.append(slot_id)
-        cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, slot_id))
+        cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s AND status='free' RETURNING id", (deal_id, slot_id))
+        if not cur.fetchone():
+            return None, "Слот был занят параллельным запросом — выберите другой"
 
     if actual_start:
         sets.append("planned_start_date=%s"); vals.append(actual_start)
@@ -745,8 +747,10 @@ def move_to_planning(cur, deal_id: int, body: dict):
     if int(cur.fetchone()[0]) + 1 > s_limit:
         return None, f"Месяц перегружен (лимит {s_limit})"
 
-    # Бронируем слот
-    cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s", (deal_id, kp_slot_id))
+    # Бронируем слот (атомарный UPDATE — FOR UPDATE держит блокировку)
+    cur.execute(f"UPDATE {SCHEMA}.slots SET status='booked', deal_id=%s WHERE id=%s AND status='free' RETURNING id", (deal_id, kp_slot_id))
+    if not cur.fetchone():
+        return None, "Слот был занят параллельным запросом — выберите другой"
 
     slot_start = s_start_date if isinstance(s_start_date, date) else date.fromisoformat(str(s_start_date))
     start_for_project = slot_start.isoformat()
