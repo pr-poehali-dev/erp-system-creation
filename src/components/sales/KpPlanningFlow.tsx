@@ -20,9 +20,12 @@ export function resolveStep(deal: Deal, cs: string, role: Role): Step {
 
 const STEP_LABELS: Record<Step, string> = {
   slot: "Слот", download: "Скачать", upload: "Загрузить",
-  review: "Проверка", payment: "Оплата", planning: "Запуск",
+  review: "Документы", payment: "Оплата", planning: "Запуск",
 };
-const ALL_STEPS: Step[] = ["slot","download","upload","review","payment","planning"];
+
+// Менеджер видит все шаги, директор — только свои
+const MANAGER_STEPS: Step[] = ["slot","download","upload","review","payment","planning"];
+const DIRECTOR_STEPS: Step[] = ["slot","review","payment"];
 
 interface Props {
   deal: Deal;
@@ -151,9 +154,9 @@ export default function KpPlanningFlow({ deal, role, cfgDur, onDone, onClose }: 
 
         {/* Шаг-индикатор */}
         <div className="flex border-b border-border overflow-x-auto">
-          {ALL_STEPS.map((s, i) => {
+          {(isDirector ? DIRECTOR_STEPS : MANAGER_STEPS).map((s, i) => {
             const isDone   = stepDone(s);
-            const isActive = step === s;
+            const isActive = step === s || (isDirector && s === "review" && ["download","upload","review"].includes(step));
             return (
               <div key={s} onClick={() => setStep(s)} className={`flex-1 min-w-[72px] flex flex-col items-center gap-1 px-1 py-2.5 text-center border-b-2 transition-colors cursor-pointer ${
                 isActive ? "border-primary text-primary" : isDone ? "border-emerald-400 text-emerald-600" : "border-transparent text-muted-foreground"

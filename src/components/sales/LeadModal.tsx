@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import Icon from "@/components/ui/icon";
 import { Client, Staff, SerialProject, api } from "@/lib/api";
 
@@ -16,7 +16,6 @@ interface Props {
 }
 
 export default function LeadModal({ clients, managers, realtors, serialProjects, saving, onClose, onSubmit, onClientCreated }: Props) {
-  const [clientId, setClientId]       = useState("");
   const [managerId, setManagerId]     = useState("");
   const [realtorId, setRealtorId]     = useState("");
   const [source, setSource]           = useState("");
@@ -27,6 +26,54 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
   const [desiredArea, setDesiredArea] = useState("");
   const [specReq, setSpecReq]         = useState("");
   const [error, setError]             = useState("");
+
+  // Поиск заказчика
+  const [clientSearch, setClientSearch] = useState("");
+  const [clientId, setClientId]         = useState<number | null>(null);
+  const [clientName, setClientName]     = useState("");
+  const [showDropdown, setShowDropdown] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+
+  // Локальный список клиентов (включает только что созданных)
+  const [localClients, setLocalClients] = useState<Client[]>([]);
+  const allClients = useMemo(() => {
+    const combined = [...clients, ...localClients];
+    const seen = new Set<number>();
+    return combined.filter(c => { if (seen.has(c.id)) return false; seen.add(c.id); return true; });
+  }, [clients, localClients]);
+
+  const filteredClients = useMemo(() => {
+    const q = clientSearch.trim().toLowerCase();
+    if (!q) return allClients.slice(0, 20);
+    return allClients.filter(c =>
+      c.name.toLowerCase().includes(q) ||
+      (c.phone || "").includes(q)
+    ).slice(0, 20);
+  }, [allClients, clientSearch]);
+
+  // Закрывать dropdown при клике вне
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const selectClient = (c: Client) => {
+    setClientId(c.id);
+    setClientName(c.name);
+    setClientSearch(c.name);
+    setShowDropdown(false);
+  };
+
+  const clearClient = () => {
+    setClientId(null);
+    setClientName("");
+    setClientSearch("");
+  };
 
   // Форма нового заказчика
   const [showNewClient, setShowNewClient] = useState(false);
@@ -43,8 +90,10 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
     setNewClientError("");
     try {
       const created = await api.clientCreate({ name: newName.trim(), phone: newPhone.trim(), email: newEmail.trim() });
+      // Добавляем в локальный список и сразу выбираем
+      setLocalClients(prev => [...prev, created]);
+      selectClient(created);
       onClientCreated?.(created);
-      setClientId(String(created.id));
       setShowNewClient(false);
       setNewName(""); setNewPhone(""); setNewEmail("");
     } catch (e: unknown) {
@@ -61,7 +110,7 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
     if (!managerId) { setError("Выберите менеджера"); return; }
     setError("");
     onSubmit({
-      client_id:         Number(clientId),
+      client_id:         clientId,
       manager_id:        Number(managerId),
       realtor_id:        realtorId ? Number(realtorId) : null,
       source,
@@ -148,10 +197,12 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
               className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
           </div>
 
-          {/* Заказчик */}
+          {/* Заказчик — поиск + создание */}
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label className="block text-[13px] font-medium">Заказчик <span className="text-red-500">*</span></label>
+              <label className="block text-[13px] font-medium">
+                Заказчик <span className="text-red-500">*</span>
+              </label>
               <button type="button" onClick={() => { setShowNewClient(v => !v); setNewClientError(""); }}
                 className="flex items-center gap-1 text-[12px] text-primary hover:text-primary/80 transition-colors">
                 <Icon name={showNewClient ? "X" : "UserPlus"} size={13} />
@@ -163,21 +214,15 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
             {showNewClient && (
               <div className="mb-2 p-3 bg-blue-50 border border-blue-200 rounded-lg space-y-2">
                 <div className="text-[12px] font-semibold text-blue-800 mb-1">Новый заказчик</div>
-                <input
-                  type="text" value={newName} onChange={e => setNewName(e.target.value)}
+                <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
                   placeholder="ФИО *"
-                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white"
-                />
-                <input
-                  type="tel" value={newPhone} onChange={e => setNewPhone(e.target.value)}
+                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white" />
+                <input type="tel" value={newPhone} onChange={e => setNewPhone(e.target.value)}
                   placeholder="Телефон *"
-                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white"
-                />
-                <input
-                  type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)}
+                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white" />
+                <input type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)}
                   placeholder="Email (необязательно)"
-                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white"
-                />
+                  className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white" />
                 {newClientError && (
                   <div className="text-[12px] text-red-600 flex items-center gap-1">
                     <Icon name="AlertCircle" size={12} />{newClientError}
@@ -193,11 +238,52 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
               </div>
             )}
 
-            <select value={clientId} onChange={e => setClientId(e.target.value)}
-              className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
-              <option value="">— Выберите клиента —</option>
-              {clients.map(c => <option key={c.id} value={c.id}>{c.name} ({c.phone})</option>)}
-            </select>
+            {/* Поле поиска с выпадающим списком */}
+            <div className="relative" ref={searchRef}>
+              {clientId ? (
+                // Выбранный клиент
+                <div className="flex items-center gap-2 px-3 py-2 border border-primary bg-primary/5 rounded-lg">
+                  <Icon name="UserCheck" size={14} className="text-primary shrink-0" />
+                  <span className="text-[13px] font-medium flex-1">{clientName}</span>
+                  <button type="button" onClick={clearClient}
+                    className="text-muted-foreground hover:text-foreground">
+                    <Icon name="X" size={14} />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="relative">
+                    <Icon name="Search" size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                      type="text"
+                      value={clientSearch}
+                      onChange={e => { setClientSearch(e.target.value); setShowDropdown(true); }}
+                      onFocus={() => setShowDropdown(true)}
+                      placeholder="Начните вводить имя..."
+                      className="w-full border border-border rounded-lg pl-9 pr-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary"
+                    />
+                  </div>
+                  {showDropdown && (
+                    <div className="absolute z-10 w-full mt-1 bg-white border border-border rounded-lg shadow-lg max-h-48 overflow-y-auto">
+                      {filteredClients.length === 0 ? (
+                        <div className="px-3 py-2 text-[12px] text-hint text-center">
+                          {clientSearch ? "Не найдено. Создайте нового заказчика." : "Нет клиентов"}
+                        </div>
+                      ) : (
+                        filteredClients.map(c => (
+                          <button key={c.id} type="button"
+                            onMouseDown={() => selectClient(c)}
+                            className="w-full text-left px-3 py-2 hover:bg-secondary transition-colors border-b border-border/50 last:border-0">
+                            <div className="text-[13px] font-medium">{c.name}</div>
+                            {c.phone && <div className="text-[11px] text-hint">{c.phone}</div>}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </div>
 
           {/* Источник */}
