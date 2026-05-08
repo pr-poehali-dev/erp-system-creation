@@ -66,7 +66,7 @@ export default function Realtor({ role: _role }: Props) {
       <div>
         <h1 className="text-xl font-semibold">Мои KPI</h1>
         <p className="text-hint mt-0.5">
-          {me?.name ? `${me.name} · ` : ""}квалификация «{qualInfo.label}» · {currentRate}% комиссии
+          {me?.name ? `${me.name} · ` : ""}квалификация «{qualInfo.label}» · {qualInfo.rate}% комиссии
         </p>
       </div>
 
