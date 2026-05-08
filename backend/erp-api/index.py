@@ -17,7 +17,7 @@ SCHEMA = "t_p60494808_erp_system_creation"
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-User-Id, X-Auth-Token",
+    "Access-Control-Allow-Headers": "Content-Type, X-User-Id, X-User-Role, X-Auth-Token",
     "Content-Type": "application/json",
 }
 
