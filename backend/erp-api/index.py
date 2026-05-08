@@ -980,9 +980,10 @@ def approve_project(cur, project_id: int):
     Директор по строительству берёт проект в производство:
     - статус проекта: planning → active
     - статус слота: booked → busy
+    - связанная сделка: planning → closed (с начислением комиссии риэлтору)
     """
     cur.execute(f"""
-        SELECT p.id, p.status, p.slot_id, s.status as slot_status
+        SELECT p.id, p.status, p.slot_id, p.deal_id, s.status as slot_status
         FROM {SCHEMA}.projects p
         LEFT JOIN {SCHEMA}.slots s ON s.id = p.slot_id
         WHERE p.id = %s
@@ -990,20 +991,34 @@ def approve_project(cur, project_id: int):
     row = cur.fetchone()
     if not row:
         return None, "Проект не найден"
-    pid, pstatus, slot_id, slot_status = row
+    pid, pstatus, slot_id, deal_id, slot_status = row
     if pstatus != 'planning':
         return None, "Проект уже в производстве или завершён"
 
+    # Переводим проект в active
     cur.execute(f"""
         UPDATE {SCHEMA}.projects SET status='active', updated_at=now() WHERE id=%s
     """, (project_id,))
 
+    # Переводим слот в busy
     if slot_id and slot_status == 'booked':
         cur.execute(f"""
             UPDATE {SCHEMA}.slots SET status='busy' WHERE id=%s
         """, (slot_id,))
 
-    return {"project_id": project_id, "status": "active"}, None
+    # Закрываем связанную сделку с начислением комиссии риэлтору
+    deal_closed = None
+    if deal_id:
+        deal_closed, err = close_deal_with_commission(cur, deal_id)
+        if err:
+            # Не блокируем approve если со сделкой что-то не так — просто логируем
+            deal_closed = {"error": err}
+
+    return {
+        "project_id": project_id,
+        "status": "active",
+        "deal_closed": deal_closed,
+    }, None
 
 
 def cancel_project(cur, project_id: int):

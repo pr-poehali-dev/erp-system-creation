@@ -5,7 +5,6 @@ import { api, Deal, Staff, getCurrentUser } from "@/lib/api";
 import {
   QUALIFICATIONS,
   qualificationFor,
-  commissionRate,
   nextLevelInfo,
   progressToNext,
 } from "@/lib/commission";
@@ -52,17 +51,15 @@ export default function Realtor({ role: _role }: Props) {
   const closedCount  = me?.closed_deals_count ?? 0;
   const qualKey      = me?.qualification ?? qualificationFor(closedCount);
   const qualInfo     = QUALIFICATIONS[qualKey];
-  const currentRate  = commissionRate(closedCount);
   const nextLvl      = nextLevelInfo(closedCount);
   const progressPct  = progressToNext(closedCount);
 
+  // Только фактически зафиксированная комиссия по закрытым сделкам
   const earnedCommission = useMemo(() =>
-    myDeals.reduce((s, d) => s + (d.commission_amount || 0), 0),
+    myDeals
+      .filter(d => d.stage === "closed")
+      .reduce((s, d) => s + (d.commission_amount || 0), 0),
   [myDeals]);
-  const forecastCommission = useMemo(() =>
-    myDeals.filter(d => d.stage !== "closed")
-      .reduce((s, d) => s + (d.budget || 0) * (currentRate / 100), 0),
-  [myDeals, currentRate]);
 
   return (
     <div className="space-y-5 max-w-[1200px]">
@@ -130,16 +127,14 @@ export default function Realtor({ role: _role }: Props) {
         <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
           <div className="flex items-center gap-2 text-emerald-700 text-[12px] mb-1 font-medium">
             <Icon name="Coins" size={13} />
-            Комиссия зафикс. / прогноз
+            Комиссия заработана
           </div>
           <div className="text-2xl font-bold text-emerald-700">
             ₽ {Math.round(earnedCommission).toLocaleString("ru")}
           </div>
-          {forecastCommission > 0 && (
-            <div className="text-[11px] text-emerald-700/70 mt-0.5">
-              + ₽ {Math.round(forecastCommission).toLocaleString("ru")} прогноз
-            </div>
-          )}
+          <div className="text-[11px] text-emerald-700/70 mt-0.5">
+            фактически, по закрытым сделкам
+          </div>
         </div>
       </div>
 
@@ -178,22 +173,6 @@ export default function Realtor({ role: _role }: Props) {
                 {myDeals.map(d => {
                   const stage    = STAGE_LABEL[d.stage] || { text: d.stage, cls: "bg-secondary text-muted-foreground" };
                   const isClosed = d.stage === "closed";
-                  const fixed    = d.commission_amount != null;
-                  const rateUsed = fixed ? (d.commission_rate ?? 0) : currentRate;
-                  const commission = fixed ? (d.commission_amount ?? 0) : (d.budget || 0) * (currentRate / 100);
-
-                  // Подпись под суммой:
-                  // - закрыта → «к выплате N%»
-                  // - есть зафиксированная сумма (но не закрыта) → «зафикс. N%»
-                  // - остальные (lead/kp/contract/planning) → «прогноз N%»
-                  const commissionLabel = isClosed
-                    ? `к выплате · ${rateUsed}%`
-                    : fixed
-                      ? `зафикс. ${rateUsed}%`
-                      : ["planning", "contract"].includes(d.stage)
-                        ? `прогноз ${rateUsed}%`
-                        : `${rateUsed}%`;
-
                   return (
                     <tr key={d.id} className={`border-t border-border hover:bg-secondary/30 transition-colors ${d.is_archived ? "opacity-70" : ""}`}>
                       <td className="px-4 py-3 text-[13px] font-bold text-primary">
@@ -208,7 +187,7 @@ export default function Realtor({ role: _role }: Props) {
                         {d.serial_project_name || (d.project_type === "individual" ? "Индивидуальный" : "—")}
                       </td>
                       <td className="px-4 py-3 text-[13px] font-semibold text-right">
-                        {d.budget ? `₽ ${d.budget.toLocaleString("ru")}` : "—"}
+                        {d.budget ? `₽ ${Number(d.budget).toLocaleString("ru")}` : "—"}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`text-[11px] px-2 py-0.5 rounded-md font-medium ${stage.cls}`}>
@@ -216,12 +195,18 @@ export default function Realtor({ role: _role }: Props) {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <div className={`text-[13px] font-bold ${isClosed ? "text-emerald-700" : "text-emerald-600"}`}>
-                          ₽ {Math.round(commission).toLocaleString("ru")}
-                        </div>
-                        <div className={`text-[10px] ${isClosed ? "text-emerald-600 font-medium" : "text-hint"}`}>
-                          {commissionLabel}
-                        </div>
+                        {isClosed && d.commission_amount != null ? (
+                          <>
+                            <div className="text-[13px] font-bold text-emerald-700">
+                              ₽ {Math.round(Number(d.commission_amount)).toLocaleString("ru")}
+                            </div>
+                            <div className="text-[10px] text-emerald-600 font-medium">
+                              к выплате · {d.commission_rate}%
+                            </div>
+                          </>
+                        ) : (
+                          <span className="text-hint text-[12px]">—</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -235,7 +220,7 @@ export default function Realtor({ role: _role }: Props) {
                   </td>
                   <td></td>
                   <td className="px-4 py-3 text-[14px] font-bold text-emerald-700 text-right">
-                    ₽ {Math.round(earnedCommission + forecastCommission).toLocaleString("ru")}
+                    ₽ {Math.round(earnedCommission).toLocaleString("ru")}
                   </td>
                 </tr>
               </tfoot>
