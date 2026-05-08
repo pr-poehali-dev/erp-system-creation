@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { api, setCurrentUser } from "@/lib/api";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -71,6 +72,22 @@ function ERPApp() {
     if (typeof window === "undefined") return false;
     return localStorage.getItem("sidebar_collapsed") === "1";
   });
+
+  // При смене роли — подбираем первого активного сотрудника с такой ролью
+  // и сохраняем (role + userId) в localStorage. api.ts читает их и шлёт
+  // в заголовках X-User-Role / X-User-Id, по которым бэкенд фильтрует данные.
+  useEffect(() => {
+    let cancelled = false;
+    setCurrentUser(currentRole, null); // сразу выставим роль, id появится ниже
+    api.staff(currentRole).then((list) => {
+      if (cancelled) return;
+      const first = Array.isArray(list) && list.length > 0 ? list[0] : null;
+      setCurrentUser(currentRole, first ? first.id : null);
+    }).catch(() => {
+      if (!cancelled) setCurrentUser(currentRole, null);
+    });
+    return () => { cancelled = true; };
+  }, [currentRole]);
 
   const toggleSidebar = () => {
     setSidebarCollapsed(prev => {

@@ -52,11 +52,10 @@ export default function RealtorNewDealModal({ project, slots, onClose, onCreated
         source: "Риэлтор",
       });
 
-      // 2. Создать сделку — без manager_id, риэлтор сам инициатор
-      // realtor_id = 1 (демо). В реальной системе подставится текущий staff
+      // 2. Создать сделку. realtor_id бэкенд подставит сам из заголовка
+      // X-User-Id (роль = realtor), чтобы исключить запись на чужое имя.
       await api.deals.create({
         client_id: client.id,
-        realtor_id: 1,
         source: "Риэлтор",
         notes: notes.trim(),
         project_type: "serial",

@@ -206,12 +206,71 @@ def delete_slot(cur, slot_id: int):
     return {"deleted": slot_id}, None
 
 
-def get_deals(cur, archived=False):
-    where = "WHERE d.is_archived = TRUE" if archived else "WHERE d.is_archived = FALSE"
+def get_user_context(event: dict):
+    """Извлекает (user_id, user_role) из заголовков запроса.
+    Заголовки case-insensitive — нормализуем в lowercase.
+    """
+    headers = event.get("headers") or {}
+    norm = {k.lower(): v for k, v in headers.items() if isinstance(k, str)}
+    role = norm.get("x-user-role") or norm.get("x-userrole") or ""
+    uid_raw = norm.get("x-user-id") or norm.get("x-userid") or ""
+    try:
+        uid = int(uid_raw) if uid_raw not in ("", None) else None
+    except (TypeError, ValueError):
+        uid = None
+    return uid, (role or "").strip()
+
+
+# Роли, которым видны все сделки без фильтра
+DEALS_FULL_ACCESS = {"director", "commercial", "general_director", "commercial_director"}
+# Роли, которым сделки в принципе не положены
+DEALS_NO_ACCESS = {
+    "construction_director", "supply_director", "finance_director",
+    "foreman", "supplier", "mechanic", "accountant", "client",
+    "project_manager", "quality",
+}
+
+
+def get_deals(cur, archived=False, user_id=None, user_role=""):
+    """Список сделок с фильтрацией по роли пользователя.
+    - crm_manager → только свои (manager_id = user_id)
+    - realtor → только свои (realtor_id = user_id)
+    - director / commercial → все
+    - остальные → пустой список
+    """
+    role = (user_role or "").strip()
+
+    # Базовый фильтр по архивности
+    base_where = "d.is_archived = TRUE" if archived else "d.is_archived = FALSE"
+
+    # Роли без доступа к сделкам — сразу пустой список
+    if role in DEALS_NO_ACCESS:
+        return []
+
+    role_where = ""
+    params: tuple = ()
+    if role in DEALS_FULL_ACCESS or role == "":
+        # Полный доступ. Пустая роль = демо/админ — пропускаем без фильтра.
+        role_where = ""
+    elif role == "crm_manager":
+        if not user_id:
+            return []
+        role_where = " AND d.manager_id = %s"
+        params = (user_id,)
+    elif role == "realtor":
+        if not user_id:
+            return []
+        role_where = " AND d.realtor_id = %s"
+        params = (user_id,)
+    else:
+        # Неизвестная роль — ничего не показываем
+        return []
+
     cur.execute(f"""
         SELECT d.id, d.code, d.stage, d.budget, d.start_date, d.source, d.notes, d.created_at,
                c.name as client_name, c.phone as client_phone,
                sm.name as manager_name, sr.name as realtor_name,
+               d.manager_id, d.realtor_id,
                sl.id as slot_id, sl.year as slot_year, sl.month as slot_month,
                sl.start_date as slot_start_date, sl.status as slot_status,
                d.project_id, d.project_type,
@@ -229,7 +288,8 @@ def get_deals(cur, archived=False):
                COALESCE(d.payment_confirmed, false) as payment_confirmed,
                COALESCE(d.contract_signed, false) as contract_signed,
                ksl.start_date as kp_slot_start_date, ksl.year as kp_slot_year, ksl.month as kp_slot_month,
-               d.client_token
+               d.client_token,
+               d.commission_rate, d.commission_amount, d.closed_at
         FROM {SCHEMA}.deals d
         LEFT JOIN {SCHEMA}.clients c ON c.id = d.client_id
         LEFT JOIN {SCHEMA}.staff sm ON sm.id = d.manager_id
@@ -238,10 +298,10 @@ def get_deals(cur, archived=False):
         LEFT JOIN {SCHEMA}.slots ksl ON ksl.id = d.kp_slot_id
         LEFT JOIN {SCHEMA}.serial_projects sp ON sp.id = d.serial_project_id
         LEFT JOIN {SCHEMA}.configurations cfg ON cfg.id = d.configuration_id
-        {where}
+        WHERE {base_where}{role_where}
         ORDER BY d.created_at DESC
         LIMIT 100
-    """)
+    """, params)
     cols = [desc[0] for desc in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -394,11 +454,17 @@ def _build_plan_from_norms(start_date: date, stage_norms: list) -> list:
         result.append((snum, s["name"], s["duration"], s_date, e_date, s["parallel_group"], s["depends_on"]))
     return result
 
-def create_deal(cur, body):
-    """Создание нового лида — только базовые данные: клиент, тип проекта, источник."""
+def create_deal(cur, body, user_id=None, user_role=""):
+    """Создание нового лида — только базовые данные: клиент, тип проекта, источник.
+    Если создаёт риэлтор — realtor_id принудительно = текущему пользователю,
+    чтобы он не мог записать сделку на чужое имя.
+    """
     client_id    = int(body["client_id"])
     manager_id   = int(body.get("manager_id", 1))
     realtor_id   = body.get("realtor_id")
+    if (user_role or "").strip() == "realtor" and user_id:
+        realtor_id = user_id
+        manager_id = manager_id or 1
     source       = body.get("source", "")
     notes        = body.get("notes", "")
     project_type = body.get("project_type", "serial")
@@ -706,6 +772,87 @@ def move_to_planning(cur, deal_id: int, body: dict):
     return {"deal_id": deal_id, "stage": "planning", "project_id": project_id, "slot_id": kp_slot_id}, None
 
 
+def calc_commission_rate(closed_count: int) -> float:
+    """Шкала комиссии риэлтора по количеству ранее закрытых сделок:
+    0–4 → 3.0% (новичок)
+    5–8 → 4.5% (в теме)
+    9+  → 5.5% (профи)
+    """
+    if closed_count >= 9:
+        return 5.5
+    if closed_count >= 5:
+        return 4.5
+    return 3.0
+
+
+def qualification_for_count(count: int) -> str:
+    if count >= 9:
+        return "pro"
+    if count >= 5:
+        return "inTopic"
+    return "novice"
+
+
+def close_deal_with_commission(cur, deal_id):
+    """Перевод сделки в 'closed' с фиксацией комиссии риэлтора.
+    - Идемпотентно: если сделка уже closed — комиссию не пересчитываем.
+    - Считаем процент по числу ранее закрытых сделок риэлтора (без учёта текущей).
+    - Инкрементируем staff.closed_deals_count и обновляем qualification.
+    """
+    cur.execute(f"""
+        SELECT id, stage, realtor_id, COALESCE(budget, 0)
+        FROM {SCHEMA}.deals WHERE id=%s
+    """, (deal_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Сделка не найдена"
+    _, current_stage, realtor_id, budget = row
+
+    if current_stage == "closed":
+        cur.execute(f"""
+            UPDATE {SCHEMA}.deals SET updated_at=now() WHERE id=%s
+            RETURNING id, stage, commission_rate, commission_amount
+        """, (deal_id,))
+        r = cur.fetchone()
+        return {"id": r[0], "stage": r[1],
+                "commission_rate": float(r[2]) if r[2] is not None else None,
+                "commission_amount": float(r[3]) if r[3] is not None else None}, None
+
+    rate = None
+    amount = None
+    if realtor_id:
+        cur.execute(f"""
+            SELECT COALESCE(closed_deals_count, 0) FROM {SCHEMA}.staff WHERE id=%s
+        """, (realtor_id,))
+        srow = cur.fetchone()
+        prev_count = int(srow[0]) if srow else 0
+        rate = calc_commission_rate(prev_count)
+        amount = round(float(budget or 0) * rate / 100.0, 2)
+
+        new_count = prev_count + 1
+        new_qual = qualification_for_count(new_count)
+        cur.execute(f"""
+            UPDATE {SCHEMA}.staff
+            SET closed_deals_count = %s, qualification = %s
+            WHERE id = %s
+        """, (new_count, new_qual, realtor_id))
+
+    cur.execute(f"""
+        UPDATE {SCHEMA}.deals
+        SET stage='closed',
+            commission_rate = %s,
+            commission_amount = %s,
+            closed_at = now(),
+            updated_at = now()
+        WHERE id=%s
+        RETURNING id, stage
+    """, (rate, amount, deal_id))
+    r = cur.fetchone()
+    return {"id": r[0], "stage": r[1],
+            "commission_rate": rate,
+            "commission_amount": amount}, None
+
+
 def update_deal_stage(cur, deal_id, new_stage, body=None):
     """Обобщённое изменение стадии (для lost и других простых переходов)."""
     body = body or {}
@@ -714,6 +861,8 @@ def update_deal_stage(cur, deal_id, new_stage, body=None):
         return update_deal_kp(cur, deal_id, body)
     if new_stage == "contract":
         return update_deal_contract(cur, deal_id, body)
+    if new_stage == "closed":
+        return close_deal_with_commission(cur, deal_id)
 
     cur.execute(f"""
         UPDATE {SCHEMA}.deals SET stage=%s, updated_at=now() WHERE id=%s
@@ -2584,10 +2733,13 @@ def create_client(cur, name: str, phone: str, email: str = "", source: str = "CR
     return result, None
 
 def get_staff(cur, role_filter=None):
+    cols_sql = ("id, name, role, "
+                "COALESCE(closed_deals_count, 0) AS closed_deals_count, "
+                "COALESCE(qualification, 'novice') AS qualification")
     if role_filter:
-        cur.execute(f"SELECT id, name, role FROM {SCHEMA}.staff WHERE role=%s ORDER BY name", (role_filter,))
+        cur.execute(f"SELECT {cols_sql} FROM {SCHEMA}.staff WHERE role=%s ORDER BY name", (role_filter,))
     else:
-        cur.execute(f"SELECT id, name, role FROM {SCHEMA}.staff ORDER BY name")
+        cur.execute(f"SELECT {cols_sql} FROM {SCHEMA}.staff ORDER BY name")
     cols = [desc[0] for desc in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -2767,6 +2919,9 @@ def handler(event: dict, context) -> dict:
         except Exception:
             pass
 
+    # Контекст пользователя из заголовков X-User-Id / X-User-Role
+    user_id, user_role = get_user_context(event)
+
     # Определяем роут: сначала из querystring ?r=, затем из path
     ROUTES = {"deals", "projects", "procurement", "payments", "kcompany", "dashboard", "clients", "staff",
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
@@ -2785,11 +2940,16 @@ def handler(event: dict, context) -> dict:
         # ── DEALS ──────────────────────────────────────────────────────────────
         if resource == "deals":
             if method == "GET":
-                data = get_deals(cur, archived=qs.get("archived") == "1")
+                data = get_deals(
+                    cur,
+                    archived=qs.get("archived") == "1",
+                    user_id=user_id,
+                    user_role=user_role,
+                )
                 return ok(data)
             elif method == "POST":
                 action = body.get("action", "create")
-                if action in ("update_stage", "kp", "contract", "lost", "planning"):
+                if action in ("update_stage", "kp", "contract", "lost", "planning", "closed"):
                     deal_id = int(body["deal_id"])
                     stage = body.get("stage") or action
                     result, error = update_deal_stage(cur, deal_id, stage, body)
@@ -2882,7 +3042,7 @@ def handler(event: dict, context) -> dict:
                     conn.commit()
                     return ok({"success": True, "code": row[0]})
                 else:
-                    result, error = create_deal(cur, body)
+                    result, error = create_deal(cur, body, user_id=user_id, user_role=user_role)
                     if error:
                         return err(error)
                     conn.commit()

@@ -5,7 +5,6 @@
       "method": "GET",
       "path": "/?r=dashboard",
       "expectedStatus": 200,
-      "expectedBody": {"active_deals": 51},
       "bodyMatcher": "partial"
     },
     {

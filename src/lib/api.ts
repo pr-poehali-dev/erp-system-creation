@@ -1,12 +1,34 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const BASE = "https://functions.poehali.dev/73735141-dfc6-4557-8541-c9c5d55a9650";
 
+export function setCurrentUser(role: string, userId: number | null) {
+  try {
+    localStorage.setItem("current_role", role);
+    if (userId != null) localStorage.setItem("current_user_id", String(userId));
+    else localStorage.removeItem("current_user_id");
+  } catch { /* ignore */ }
+}
+
+export function getCurrentUser(): { role: string | null; userId: number | null } {
+  try {
+    const role = localStorage.getItem("current_role");
+    const idStr = localStorage.getItem("current_user_id");
+    return { role, userId: idStr ? Number(idStr) : null };
+  } catch {
+    return { role: null, userId: null };
+  }
+}
+
 async function request<T = any>(route: string, method = "GET", body?: object, extra?: Record<string, string>): Promise<T> {
   const params: Record<string, string> = { r: route, ...extra };
   const qs = new URLSearchParams(params).toString();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const { role, userId } = getCurrentUser();
+  if (role) headers["X-User-Role"] = role;
+  if (userId != null) headers["X-User-Id"] = String(userId);
   const res = await fetch(`${BASE}/?${qs}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -220,6 +242,8 @@ export interface Staff {
   id: number;
   name: string;
   role: string;
+  closed_deals_count?: number;
+  qualification?: "novice" | "inTopic" | "pro";
 }
 
 export interface Deal {
@@ -233,8 +257,13 @@ export interface Deal {
   created_at: string;
   client_name: string;
   client_phone: string;
+  manager_id: number | null;
   manager_name: string;
+  realtor_id: number | null;
   realtor_name: string | null;
+  commission_rate: number | null;
+  commission_amount: number | null;
+  closed_at: string | null;
   slot_id: number | null;
   slot_year: number | null;
   slot_month: number | null;
