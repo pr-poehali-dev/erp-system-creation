@@ -96,6 +96,23 @@ export default function KpFlowManagerDocs({
             )}
           </div>
 
+          {/* Блок «Отклонено директором» — видно сразу после возврата на доработку */}
+          {docPackage?.last_reject_reason && !isApproved && cs !== "docs_review" && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 space-y-1.5">
+              <div className="flex items-center gap-2">
+                <Icon name="XCircle" size={15} className="text-red-500 shrink-0" />
+                <span className="text-[13px] font-semibold text-red-800">Документы отклонены директором</span>
+              </div>
+              <div className="text-[12px] text-red-700 font-medium">Причина:</div>
+              <div className="text-[13px] text-red-900 bg-red-100 rounded-lg px-3 py-2">
+                {docPackage.last_reject_reason}
+              </div>
+              <div className="text-[11px] text-red-600 mt-1">
+                Исправьте документы, загрузите заново и повторно отправьте на проверку.
+              </div>
+            </div>
+          )}
+
           {cs === "docs_review" && (
             <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-2">
               <div className="flex items-center gap-2">

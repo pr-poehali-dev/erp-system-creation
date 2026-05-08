@@ -200,6 +200,17 @@ export default function DealCard({
         </div>
       )}
 
+      {/* Блок «Отклонено директором» — видно прямо в карточке */}
+      {deal.last_reject_reason && cs === "docs_uploaded" && (
+        <div className="mb-2 bg-red-50 border border-red-200 rounded-lg px-2.5 py-2 space-y-1">
+          <div className="flex items-center gap-1.5">
+            <Icon name="XCircle" size={11} className="text-red-500 shrink-0" />
+            <span className="text-[11px] font-semibold text-red-700">Отклонено директором</span>
+          </div>
+          <div className="text-[11px] text-red-800 leading-snug">{deal.last_reject_reason}</div>
+        </div>
+      )}
+
       {/* В планировании / закрыта */}
       {deal.stage === "planning" && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg px-2 py-1.5 mb-2 flex items-center gap-1.5">

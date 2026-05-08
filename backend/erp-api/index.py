@@ -223,6 +223,7 @@ def get_deals(cur, archived=False):
                d.kp_notes, d.address, d.planned_start_date,
                d.serial_project_id, d.configuration_id,
                COALESCE(d.contract_status, 'none') as contract_status,
+               d.last_reject_reason,
                d.is_archived,
                COALESCE(d.kp_slot_id, 0) as kp_slot_id,
                COALESCE(d.payment_confirmed, false) as payment_confirmed,
@@ -1834,7 +1835,7 @@ def get_contract_docs(cur, deal_id: int):
         SELECT id, template_id, file_url, file_name, file_size_kb,
                uploaded_at, status, notes,
                signed_file_url, signed_file_name, signed_at,
-               payment_confirmed, manager_seen_signed
+               payment_confirmed, manager_seen_signed, reject_reason
         FROM {SCHEMA}.contract_documents
         WHERE deal_id = %s
     """, (deal_id,))
@@ -1865,17 +1866,24 @@ def get_contract_docs(cur, deal_id: int):
             "signed_file_name": doc["signed_file_name"] if doc else None,
             "signed_at":        doc["signed_at"]         if doc else None,
             "manager_seen_signed": doc["manager_seen_signed"] if doc else False,
+            "reject_reason":        doc["reject_reason"]       if doc else None,
         })
 
     all_required_uploaded = all(
         r["status"] in ("uploaded", "approved", "review")
         for r in result if r["is_required"]
     )
+    # Последняя причина отклонения — из любого отклонённого документа
+    last_reject_reason = next(
+        (r["reject_reason"] for r in result if r.get("reject_reason")),
+        None
+    )
     return {
         "items": result,
         "all_required_done": all_required_uploaded,
         "total": len(result),
         "uploaded_count": sum(1 for r in result if r["status"] != "pending"),
+        "last_reject_reason": last_reject_reason,
     }
 
 def upload_contract_doc(cur, deal_id: int, template_id: int, body: dict):
@@ -1984,9 +1992,12 @@ def approve_docs(cur, deal_id: int, approved: bool, reject_reason: str = ""):
     """, (new_doc_status, reject_reason or None, deal_id))
 
     cur.execute(f"""
-        UPDATE {SCHEMA}.deals SET contract_status=%s, updated_at=now() WHERE id=%s
+        UPDATE {SCHEMA}.deals
+        SET contract_status=%s, updated_at=now(),
+            last_reject_reason=%s
+        WHERE id=%s
         RETURNING code
-    """, (new_deal_status, deal_id))
+    """, (new_deal_status, (reject_reason or None) if not approved else None, deal_id))
     deal_code = (cur.fetchone() or [""])[0]
 
     # Находим менеджера сделки

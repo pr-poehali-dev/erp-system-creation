@@ -264,6 +264,7 @@ export interface Deal {
   payment_confirmed: boolean;
   contract_signed: boolean;
   client_token: string | null;
+  last_reject_reason: string | null;
 }
 
 export interface StageDuration {
@@ -641,6 +642,7 @@ export interface ContractDocsPackage {
   total: number;
   uploaded_count: number;
   contract_status: string; // none | docs_uploaded | docs_review | docs_approved | payment_pending | payment_confirmed
+  last_reject_reason: string | null;
 }
 
 export interface Notification {
