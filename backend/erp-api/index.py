@@ -404,21 +404,29 @@ def create_deal(cur, body):
     project_type = body.get("project_type", "serial")
     sp_id        = body.get("serial_project_id")
     address      = body.get("address", "")
+    slot_id      = body.get("slot_id")
 
     code = next_code(cur, "deals", "ЛД")
     realtor_val = int(realtor_id) if realtor_id else None
     sp_val      = int(sp_id) if sp_id else None
+    slot_val    = int(slot_id) if slot_id else None
 
     cur.execute(f"""
         INSERT INTO {SCHEMA}.deals
             (code, client_id, manager_id, realtor_id, source, notes,
-             stage, project_type, serial_project_id, address, start_date)
-        VALUES (%s, %s, %s, %s, %s, %s, 'lead', %s, %s, %s, CURRENT_DATE)
+             stage, project_type, serial_project_id, address, start_date, slot_id)
+        VALUES (%s, %s, %s, %s, %s, %s, 'lead', %s, %s, %s, CURRENT_DATE, %s)
         RETURNING id, code
     """, (code, client_id, manager_id, realtor_val, source, notes,
-          project_type, sp_val, address))
+          project_type, sp_val, address, slot_val))
 
     deal_id, deal_code = cur.fetchone()
+
+    # Резервируем слот, если указан
+    if slot_val:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.slots SET status='booked' WHERE id=%s AND status='free'
+        """, (slot_val,))
 
     # Для индивидуального — сразу создаём карточку проектирования
     if project_type == 'individual':
