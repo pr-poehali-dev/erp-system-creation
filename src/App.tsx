@@ -207,6 +207,14 @@ function ERPApp() {
           )}
         </div>
 
+        <button
+          onClick={toggleSidebar}
+          title={sidebarCollapsed ? "Развернуть меню" : "Свернуть меню"}
+          className="mx-3 mt-3 h-8 rounded-md flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0 border border-border"
+        >
+          <Icon name={sidebarCollapsed ? "ChevronsRight" : "ChevronsLeft"} size={16} />
+        </button>
+
         <nav className="flex flex-col gap-0.5 flex-1 overflow-y-auto p-3">
           {visibleItems.map((item) => (
             <button
@@ -227,14 +235,6 @@ function ERPApp() {
             </button>
           ))}
         </nav>
-
-        <button
-          onClick={toggleSidebar}
-          title={sidebarCollapsed ? "Развернуть меню" : "Свернуть меню"}
-          className="border-t border-border h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
-        >
-          <Icon name={sidebarCollapsed ? "ChevronsRight" : "ChevronsLeft"} size={16} />
-        </button>
       </aside>
 
       {/* Правая часть */}
