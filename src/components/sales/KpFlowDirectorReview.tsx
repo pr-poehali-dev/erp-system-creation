@@ -48,7 +48,7 @@ export default function KpFlowDirectorReview({
               <Icon name="FileSearch" size={16} className="text-blue-600 shrink-0" />
               <span className="text-[13px] font-semibold text-blue-900">Скачайте документ, подпишите, загрузите</span>
             </div>
-            <div className="text-[12px] text-blue-800">Нажмите «От менеджера» → скачайте → подпишите → загрузите кнопкой «Загрузить».</div>
+            <div className="text-[12px] text-blue-800">Скачайте → проверьте → подпишите → загрузите скан кнопкой «Загрузить».</div>
           </div>
 
           {cs === "none" && (
@@ -65,25 +65,28 @@ export default function KpFlowDirectorReview({
             )
           )}
 
+          {/* Кнопка «Отклонить» — доступна сразу как только есть документы на проверке */}
           {cs === "docs_review" && items.length > 0 && (
             <div className="pt-2 border-t border-border space-y-2">
-              <div className="text-[11px] font-medium">
-                {allSigned ? "✓ Все подписаны — подтвердите:" : "Загрузите подписанные варианты всех документов:"}
-              </div>
-              <div className="flex gap-2">
-                <button type="button" onClick={onApprove} disabled={submitting || !allSigned}
-                  className="flex-1 px-3 py-2 bg-emerald-500 text-white rounded-lg text-[12px] font-medium hover:bg-emerald-600 disabled:opacity-50">
+              {/* Кнопка подтвердить — только когда все подписаны */}
+              {allSigned && (
+                <button type="button" onClick={onApprove} disabled={submitting}
+                  className="w-full px-3 py-2 bg-emerald-500 text-white rounded-lg text-[12px] font-medium hover:bg-emerald-600 disabled:opacity-50">
                   {submitting ? "..." : "✓ Подтвердить и отправить менеджеру"}
                 </button>
-                <button type="button" onClick={onToggleReject}
-                  className="px-3 py-2 border border-red-200 text-red-600 rounded-lg text-[12px] hover:bg-red-50">Отклонить</button>
-              </div>
+              )}
               {!allSigned && (
                 <div className="text-[11px] text-amber-600 flex items-center gap-1">
                   <Icon name="AlertTriangle" size={11} />
-                  Загрузите подписанные варианты всех документов
+                  Загрузите подписанные варианты всех документов для подтверждения
                 </div>
               )}
+              {/* Отклонить — всегда доступна при наличии документов */}
+              <button type="button" onClick={onToggleReject}
+                className="w-full px-3 py-2 border border-red-200 text-red-600 rounded-lg text-[12px] hover:bg-red-50 transition-colors">
+                <Icon name="XCircle" size={13} className="inline mr-1.5" />
+                Отклонить и вернуть на доработку
+              </button>
               {showReject && (
                 <div className="space-y-2 p-3 bg-red-50 border border-red-200 rounded-xl">
                   <div className="text-[12px] font-medium text-red-700">Причина отклонения:</div>

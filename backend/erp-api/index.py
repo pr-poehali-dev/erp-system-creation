@@ -1060,22 +1060,7 @@ def get_client_portal(cur, token: str):
     acols = ["id","code","title","amount","status","signed_at","created_at"]
     acts = [dict(zip(acols, r)) for r in cur.fetchall()]
 
-    # Если нет актов и есть проект — создаём демо-акт по первому этапу
-    if not acts and deal["project_id"] and stages:
-        first_stage = stages[0]
-        act_code = "АКТ-" + "".join(random.choices(string.digits, k=4))
-        budget_val = float(deal["budget"] or 0)
-        act_amount = round(budget_val * 0.3, 2) if budget_val > 0 else 0
-        stage_name = first_stage.get("name", "Первый этап")
-        cur.execute(f"""
-            INSERT INTO {SCHEMA}.client_acts
-                (code, deal_id, project_id, stage_id, title, amount, status)
-            VALUES (%s, %s, %s, %s, %s, %s, 'pending_signature')
-            RETURNING id, code, title, amount, status, signed_at, created_at
-        """, (act_code, deal["deal_id"], deal["project_id"],
-              first_stage["id"], f"Акт по этапу «{stage_name}»", act_amount))
-        arow = cur.fetchone()
-        acts = [dict(zip(acols, arow))]
+    # Акты появляются только после явного создания через раздел «Строительство»
 
     # Платежи по сделке (история)
     budget = float(deal["budget"] or 0)
@@ -2522,12 +2507,35 @@ def _infer_category(doc_type: str) -> str:
 # ─── CLIENTS / STAFF ─────────────────────────────────────────────────────────
 
 def get_clients(cur):
+    """Возвращает клиентов из таблицы clients + заказчиков из contractors (тип client), дедуплицируя по имени+телефону."""
     cur.execute(f"SELECT id, name, phone, email, source FROM {SCHEMA}.clients ORDER BY name")
     cols = [desc[0] for desc in cur.description]
-    return [dict(zip(cols, r)) for r in cur.fetchall()]
+    from_clients = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    # Добавляем заказчиков из contractors которых нет в clients
+    cur.execute(f"""
+        SELECT id, name, phone, email FROM {SCHEMA}.contractors
+        WHERE contractor_type = 'client' AND is_active = TRUE
+        ORDER BY name
+    """)
+    seen_names = {c["name"].strip().lower() for c in from_clients}
+    for row in cur.fetchall():
+        cname = (row[1] or "").strip()
+        if cname.lower() not in seen_names:
+            from_clients.append({
+                "id": row[0],
+                "name": cname,
+                "phone": row[2] or "",
+                "email": row[3] or "",
+                "source": "Контрагенты",
+            })
+            seen_names.add(cname.lower())
+
+    from_clients.sort(key=lambda x: x["name"])
+    return from_clients
 
 def create_client(cur, name: str, phone: str, email: str = "", source: str = "CRM"):
-    """Создаёт нового клиента-заказчика из формы лида."""
+    """Создаёт нового клиента-заказчика из формы лида — сохраняет в clients И в contractors."""
     name  = name.strip()
     phone = phone.strip()
     if not name:
@@ -2539,7 +2547,22 @@ def create_client(cur, name: str, phone: str, email: str = "", source: str = "CR
     """, (name, phone, email.strip(), source))
     row = cur.fetchone()
     cols = ["id","name","phone","email","source"]
-    return dict(zip(cols, row)), None
+    result = dict(zip(cols, row))
+
+    # Дублируем в справочник контрагентов (тип «Клиент») если ещё не существует
+    cur.execute(f"""
+        SELECT id FROM {SCHEMA}.contractors
+        WHERE contractor_type = 'client' AND lower(name) = lower(%s)
+        LIMIT 1
+    """, (name,))
+    if not cur.fetchone():
+        cur.execute(f"""
+            INSERT INTO {SCHEMA}.contractors
+                (contractor_type, name, phone, email, contact_person, notes)
+            VALUES ('client', %s, %s, %s, %s, %s)
+        """, (name, phone, email.strip(), name, "Создан из лида/сделки"))
+
+    return result, None
 
 def get_staff(cur, role_filter=None):
     if role_filter:
