@@ -183,78 +183,82 @@ function ERPApp() {
   const safeActiveTab = visibleItems.find((i) => i.id === activeTab) ? activeTab : visibleItems[0]?.id;
 
   return (
-    <div className="min-h-screen bg-background flex flex-col font-golos">
-      <header className="bg-white border-b border-border h-14 flex items-center px-6 gap-4 sticky top-0 z-50 shadow-sm">
-        <div className="flex items-center gap-2 mr-2 shrink-0">
+    <div className="min-h-screen bg-background flex font-golos">
+      {/* Боковая навигация */}
+      <aside className="bg-white border-r border-border w-60 flex flex-col sticky top-0 h-screen shrink-0 z-40">
+        <div className="flex items-center gap-2 px-5 h-14 border-b border-border shrink-0">
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
             <Icon name="Building2" size={16} className="text-white" />
           </div>
-          <span className="mx-0 my-0 px-1.5 py-0 text-slate-900 text-lg font-extralight">ГлобалСТ</span>
+          <span className="text-slate-900 text-lg font-extralight">ГлобалСТ</span>
         </div>
 
-        <nav className="flex items-center gap-0.5 flex-1 overflow-x-auto">
+        <nav className="flex flex-col gap-0.5 flex-1 overflow-y-auto p-3">
           {visibleItems.map((item) => (
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
               className={`
-                flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] font-medium whitespace-nowrap transition-all shrink-0
+                flex items-center gap-2.5 px-3 py-2 rounded-md text-[13px] font-medium transition-all text-left
                 ${safeActiveTab === item.id
                   ? "bg-primary text-white"
                   : "text-muted-foreground hover:text-foreground hover:bg-secondary"
                 }
               `}
             >
-              <Icon name={item.icon} size={14} />
-              {item.label}
+              <Icon name={item.icon} size={15} />
+              <span className="truncate">{item.label}</span>
             </button>
           ))}
         </nav>
+      </aside>
 
-        <div className="flex items-center gap-2 ml-2 shrink-0">
+      {/* Правая часть */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="bg-white border-b border-border h-14 flex items-center justify-end px-6 gap-2 sticky top-0 z-30 shadow-sm">
           <NotificationBell role={currentRole} />
 
           <div className="relative">
-          <button
-            onClick={() => setRoleMenuOpen(!roleMenuOpen)}
-            className="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-lg border border-border hover:bg-secondary transition-all text-[13px]"
-          >
-            <Icon name="UserCircle" size={15} className="text-primary" />
-            <span className="text-foreground font-medium max-w-[160px] truncate">{currentRoleLabel}</span>
-            <Icon name="ChevronDown" size={13} className="text-muted-foreground" />
-          </button>
+            <button
+              onClick={() => setRoleMenuOpen(!roleMenuOpen)}
+              className="flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-lg border border-border hover:bg-secondary transition-all text-[13px]"
+            >
+              <Icon name="UserCircle" size={15} className="text-primary" />
+              <span className="text-foreground font-medium max-w-[160px] truncate">{currentRoleLabel}</span>
+              <Icon name="ChevronDown" size={13} className="text-muted-foreground" />
+            </button>
 
-          {roleMenuOpen && (
-            <div className="absolute right-0 top-full mt-1 bg-white border border-border rounded-lg shadow-lg py-1 w-64 z-50 animate-fade-in">
-              <div className="px-3 py-1.5 text-hint border-b border-border mb-1">Сменить роль (демо)</div>
-              {ROLES.map((role) => (
-                <button
-                  key={role.value}
-                  onClick={() => {
-                    setCurrentRole(role.value);
-                    setRoleMenuOpen(false);
-                    setActiveTab("dashboard");
-                  }}
-                  className={`w-full text-left px-3 py-2 text-[13px] hover:bg-secondary transition-colors flex items-center gap-2 ${
-                    currentRole === role.value ? "text-primary font-medium" : "text-foreground"
-                  }`}
-                >
-                  {currentRole === role.value
-                    ? <Icon name="Check" size={13} className="text-primary" />
-                    : <span className="w-[13px] inline-block" />
-                  }
-                  {role.label}
-                </button>
-              ))}
-            </div>
-          )}
+            {roleMenuOpen && (
+              <div className="absolute right-0 top-full mt-1 bg-white border border-border rounded-lg shadow-lg py-1 w-64 z-50 animate-fade-in">
+                <div className="px-3 py-1.5 text-hint border-b border-border mb-1">Сменить роль (демо)</div>
+                {ROLES.map((role) => (
+                  <button
+                    key={role.value}
+                    onClick={() => {
+                      setCurrentRole(role.value);
+                      setRoleMenuOpen(false);
+                      setActiveTab("dashboard");
+                    }}
+                    className={`w-full text-left px-3 py-2 text-[13px] hover:bg-secondary transition-colors flex items-center gap-2 ${
+                      currentRole === role.value ? "text-primary font-medium" : "text-foreground"
+                    }`}
+                  >
+                    {currentRole === role.value
+                      ? <Icon name="Check" size={13} className="text-primary" />
+                      : <span className="w-[13px] inline-block" />
+                    }
+                    {role.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      </header>
+        </header>
 
-      <main className="flex-1 p-6 animate-fade-in" key={safeActiveTab}>
-        {navItems.find(i => i.id === safeActiveTab)?.component}
-      </main>
+        <main className="flex-1 p-6 animate-fade-in" key={safeActiveTab}>
+          {navItems.find(i => i.id === safeActiveTab)?.component}
+        </main>
+      </div>
     </div>
   );
 }
