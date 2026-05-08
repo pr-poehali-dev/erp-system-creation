@@ -67,6 +67,18 @@ function ERPApp() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [currentRole, setCurrentRole] = useState<Role>("director");
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem("sidebar_collapsed") === "1";
+  });
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed(prev => {
+      const next = !prev;
+      try { localStorage.setItem("sidebar_collapsed", next ? "1" : "0"); } catch { /* ignore */ }
+      return next;
+    });
+  };
 
   const navItems: NavItem[] = [
     {
@@ -185,12 +197,14 @@ function ERPApp() {
   return (
     <div className="min-h-screen bg-background flex font-golos">
       {/* Боковая навигация */}
-      <aside className="bg-white border-r border-border w-60 flex flex-col sticky top-0 h-screen shrink-0 z-40">
-        <div className="flex items-center gap-2 px-5 h-14 border-b border-border shrink-0">
-          <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
+      <aside className={`bg-white border-r border-border flex flex-col sticky top-0 h-screen shrink-0 z-40 transition-[width] duration-200 ${sidebarCollapsed ? "w-16" : "w-60"}`}>
+        <div className={`flex items-center h-14 border-b border-border shrink-0 ${sidebarCollapsed ? "justify-center px-2" : "gap-2 px-5"}`}>
+          <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center shrink-0">
             <Icon name="Building2" size={16} className="text-white" />
           </div>
-          <span className="text-slate-900 text-lg font-extralight">ГлобалСТ</span>
+          {!sidebarCollapsed && (
+            <span className="text-slate-900 text-lg font-extralight">ГлобалСТ</span>
+          )}
         </div>
 
         <nav className="flex flex-col gap-0.5 flex-1 overflow-y-auto p-3">
@@ -198,8 +212,10 @@ function ERPApp() {
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
+              title={sidebarCollapsed ? item.label : undefined}
               className={`
-                flex items-center gap-2.5 px-3 py-2 rounded-md text-[13px] font-medium transition-all text-left
+                flex items-center rounded-md text-[13px] font-medium transition-all
+                ${sidebarCollapsed ? "justify-center px-0 py-2" : "gap-2.5 px-3 py-2 text-left"}
                 ${safeActiveTab === item.id
                   ? "bg-primary text-white"
                   : "text-muted-foreground hover:text-foreground hover:bg-secondary"
@@ -207,10 +223,18 @@ function ERPApp() {
               `}
             >
               <Icon name={item.icon} size={15} />
-              <span className="truncate">{item.label}</span>
+              {!sidebarCollapsed && <span className="truncate">{item.label}</span>}
             </button>
           ))}
         </nav>
+
+        <button
+          onClick={toggleSidebar}
+          title={sidebarCollapsed ? "Развернуть меню" : "Свернуть меню"}
+          className="border-t border-border h-10 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors shrink-0"
+        >
+          <Icon name={sidebarCollapsed ? "ChevronsRight" : "ChevronsLeft"} size={16} />
+        </button>
       </aside>
 
       {/* Правая часть */}
