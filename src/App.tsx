@@ -189,7 +189,7 @@ function ERPApp() {
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
             <Icon name="Building2" size={16} className="text-white" />
           </div>
-          <span className="font-semibold text-[15px] text-foreground">CorpERP</span>
+          <span className="mx-0 my-0 px-1.5 py-0 text-slate-900 text-lg font-extralight">ГлобалСТ</span>
         </div>
 
         <nav className="flex items-center gap-0.5 flex-1 overflow-x-auto">
