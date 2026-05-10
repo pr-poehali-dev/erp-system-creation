@@ -47,8 +47,14 @@ export default function Sales({ role, userId }: Props) {
 
   const notify = (msg: string) => {
     setSuccessMsg(msg);
-    setTimeout(() => setSuccessMsg(""), 4000);
   };
+
+  // Cleanup для notify — таймер сбрасывается при unmount
+  useEffect(() => {
+    if (!successMsg) return;
+    const t = setTimeout(() => setSuccessMsg(""), 4000);
+    return () => clearTimeout(t);
+  }, [successMsg]);
 
   const loadDeals = () => {
     setLoading(true);
@@ -104,8 +110,14 @@ export default function Sales({ role, userId }: Props) {
 
   const handleLost = async (deal: Deal) => {
     if (!confirm(`Перевести "${deal.code}" в отказ?`)) return;
-    await api.deals.updateStage(deal.id, "lost");
-    loadDeals();
+    setSaving(true);
+    try {
+      await api.deals.updateStage(deal.id, "lost");
+      loadDeals();
+      notify(`${deal.code} переведена в отказ`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Не удалось перевести сделку в отказ");
+    } finally { setSaving(false); }
   };
 
   const handleArchiveDeal = async (deal: Deal) => {
@@ -114,9 +126,14 @@ export default function Sales({ role, userId }: Props) {
       ? `Архивировать "${deal.code}"?\n\nПривязанный производственный слот будет освобождён.`
       : `Архивировать сделку "${deal.code}"?`;
     if (!confirm(msg)) return;
-    await api.deals.archive(deal.id);
-    loadDeals();
-    notify(hasSlot ? `${deal.code} перемещена в архив, слот освобождён` : `${deal.code} перемещена в архив`);
+    setSaving(true);
+    try {
+      await api.deals.archive(deal.id);
+      loadDeals();
+      notify(hasSlot ? `${deal.code} перемещена в архив, слот освобождён` : `${deal.code} перемещена в архив`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Не удалось архивировать сделку");
+    } finally { setSaving(false); }
   };
 
   const handleRestoreDeal = async (deal: Deal) => {
@@ -131,9 +148,14 @@ export default function Sales({ role, userId }: Props) {
       ? `Удалить "${deal.code}"? Необратимо!\n\nСлот будет освобождён.`
       : `Удалить сделку "${deal.code}"? Необратимо!`;
     if (!confirm(msg)) return;
-    await api.deals.delete(deal.id);
-    loadDeals();
-    notify(hasSlot ? `${deal.code} удалена, слот освобождён` : `${deal.code} удалена`);
+    setSaving(true);
+    try {
+      await api.deals.delete(deal.id);
+      loadDeals();
+      notify(hasSlot ? `${deal.code} удалена, слот освобождён` : `${deal.code} удалена`);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Не удалось удалить сделку");
+    } finally { setSaving(false); }
   };
 
   // Разбиваем сделки по статусу
@@ -249,7 +271,7 @@ export default function Sales({ role, userId }: Props) {
       {statusFilter === "active" && (
         <>
           {loading ? (
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {KANBAN_STAGES.map(s => (
                 <div key={s.key} className="bg-white rounded-xl border border-border p-4 space-y-3">
                   <div className="h-4 bg-secondary rounded animate-pulse w-3/4" />
@@ -258,7 +280,7 @@ export default function Sales({ role, userId }: Props) {
               ))}
             </div>
           ) : (
-            <div className="grid grid-cols-3 gap-4 items-start">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-start">
               {KANBAN_STAGES.map(stage => {
                 const stageDealList = dealsByStage(stage.key);
                 return (

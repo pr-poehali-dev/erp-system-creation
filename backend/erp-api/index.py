@@ -7,12 +7,22 @@ import os
 import base64
 import random
 import string
+import logging
+import traceback
 import psycopg2
 import boto3
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 SCHEMA = "t_p60494808_erp_system_creation"
+
+# Логирование: пишет в CloudWatch / stdout облачной функции
+logger = logging.getLogger("erp-api")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    h = logging.StreamHandler()
+    h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(h)
 
 CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -1426,14 +1436,30 @@ def get_payments(cur):
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 def create_payment(cur, body):
+    import math
     project_id = body.get("project_id")
     deal_id = body.get("deal_id")
-    pay_type = body["type"]  # income / expense
-    category = body.get("category", "")
-    amount = float(body["amount"])
-    payment_date = body.get("payment_date", date.today().isoformat())
-    description = body.get("description", "")
+    pay_type = body.get("type")  # income / expense
+    if pay_type not in ("income", "expense"):
+        raise ValueError("Тип платежа должен быть income или expense")
+    category = (body.get("category") or "").strip()[:100]
+    try:
+        amount = float(body.get("amount") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("Сумма платежа должна быть числом")
+    if math.isnan(amount) or math.isinf(amount):
+        raise ValueError("Сумма платежа некорректна")
+    if amount <= 0:
+        raise ValueError("Сумма платежа должна быть больше нуля")
+    if amount > 1_000_000_000:
+        raise ValueError("Сумма платежа превышает допустимый лимит")
+    payment_date = body.get("payment_date") or date.today().isoformat()
+    description = (body.get("description") or "")[:1000]
     created_by = body.get("created_by")
+
+    # Хотя бы одна привязка должна быть
+    if not project_id and not deal_id:
+        raise ValueError("Платёж должен быть привязан к сделке или проекту")
 
     code = next_code(cur, "payments", "ПЛТ")
     proj_val = int(project_id) if project_id else None
@@ -3097,13 +3123,22 @@ def handler(event: dict, context) -> dict:
                     return ok({"success": True, "code": row[0], "slots_freed": list(filter(None, [slot_id_val, kp_slot_id_val]))})
                 elif action == "restore":
                     deal_id = int(body["deal_id"])
-                    cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=FALSE, updated_at=now() WHERE id=%s RETURNING code", (deal_id,))
+                    cur.execute(f"UPDATE {SCHEMA}.deals SET is_archived=FALSE, updated_at=now() WHERE id=%s RETURNING code, stage", (deal_id,))
                     row = cur.fetchone()
                     if not row:
                         return err("Сделка не найдена")
+                    deal_code, deal_stage = row
+                    # Если сделка не в финальной стадии — восстанавливаем и связанный проект из архива в planning
+                    if deal_stage not in ('lost', 'closed'):
+                        cur.execute(f"""
+                            UPDATE {SCHEMA}.projects SET status='planning', updated_at=now()
+                            WHERE deal_id=%s AND status='archived'
+                        """, (deal_id,))
                     conn.commit()
-                    return ok({"success": True, "code": row[0]})
+                    return ok({"success": True, "code": deal_code})
                 elif action == "delete":
+                    if user_role not in ("director", "commercial"):
+                        return err("Удалять сделки может только директор.", 403)
                     deal_id = int(body["deal_id"])
                     # Читаем слоты и текущую стадию
                     cur.execute(f"SELECT slot_id, kp_slot_id, stage FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
@@ -3112,9 +3147,14 @@ def handler(event: dict, context) -> dict:
                         return err("Сделка не найдена")
                     slot_id_val, kp_slot_id_val, deal_stage = drow
 
-                    # Слоты освобождаем только если сделка не вышла в производство.
-                    # planning/closed = проект уже создан → слот занят реально, не трогаем.
-                    free_slots_allowed = deal_stage not in ("planning", "closed")
+                    # Слоты освобождаем если проект ещё НЕ взят в производство.
+                    # closed = проект уже active (директор по строительству нажал «Взять в производство») → слот не трогаем.
+                    # planning = проект создан, но ещё не одобрен → слот можно освободить.
+                    # Но если у проекта status='active', оставляем слот занятым.
+                    cur.execute(f"SELECT status FROM {SCHEMA}.projects WHERE deal_id=%s", (deal_id,))
+                    prow = cur.fetchone()
+                    project_in_production = bool(prow and prow[0] == 'active')
+                    free_slots_allowed = (deal_stage != 'closed') and (not project_in_production)
                     freed = []
                     if free_slots_allowed:
                         for sid in set(filter(None, [slot_id_val, kp_slot_id_val])):
@@ -3170,18 +3210,24 @@ def handler(event: dict, context) -> dict:
                         conn.commit()
                     return ok({"success": True})
                 elif action == "approve_project":
+                    if user_role not in ("director", "construction_director"):
+                        return err("Недостаточно прав. Только директор по строительству может перевести проект в производство.", 403)
                     pid = int(body["project_id"])
                     result, error = approve_project(cur, pid)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
                 elif action == "cancel_project":
+                    if user_role not in ("director", "construction_director", "commercial"):
+                        return err("Недостаточно прав. Только директор может отменить проект.", 403)
                     pid = int(body["project_id"])
                     result, error = cancel_project(cur, pid)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
                 elif action == "complete_project":
+                    if user_role not in ("director", "construction_director", "foreman"):
+                        return err("Недостаточно прав для завершения проекта.", 403)
                     pid = int(body["project_id"])
                     result, error = complete_project(cur, pid)
                     if error: return err(error)
@@ -3683,9 +3729,20 @@ def handler(event: dict, context) -> dict:
 
         return err("Маршрут не найден", 404)
 
+    except ValueError as ve:
+        # Бизнес-валидация — пользовательская ошибка, 400 + понятное сообщение
+        conn.rollback()
+        logger.warning(f"ValidationError: {ve}")
+        return err(str(ve), 400)
+    except KeyError as ke:
+        conn.rollback()
+        logger.warning(f"Missing required field: {ke}")
+        return err(f"Не указано обязательное поле: {ke}", 400)
     except Exception as e:
         conn.rollback()
-        return err(str(e), 500)
+        # Логируем полный traceback для диагностики
+        logger.error(f"Unhandled error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        return err("Внутренняя ошибка сервера. Попробуйте позже.", 500)
     finally:
         cur.close()
         conn.close()
