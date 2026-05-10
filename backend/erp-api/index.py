@@ -2949,11 +2949,13 @@ def get_reports(cur):
         b["rating"] = round(3.5 + (on_time / total) * 1.4, 1)
 
     # --- KPI метрики ---
+    # active_deals: только активные сделки в работе (не архив, не отказ, не закрытые)
+    # contracts: те, у которых дошли до планирования или закрылись (реально подписан договор)
     cur.execute(f"""
         SELECT
-            COUNT(*) FILTER (WHERE stage NOT IN ('lost','done')) AS active_deals,
-            COUNT(*) FILTER (WHERE stage='contract') AS contracts,
-            COUNT(*) AS total_deals
+            COUNT(*) FILTER (WHERE is_archived = FALSE AND stage NOT IN ('lost','closed')) AS active_deals,
+            COUNT(*) FILTER (WHERE stage IN ('planning','closed') OR contract_status = 'signed') AS contracts,
+            COUNT(*) FILTER (WHERE is_archived = FALSE) AS total_deals
         FROM {SCHEMA}.deals
     """)
     d = cur.fetchone()
