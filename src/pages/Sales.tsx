@@ -152,7 +152,11 @@ export default function Sales({ role, userId }: Props) {
   const visibleActive = applyFunnelFilter(activeDeals);
   const visibleClosed = applyFunnelFilter(closedDeals);
 
-  const dealsByStage = (stage: string) => visibleActive.filter(d => d.stage === stage);
+  // contract — устаревший промежуточный статус, отображаем в колонке planning
+  const dealsByStage = (stage: string) =>
+    stage === "planning"
+      ? visibleActive.filter(d => d.stage === "planning" || d.stage === "contract")
+      : visibleActive.filter(d => d.stage === stage);
   const totalBudget  = (stage: string) => dealsByStage(stage).reduce((s, d) => s + (d.budget || 0), 0);
 
   const pageTitle = isRealtor ? "Мои сделки" : "Продажи и CRM";

@@ -981,12 +981,14 @@ def approve_project(cur, project_id: int):
     - статус проекта: planning → active
     - статус слота: booked → busy
     - связанная сделка: planning → closed (с начислением комиссии риэлтору)
+    Используем FOR UPDATE для защиты от race condition (двойное нажатие).
     """
     cur.execute(f"""
         SELECT p.id, p.status, p.slot_id, p.deal_id, s.status as slot_status
         FROM {SCHEMA}.projects p
         LEFT JOIN {SCHEMA}.slots s ON s.id = p.slot_id
         WHERE p.id = %s
+        FOR UPDATE OF p
     """, (project_id,))
     row = cur.fetchone()
     if not row:
@@ -995,15 +997,19 @@ def approve_project(cur, project_id: int):
     if pstatus != 'planning':
         return None, "Проект уже в производстве или завершён"
 
-    # Переводим проект в active
+    # Переводим проект в active (атомарно — только если ещё в planning)
     cur.execute(f"""
-        UPDATE {SCHEMA}.projects SET status='active', updated_at=now() WHERE id=%s
+        UPDATE {SCHEMA}.projects
+        SET status='active', updated_at=now()
+        WHERE id=%s AND status='planning'
     """, (project_id,))
 
-    # Переводим слот в busy
-    if slot_id and slot_status == 'booked':
+    # Переводим слот в busy (защита: только если booked)
+    if slot_id:
         cur.execute(f"""
-            UPDATE {SCHEMA}.slots SET status='busy' WHERE id=%s
+            UPDATE {SCHEMA}.slots
+            SET status='busy', updated_at=now()
+            WHERE id=%s AND status='booked'
         """, (slot_id,))
 
     # Закрываем связанную сделку с начислением комиссии риэлтору
@@ -1011,7 +1017,6 @@ def approve_project(cur, project_id: int):
     if deal_id:
         deal_closed, err = close_deal_with_commission(cur, deal_id)
         if err:
-            # Не блокируем approve если со сделкой что-то не так — просто логируем
             deal_closed = {"error": err}
 
     return {

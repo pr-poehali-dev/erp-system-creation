@@ -84,6 +84,13 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
   const [newClientSaving, setNewClientSaving] = useState(false);
   const [newClientError, setNewClientError]   = useState("");
 
+  // Проверка дублей по телефону при создании нового клиента
+  const duplicateByPhone = useMemo(() => {
+    const q = newPhone.replace(/\D/g, "");
+    if (q.length < 10) return null;
+    return allClients.find(c => (c.phone || "").replace(/\D/g, "").includes(q)) || null;
+  }, [newPhone, allClients]);
+
   const handleCreateClient = async () => {
     if (!newName.trim()) { setNewClientError("Укажите ФИО"); return; }
     if (!newPhone.trim()) { setNewClientError("Укажите телефон"); return; }
@@ -222,6 +229,12 @@ export default function LeadModal({ clients, managers, realtors, serialProjects,
                 <input type="tel" value={newPhone} onChange={e => setNewPhone(e.target.value)}
                   placeholder="Телефон *"
                   className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white" />
+                {duplicateByPhone && (
+                  <div className="flex items-start gap-1.5 text-[12px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                    <Icon name="AlertTriangle" size={12} className="shrink-0 mt-0.5" />
+                    <span>Клиент с таким номером уже есть: <b>{duplicateByPhone.name}</b>. Лучше выберите его из списка.</span>
+                  </div>
+                )}
                 <input type="email" value={newEmail} onChange={e => setNewEmail(e.target.value)}
                   placeholder="Email (необязательно)"
                   className="w-full border border-blue-200 rounded-lg px-3 py-1.5 text-[13px] outline-none focus:ring-1 focus:ring-blue-400 bg-white" />

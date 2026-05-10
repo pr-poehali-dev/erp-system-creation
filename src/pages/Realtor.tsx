@@ -214,9 +214,9 @@ export default function Realtor({ role: _role }: Props) {
               </tbody>
               <tfoot>
                 <tr className="border-t-2 border-border bg-emerald-50/50">
-                  <td colSpan={3} className="px-4 py-3 text-[13px] font-semibold text-right">Итого:</td>
+                  <td colSpan={3} className="px-4 py-3 text-[13px] font-semibold text-right">Итого (закрытые):</td>
                   <td className="px-4 py-3 text-[13px] font-bold text-right">
-                    ₽ {myDeals.reduce((s, d) => s + (d.budget || 0), 0).toLocaleString("ru")}
+                    ₽ {myDeals.filter(d => d.stage === "closed").reduce((s, d) => s + (Number(d.budget) || 0), 0).toLocaleString("ru")}
                   </td>
                   <td></td>
                   <td className="px-4 py-3 text-[14px] font-bold text-emerald-700 text-right">
