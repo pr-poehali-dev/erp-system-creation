@@ -120,7 +120,8 @@ export default function ProjectCard({
         </div>
 
         {/* Кнопка «Взять в производство» */}
-        {isConstructionDirector && tab === "active" && p.status === "planning" && p.slot_status === "booked" && (
+        {/* status='planning' — нормальный путь; status='active' && deal_stage='planning' — старый код создал проект active, сделка ещё не закрыта */}
+        {isConstructionDirector && tab === "active" && (p.status === "planning" || (p.status === "active" && p.deal_stage === "planning")) && p.slot_status === "booked" && (
           <div className="shrink-0">
             <button
               onClick={onApprove}

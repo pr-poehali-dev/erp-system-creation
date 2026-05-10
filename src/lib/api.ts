@@ -361,6 +361,7 @@ export interface Project {
   // Данные из сделки
   deal_code: string | null;
   deal_budget: number | null;
+  deal_stage: string | null;
   signed_date: string | null;
   contract_status: string | null;
   manager_name: string | null;

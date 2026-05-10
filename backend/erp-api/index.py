@@ -1004,21 +1004,34 @@ def approve_project(cur, project_id: int):
     if not row:
         return None, "Проект не найден"
     pid, pstatus, slot_id, deal_id, slot_status = row
-    if pstatus != 'planning':
-        return None, "Проект уже в производстве или завершён"
 
-    # Переводим проект в active (атомарно — только если ещё в planning)
+    # Проверяем статус: планирование или active (для случая, когда проект
+    # был создан старым кодом с status='active', но сделка ещё в planning)
+    if pstatus not in ('planning', 'active'):
+        return None, "Проект уже завершён или в архиве"
+
+    # Проверяем: если сделка уже закрыта — повторное нажатие кнопки, ничего не делаем
+    if deal_id:
+        cur.execute(f"SELECT stage FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+        drow = cur.fetchone()
+        if drow and drow[0] == 'closed':
+            # Сделка уже закрыта — просто убеждаемся что проект active
+            if pstatus != 'active':
+                cur.execute(f"UPDATE {SCHEMA}.projects SET status='active', updated_at=now() WHERE id=%s", (project_id,))
+            return {"project_id": project_id, "status": "active", "deal_closed": None}, None
+
+    # Переводим проект в active
     cur.execute(f"""
         UPDATE {SCHEMA}.projects
         SET status='active', updated_at=now()
-        WHERE id=%s AND status='planning'
+        WHERE id=%s
     """, (project_id,))
 
     # Переводим слот в busy (защита: только если booked)
     if slot_id:
         cur.execute(f"""
             UPDATE {SCHEMA}.slots
-            SET status='busy', updated_at=now()
+            SET status='busy'
             WHERE id=%s AND status='booked'
         """, (slot_id,))
 
@@ -1118,6 +1131,7 @@ def get_projects(cur, archived=False):
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id) as total_stages,
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id AND ps.status='done') as done_stages,
                d.code as deal_code, d.budget as deal_budget, d.signed_date, d.contract_status,
+               d.stage as deal_stage,
                sm.name as manager_name,
                sp.name as serial_project_name,
                cfg.name as configuration_name,
