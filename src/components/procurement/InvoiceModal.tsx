@@ -1,9 +1,9 @@
 import { useRef } from "react";
-import { Invoice, Supplier, Material } from "@/lib/api";
+import { Invoice, Supplier, Material } from "@/lib/api"; // Supplier, Material нужны для props
 import Icon from "@/components/ui/icon";
 import InvoiceAiPanel from "./InvoiceAiPanel";
 import {
-  InvoiceForm, ApplyData, UploadedFile,
+  InvoiceForm, ApplyData, UploadedFile, AiRecognizeResult,
   STATUS_CFG, EXT_ICON, ACCEPT_TYPES, ACCEPT_HINT, fmtMoney,
 } from "./invoices.shared";
 
@@ -16,7 +16,7 @@ interface Props {
   saving: boolean;
   error: string;
   recognizing: boolean;
-  aiResult: Record<string, unknown> | null;
+  aiResult: AiRecognizeResult | null;
   aiError: string;
   canRecognize: boolean;
   canSeeRawData: boolean;
@@ -124,8 +124,7 @@ export default function InvoiceModal({
               {aiResult ? (
                 <InvoiceAiPanel
                   result={aiResult}
-                  suppliers={suppliers}
-                  materials={materials}
+                  showDebug={canSeeRawData}
                   onApply={onApplyAI}
                   onDismiss={onDismissAI}
                 />

@@ -192,7 +192,15 @@ export const api = {
     uploadFile: (invoice_id: number, file_b64: string, file_name: string) =>
       request<{ cdn_url: string; file_name: string }>("invoices", "POST", { action: "upload_file", invoice_id, file_b64, file_name }),
     recognize: (invoice_id: number) =>
-      request<{ status: string; parsed: Record<string, unknown>; raw_response: string }>("invoices", "POST", { action: "recognize", invoice_id }),
+      request<{
+        status: string;
+        parsed: Record<string, unknown>;
+        supplier_id: number | null;
+        supplier_created: boolean;
+        material_id: number | null;
+        material_created: boolean;
+        debug: { raw_response: string | null; parse_error: string | null; supplier_action: string | null; material_action: string | null; polza_full?: unknown };
+      }>("invoices", "POST", { action: "recognize", invoice_id }),
   },
 
   purchase_requests: {

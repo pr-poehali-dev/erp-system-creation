@@ -5,7 +5,7 @@ import Icon from "@/components/ui/icon";
 import InvoiceModal from "./InvoiceModal";
 import {
   AI_ROLES, EXT_ICON, STATUS_CFG, fmtMoney, fmtDate,
-  fileToBase64, InvoiceForm, ApplyData, UploadedFile, EMPTY_FORM,
+  fileToBase64, InvoiceForm, ApplyData, UploadedFile, EMPTY_FORM, AiRecognizeResult,
 } from "./invoices.shared";
 
 export default function InvoicesTab({ role }: { role?: Role }) {
@@ -26,7 +26,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const [saving,      setSaving]      = useState(false);
   const [error,       setError]       = useState("");
   const [recognizing, setRecognizing] = useState(false);
-  const [aiResult,    setAiResult]    = useState<Record<string, unknown> | null>(null);
+  const [aiResult,    setAiResult]    = useState<AiRecognizeResult | null>(null);
   const [aiError,     setAiError]     = useState("");
 
   const canUseAI      = !role || AI_ROLES.includes(role);
@@ -129,8 +129,9 @@ export default function InvoicesTab({ role }: { role?: Role }) {
     setRecognizing(true); setAiError(""); setAiResult(null);
     try {
       const res = await api.invoices.recognize(editItem.id);
-      setAiResult(res.parsed);
-      load();
+      // Сохраняем весь ответ — supplier_id/material_id берём напрямую из него
+      setAiResult(res);
+      load(); // обновляем список — счёт уже обновлён в БД
     } catch (err: unknown) {
       setAiError(err instanceof Error ? err.message : "Ошибка AI-распознавания");
     } finally { setRecognizing(false); }

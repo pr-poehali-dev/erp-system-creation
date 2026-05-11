@@ -68,3 +68,19 @@ export interface UploadedFile {
   url: string;
   name: string;
 }
+
+// Полный ответ от бэкенда после AI-распознавания
+export interface AiRecognizeResult {
+  status: string;
+  parsed: Record<string, unknown>;
+  supplier_id: number | null;
+  supplier_created: boolean;
+  material_id: number | null;
+  material_created: boolean;
+  debug: {
+    raw_response: string | null;
+    parse_error: string | null;
+    supplier_action: string | null;
+    material_action: string | null;
+  };
+}

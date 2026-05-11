@@ -3252,18 +3252,20 @@ def add_gantt_substage(cur, project_id: int, body: dict):
 # ─── INVOICE AI RECOGNITION ──────────────────────────────────────────────────
 
 CHATGPT_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
-INVOICE_PROMPT  = """Ты — система извлечения данных из финансовых документов.
-Из предоставленного документа (счёт/накладная/инвойс) извлеки следующие данные и верни СТРОГО валидный JSON без markdown-блоков:
-{
-  "supplier_name": "название поставщика или null",
-  "material": "наименование материала/товара или null",
-  "unit": "единица измерения (шт/м3/т/пог.м/м2/компл) или null",
-  "unit_price": число или null,
-  "quantity": число или null,
-  "invoice_date": "дата в формате YYYY-MM-DD или null",
-  "invoice_number": "номер счёта/накладной или null"
-}
-Если поле не найдено — ставь null. Только JSON, без пояснений."""
+INVOICE_PROMPT  = """Ты — OCR-система извлечения данных из финансовых документов (счета, накладные, инвойсы).
+
+ОБЯЗАТЕЛЬНО верни ТОЛЬКО валидный JSON-объект, ничего кроме него — никаких пояснений, никакого markdown, никаких ``` блоков.
+
+Структура ответа (строго):
+{"supplier_name":"название поставщика или null","material":"наименование первого товара/материала или null","unit":"единица измерения из списка шт/м3/т/пог.м/м2/компл или null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер счёта или null"}
+
+Правила:
+- Если поле не найдено или неопределённо — ставь null (без кавычек)
+- unit_price и quantity — только числа (не строки)
+- invoice_date — только формат YYYY-MM-DD
+- supplier_name — официальное название организации
+- material — первый товар/услуга в документе
+- Ответ начинается с { и заканчивается } — никаких других символов"""
 
 ALLOWED_EXTS = {'pdf','jpg','jpeg','png','xls','xlsx','docx'}
 
@@ -3288,13 +3290,18 @@ def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
 
 def recognize_invoice(cur, invoice_id: int):
     """Запускает AI-распознавание счёта через Polza.ai.
-    1. Загружает файл из S3 / по CDN-ссылке
-    2. Формирует мультимодальный или текстовый запрос в зависимости от типа
-    3. Парсит JSON-ответ
-    4. Матчит/создаёт поставщика и материал
-    5. Обновляет запись
+    Возвращает подробный debug-объект для диагностики на фронте.
     """
     import re
+    import requests as req_lib
+    import base64
+
+    debug = {
+        "raw_response": None,
+        "parse_error": None,
+        "supplier_action": None,
+        "material_action": None,
+    }
 
     # 1. Получаем данные счёта
     cur.execute(f"""
@@ -3310,9 +3317,7 @@ def recognize_invoice(cur, invoice_id: int):
 
     ext = (file_name or '').rsplit('.', 1)[-1].lower() if file_name else ''
 
-    # 2. Скачиваем файл и кодируем в base64
-    import requests as req_lib
-    import base64
+    # 2. Скачиваем файл
     try:
         resp = req_lib.get(file_url, timeout=30)
         resp.raise_for_status()
@@ -3321,126 +3326,209 @@ def recognize_invoice(cur, invoice_id: int):
     except Exception as e:
         return None, f"Не удалось загрузить файл: {e}"
 
-    # 3. Формируем запрос к Polza.ai
+    # 3. Формируем запрос к Polza.ai в зависимости от типа файла
+    system_msg = {"role": "system", "content": "Ты — OCR-система. Отвечай ТОЛЬКО валидным JSON без каких-либо пояснений, markdown или дополнительного текста."}
+
     if ext in ('jpg', 'jpeg', 'png'):
-        # Мультимодальный запрос с изображением
         mime = "image/jpeg" if ext in ('jpg','jpeg') else "image/png"
-        messages = [{
+        user_msg = {
             "role": "user",
             "content": [
                 {"type": "text", "text": INVOICE_PROMPT},
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
             ]
-        }]
-        model = "openai/gpt-4o"  # мультимодальная модель
+        }
+        model = "openai/gpt-4o"
     elif ext in ('xls', 'xlsx'):
-        # Excel: парсим ячейки через openpyxl и передаём как текст
         try:
             import openpyxl, io
             wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
             lines = []
             for ws in wb.worksheets[:1]:
-                for row in list(ws.rows)[:50]:  # первые 50 строк
-                    vals = [str(c.value or '').strip() for c in row if c.value is not None]
+                for r in list(ws.rows)[:50]:
+                    vals = [str(c.value or '').strip() for c in r if c.value is not None]
                     if vals:
                         lines.append(" | ".join(vals))
             text_content = "\n".join(lines[:100])
-        except Exception:
-            text_content = "[Не удалось прочитать Excel. Попробуйте другой формат.]"
-        messages = [{"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое таблицы Excel:\n{text_content}"}]
-        model = "openai/gpt-4o-mini"
+        except Exception as xe:
+            text_content = f"[Ошибка чтения Excel: {xe}]"
+        user_msg = {"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое Excel:\n{text_content}"}
+        model = "openai/gpt-4o"
+    elif ext == 'pdf':
+        # PDF: передаём как base64 data-uri в image_url — gpt-4o умеет читать PDF через data:application/pdf
+        user_msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": INVOICE_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64}"}}
+            ]
+        }
+        model = "openai/gpt-4o"
     else:
-        # PDF / DOCX / текст: передаём как есть через base64 или текст
-        # GPT-4o умеет читать PDF-файлы через file uploads, но для простоты
-        # передаём URL напрямую в текстовый контент
-        messages = [{"role": "user", "content": f"{INVOICE_PROMPT}\n\nФайл доступен по URL: {file_url}\nТип файла: {ext.upper()}"}]
+        # DOCX и прочие: извлекаем текст если возможно, иначе просто отправляем промпт
+        try:
+            from docx import Document
+            import io as _io
+            doc = Document(_io.BytesIO(file_bytes))
+            text_content = "\n".join(p.text for p in doc.paragraphs if p.text.strip())[:3000]
+        except Exception:
+            text_content = f"[Файл типа {ext.upper()} не может быть прочитан напрямую]"
+        user_msg = {"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое документа:\n{text_content}"}
         model = "openai/gpt-4o"
 
     # 4. Вызов Polza.ai
     try:
         polza_resp = req_lib.post(
             f"{CHATGPT_URL}?action=generate",
-            json={"messages": messages, "model": model, "temperature": 0.1, "max_tokens": 512},
-            timeout=60
+            json={
+                "messages": [system_msg, user_msg],
+                "model": model,
+                "temperature": 0.0,
+                "max_tokens": 256,
+            },
+            timeout=90
         )
         polza_resp.raise_for_status()
         polza_data = polza_resp.json()
         raw_content = polza_data.get("content", "")
+        debug["raw_response"] = raw_content
+        debug["polza_full"] = polza_data  # полный ответ для отладки
     except Exception as e:
         return None, f"Ошибка Polza.ai: {e}"
 
-    # 5. Извлекаем JSON из ответа (убираем markdown-блоки если есть)
+    # 5. Надёжный парсинг JSON из ответа модели
+    parsed = {}
+    parse_error = None
     json_str = raw_content.strip()
-    # Снимаем ```json ... ``` если модель завернула в блок
-    m = re.search(r'```(?:json)?\s*([\s\S]+?)\s*```', json_str)
-    if m:
-        json_str = m.group(1).strip()
+
+    # Убираем ```json ... ``` и ``` ... ```
+    json_str = re.sub(r'```(?:json)?\s*', '', json_str)
+    json_str = re.sub(r'\s*```', '', json_str)
+    json_str = json_str.strip()
+
     try:
         parsed = json.loads(json_str)
-    except json.JSONDecodeError:
-        # Последняя попытка: ищем первый { ... } в строке
-        m2 = re.search(r'\{[\s\S]+\}', json_str)
+    except json.JSONDecodeError as e1:
+        parse_error = f"Первая попытка: {e1}"
+        # Ищем первый {...} в строке
+        m2 = re.search(r'\{[\s\S]+?\}', json_str)
         if m2:
             try:
                 parsed = json.loads(m2.group(0))
-            except Exception:
+                parse_error = None
+            except Exception as e2:
+                parse_error = f"Обе попытки провалились. Err1: {e1}. Err2: {e2}. Raw: {json_str[:300]}"
                 parsed = {}
         else:
+            parse_error = f"JSON-объект не найден в ответе. Raw: {json_str[:300]}"
             parsed = {}
 
-    # 6. Матчим/создаём поставщика
-    supplier_name = (parsed.get("supplier_name") or "").strip()
+    debug["parse_error"] = parse_error
+
+    # 6. Нормализация ключей (на случай если модель вернула в другом регистре или с отличиями)
+    KEY_ALIASES = {
+        "supplier_name":  ["supplier", "vendor", "company", "поставщик", "организация", "from", "seller"],
+        "material":       ["product", "item", "goods", "description", "наименование", "товар", "услуга"],
+        "unit":           ["uom", "measure", "единица", "ед_изм", "ед.изм"],
+        "unit_price":     ["price", "cost", "цена", "стоимость", "price_per_unit", "rate"],
+        "quantity":       ["qty", "amount", "кол_во", "количество", "count", "volume"],
+        "invoice_date":   ["date", "дата", "issue_date", "doc_date"],
+        "invoice_number": ["number", "num", "номер", "invoice_no", "doc_number", "#"],
+    }
+    normalized = {}
+    # Сначала берём прямые попадания (lowercase ключ)
+    for k, v in parsed.items():
+        normalized[k.lower().strip()] = v
+    # Затем маппим алиасы
+    final = {}
+    for canonical, aliases in KEY_ALIASES.items():
+        if canonical in normalized:
+            final[canonical] = normalized[canonical]
+        else:
+            for alias in aliases:
+                if alias in normalized:
+                    final[canonical] = normalized[alias]
+                    break
+    # Добавляем незнакомые ключи как есть
+    for k, v in normalized.items():
+        if k not in final:
+            final[k] = v
+    parsed = final
+
+    # 7. Матчим/создаём поставщика (нечёткий поиск ILIKE)
+    supplier_name = (str(parsed.get("supplier_name") or "")).strip()
     supplier_id   = None
-    if supplier_name:
-        cur.execute(f"SELECT id FROM {SCHEMA}.suppliers WHERE lower(name)=lower(%s) LIMIT 1", (supplier_name,))
+    supplier_created = False
+    if supplier_name and supplier_name != "null":
+        # Точное совпадение
+        cur.execute(f"SELECT id, name FROM {SCHEMA}.suppliers WHERE lower(name)=lower(%s) AND name != '(не указан)' LIMIT 1", (supplier_name,))
         sr = cur.fetchone()
+        if not sr:
+            # Нечёткий поиск: ILIKE с частичным совпадением
+            search_term = f"%{supplier_name}%"
+            cur.execute(f"SELECT id, name FROM {SCHEMA}.suppliers WHERE name ILIKE %s AND name != '(не указан)' LIMIT 1", (search_term,))
+            sr = cur.fetchone()
         if sr:
             supplier_id = sr[0]
+            debug["supplier_action"] = f"найден: id={sr[0]}, name={sr[1]}"
         else:
-            cur.execute(f"""
-                INSERT INTO {SCHEMA}.suppliers (name, category)
-                VALUES (%s, 'прочее') RETURNING id
-            """, (supplier_name,))
+            cur.execute(f"INSERT INTO {SCHEMA}.suppliers (name, category) VALUES (%s, 'прочее') RETURNING id", (supplier_name,))
             supplier_id = cur.fetchone()[0]
+            supplier_created = True
+            debug["supplier_action"] = f"создан: id={supplier_id}, name={supplier_name}"
+    else:
+        debug["supplier_action"] = "supplier_name пустой или null — пропуск"
 
-    # 7. Матчим/создаём материал
-    material_name = (parsed.get("material") or "").strip()
-    raw_unit      = (parsed.get("unit") or "шт").strip()
+    # 8. Матчим/создаём материал
+    material_name = (str(parsed.get("material") or "")).strip()
+    raw_unit      = (str(parsed.get("unit") or "шт")).strip()
     material_id   = None
-    if material_name:
-        # Нормализуем единицу
+    material_created = False
+    if material_name and material_name != "null":
         valid_units = ['шт','м3','т','пог.м','м2','компл']
         unit = raw_unit if raw_unit in valid_units else 'шт'
-        cur.execute(f"""
-            SELECT id FROM {SCHEMA}.materials
-            WHERE lower(name)=lower(%s) AND unit=%s LIMIT 1
-        """, (material_name, unit))
+        # Точное совпадение
+        cur.execute(f"SELECT id, name FROM {SCHEMA}.materials WHERE lower(name)=lower(%s) AND name != '(не указан)' LIMIT 1", (material_name,))
         mr = cur.fetchone()
+        if not mr:
+            # Нечёткий поиск
+            cur.execute(f"SELECT id, name FROM {SCHEMA}.materials WHERE name ILIKE %s AND name != '(не указан)' LIMIT 1", (f"%{material_name}%",))
+            mr = cur.fetchone()
         if mr:
             material_id = mr[0]
+            debug["material_action"] = f"найден: id={mr[0]}, name={mr[1]}"
         else:
-            cur.execute(f"""
-                INSERT INTO {SCHEMA}.materials (name, unit)
-                VALUES (%s, %s) RETURNING id
-            """, (material_name, unit))
+            cur.execute(f"INSERT INTO {SCHEMA}.materials (name, unit) VALUES (%s, %s) RETURNING id", (material_name, unit))
             material_id = cur.fetchone()[0]
+            material_created = True
+            debug["material_action"] = f"создан: id={material_id}, name={material_name}, unit={unit}"
+    else:
+        debug["material_action"] = "material пустой или null — пропуск"
 
-    # 8. Определяем статус распознавания
+    # 9. Определяем статус
     key_fields = [supplier_name, material_name, parsed.get("unit_price"), parsed.get("quantity")]
-    status = "обработан" if all(f is not None and f != "" for f in key_fields) else "требуется_проверка"
+    has_nulls  = any(f is None or str(f).strip() in ("", "null", "None") for f in key_fields)
+    status = "требуется_проверка" if has_nulls or parse_error else "обработан"
 
-    # 9. Обновляем счёт
-    sets, vals = ["recognition_status=%s", "recognized_data=%s", "updated_at=now()"], [status, json.dumps(parsed, ensure_ascii=False)]
+    # 10. Обновляем счёт в БД
+    sets = ["recognition_status=%s", "recognized_data=%s", "updated_at=now()"]
+    vals = [status, json.dumps(parsed, ensure_ascii=False)]
     if supplier_id:  sets.append("supplier_id=%s"); vals.append(supplier_id)
     if material_id:  sets.append("material_id=%s"); vals.append(material_id)
-    if parsed.get("unit_price") is not None:
-        sets.append("unit_price=%s"); vals.append(float(parsed["unit_price"]))
-    if parsed.get("quantity") is not None:
-        sets.append("quantity=%s"); vals.append(float(parsed["quantity"]))
-    if parsed.get("invoice_date"):
-        sets.append("invoice_date=%s"); vals.append(parsed["invoice_date"])
-    if parsed.get("invoice_number"):
-        sets.append("invoice_number=%s"); vals.append(str(parsed["invoice_number"]))
+    up = parsed.get("unit_price")
+    if up is not None and str(up).strip() not in ("null","None",""):
+        try: sets.append("unit_price=%s"); vals.append(float(up))
+        except (ValueError, TypeError): pass
+    qty = parsed.get("quantity")
+    if qty is not None and str(qty).strip() not in ("null","None",""):
+        try: sets.append("quantity=%s"); vals.append(float(qty))
+        except (ValueError, TypeError): pass
+    idate = parsed.get("invoice_date")
+    if idate and str(idate).strip() not in ("null","None",""):
+        sets.append("invoice_date=%s"); vals.append(str(idate))
+    inum = parsed.get("invoice_number")
+    if inum and str(inum).strip() not in ("null","None",""):
+        sets.append("invoice_number=%s"); vals.append(str(inum))
     vals.append(invoice_id)
     cur.execute(f"UPDATE {SCHEMA}.invoices SET {', '.join(sets)} WHERE id=%s", vals)
 
@@ -3448,8 +3536,10 @@ def recognize_invoice(cur, invoice_id: int):
         "status": status,
         "parsed": parsed,
         "supplier_id": supplier_id,
+        "supplier_created": supplier_created,
         "material_id": material_id,
-        "raw_response": raw_content,
+        "material_created": material_created,
+        "debug": debug,
     }, None
 
 
