@@ -172,6 +172,37 @@ export const api = {
       request<any>("gantt_stages", "POST", { action: "delete_stage", stage_id }),
   },
 
+  suppliers: {
+    list: () => request<Supplier[]>("suppliers"),
+    create: (body: object) => request<any>("suppliers", "POST", body),
+    update: (id: number, body: object) => request<any>("suppliers", "POST", { action: "update", id, ...body }),
+    importCsv: (rows: object[]) => request<any>("suppliers", "POST", { action: "import_csv", rows }),
+  },
+
+  materials: {
+    list: () => request<Material[]>("materials"),
+    create: (body: object) => request<any>("materials", "POST", body),
+    update: (id: number, body: object) => request<any>("materials", "POST", { action: "update", id, ...body }),
+  },
+
+  invoices: {
+    list: () => request<Invoice[]>("invoices"),
+    create: (body: object) => request<any>("invoices", "POST", body),
+    update: (id: number, body: object) => request<any>("invoices", "POST", { action: "update", id, ...body }),
+  },
+
+  purchase_requests: {
+    list: () => request<PurchaseRequest[]>("purchase_requests"),
+    create: (body: object) => request<any>("purchase_requests", "POST", body),
+    update: (id: number, body: object) => request<any>("purchase_requests", "POST", { action: "update", id, ...body }),
+  },
+
+  purchase_plan: {
+    list: () => request<PurchasePlan[]>("purchase_plan"),
+    create: (body: object) => request<any>("purchase_plan", "POST", body),
+    delete: (id: number) => request<any>("purchase_plan", "POST", { action: "delete", id }),
+  },
+
   contractors: {
     list: (type?: string) => request<Contractor[]>("contractors", "GET", undefined, type ? { type } : {}),
     create: (body: object) => request<any>("contractors", "POST", body),
@@ -832,4 +863,77 @@ export interface GanttStage {
   deviation_days: number;
   deviation_label: string | null; // Опережение | Отставание | По плану | null
   children?: GanttStage[]; // только для групп (parent_id IS NULL)
+}
+
+// ─── Снабжение: Поставщики, Материалы, Счета, Заявки, План ───────────────────
+
+export type SupplierCategory = 'бетон' | 'пиломатериалы' | 'металл' | 'кровля' | 'инженерия' | 'отделка' | 'прочее';
+export type MaterialUnit = 'шт' | 'м3' | 'т' | 'пог.м' | 'м2' | 'компл';
+
+export const SUPPLIER_CATEGORIES: SupplierCategory[] = ['бетон','пиломатериалы','металл','кровля','инженерия','отделка','прочее'];
+export const MATERIAL_UNITS: MaterialUnit[] = ['шт','м3','т','пог.м','м2','компл'];
+
+export interface Supplier {
+  id: number;
+  name: string;
+  inn: string | null;
+  category: SupplierCategory;
+  contact: string | null;
+  rating: number | null; // 1-5
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface Material {
+  id: number;
+  name: string;
+  unit: MaterialUnit;
+  supplier_category: SupplierCategory | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface Invoice {
+  id: number;
+  supplier_id: number;
+  supplier_name: string;
+  material_id: number;
+  material_name: string;
+  unit: MaterialUnit;
+  invoice_date: string | null;
+  invoice_number: string | null;
+  unit_price: number | null;
+  quantity: number | null;
+  total_amount: number | null;
+  pdf_file_url: string | null;
+  pdf_file_name: string | null;
+  recognition_status: 'новый' | 'обработан' | 'требуется_проверка';
+  recognized_data: string | null;
+  created_at: string;
+}
+
+export interface PurchaseRequest {
+  id: number;
+  created_at: string;
+  staff_id: number;
+  staff_name: string;
+  material_id: number;
+  material_name: string;
+  unit: MaterialUnit;
+  supplier_category: SupplierCategory | null;
+  quantity: number;
+  needed_by: string | null;
+  status: 'новая' | 'в_работе' | 'закрыта';
+  suppliers: { id: number; name: string; category: string; rating: number | null }[];
+}
+
+export interface PurchasePlan {
+  id: number;
+  material_id: number;
+  material_name: string;
+  unit: MaterialUnit;
+  planned_volume: number;
+  period: 'неделя' | 'месяц';
+  period_start: string;
+  created_at: string;
 }

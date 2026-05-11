@@ -104,6 +104,41 @@
       "path": "/?r=gantt_stages&project_id=42",
       "expectedStatus": 200,
       "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET suppliers",
+      "method": "GET",
+      "path": "/?r=suppliers",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET materials",
+      "method": "GET",
+      "path": "/?r=materials",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET invoices",
+      "method": "GET",
+      "path": "/?r=invoices",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET purchase_requests",
+      "method": "GET",
+      "path": "/?r=purchase_requests",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET purchase_plan",
+      "method": "GET",
+      "path": "/?r=purchase_plan",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
     }
   ]
 }

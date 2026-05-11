@@ -3249,6 +3249,338 @@ def add_gantt_substage(cur, project_id: int, body: dict):
     return {"id": new_id, "name": name, "parent_id": int(parent_id), "order_num": order_num}, None
 
 
+# ─── SUPPLIERS ────────────────────────────────────────────────────────────────
+
+SUPPLIER_CATEGORIES = ['бетон','пиломатериалы','металл','кровля','инженерия','отделка','прочее']
+MATERIAL_UNITS      = ['шт','м3','т','пог.м','м2','компл']
+
+def get_suppliers(cur):
+    """Список поставщиков."""
+    cur.execute(f"""
+        SELECT id, name, inn, category, contact, rating, is_active, created_at
+        FROM {SCHEMA}.suppliers WHERE is_active=TRUE ORDER BY name
+    """)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        if r.get('created_at'): r['created_at'] = r['created_at'].isoformat()
+    return rows
+
+def create_supplier(cur, body):
+    """Создать поставщика."""
+    name     = (body.get('name') or '').strip()
+    if not name: raise ValueError("Название обязательно")
+    inn      = (body.get('inn') or '').strip()
+    category = body.get('category', 'прочее')
+    if category not in SUPPLIER_CATEGORIES: category = 'прочее'
+    contact  = (body.get('contact') or '').strip()
+    rating   = body.get('rating')
+    if rating is not None:
+        rating = int(rating)
+        if not (1 <= rating <= 5): rating = None
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.suppliers (name, inn, category, contact, rating)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id, name
+    """, (name, inn or None, category, contact or None, rating))
+    row = cur.fetchone()
+    return {"id": row[0], "name": row[1]}
+
+def update_supplier(cur, sid, body):
+    """Обновить поставщика."""
+    sets, vals = [], []
+    for field in ['name','inn','category','contact','rating','is_active']:
+        if field in body:
+            val = body[field]
+            if field == 'name':
+                val = (val or '').strip()
+                if not val: raise ValueError("Название обязательно")
+            if field == 'category' and val not in SUPPLIER_CATEGORIES:
+                val = 'прочее'
+            if field == 'rating' and val is not None:
+                val = int(val)
+                if not (1 <= val <= 5): val = None
+            sets.append(f"{field}=%s"); vals.append(val)
+    if not sets: return False
+    sets.append("updated_at=now()"); vals.append(int(sid))
+    cur.execute(f"UPDATE {SCHEMA}.suppliers SET {', '.join(sets)} WHERE id=%s", vals)
+    return True
+
+def import_suppliers_csv(cur, rows):
+    """Импорт поставщиков из CSV (список словарей с ключами name,inn,category,contact,rating)."""
+    created = 0
+    for row in rows:
+        name = (row.get('name') or '').strip()
+        if not name: continue
+        cat = row.get('category','прочее')
+        if cat not in SUPPLIER_CATEGORIES: cat = 'прочее'
+        rating = row.get('rating')
+        try: rating = int(rating) if rating else None
+        except: rating = None
+        if rating and not (1 <= rating <= 5): rating = None
+        cur.execute(f"""
+            INSERT INTO {SCHEMA}.suppliers (name, inn, category, contact, rating)
+            VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING RETURNING id
+        """, (name, (row.get('inn') or None), cat, (row.get('contact') or None), rating))
+        if cur.fetchone(): created += 1
+    return {"created": created}
+
+
+# ─── MATERIALS ────────────────────────────────────────────────────────────────
+
+def get_materials(cur):
+    """Список материалов."""
+    cur.execute(f"""
+        SELECT id, name, unit, supplier_category, is_active, created_at
+        FROM {SCHEMA}.materials WHERE is_active=TRUE ORDER BY name
+    """)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        if r.get('created_at'): r['created_at'] = r['created_at'].isoformat()
+    return rows
+
+def create_material(cur, body):
+    """Создать материал."""
+    name = (body.get('name') or '').strip()
+    if not name: raise ValueError("Наименование обязательно")
+    unit = body.get('unit','шт')
+    if unit not in MATERIAL_UNITS: unit = 'шт'
+    cat  = body.get('supplier_category')
+    if cat and cat not in SUPPLIER_CATEGORIES: cat = None
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.materials (name, unit, supplier_category)
+        VALUES (%s,%s,%s) RETURNING id, name, unit
+    """, (name, unit, cat))
+    row = cur.fetchone()
+    return {"id": row[0], "name": row[1], "unit": row[2]}
+
+def update_material(cur, mid, body):
+    """Обновить материал."""
+    sets, vals = [], []
+    for field in ['name','unit','supplier_category','is_active']:
+        if field in body:
+            val = body[field]
+            if field == 'unit' and val not in MATERIAL_UNITS: val = 'шт'
+            if field == 'supplier_category' and val and val not in SUPPLIER_CATEGORIES: val = None
+            sets.append(f"{field}=%s"); vals.append(val)
+    if not sets: return False
+    sets.append("updated_at=now()"); vals.append(int(mid))
+    cur.execute(f"UPDATE {SCHEMA}.materials SET {', '.join(sets)} WHERE id=%s", vals)
+    return True
+
+
+# ─── INVOICES ────────────────────────────────────────────────────────────────
+
+def get_invoices(cur):
+    """Список счетов с поставщиком и материалом."""
+    cur.execute(f"""
+        SELECT i.id, i.supplier_id, s.name as supplier_name,
+               i.material_id, m.name as material_name, m.unit,
+               i.invoice_date, i.invoice_number,
+               i.unit_price, i.quantity, i.total_amount,
+               i.pdf_file_url, i.pdf_file_name,
+               i.recognition_status, i.recognized_data,
+               i.created_at
+        FROM {SCHEMA}.invoices i
+        JOIN {SCHEMA}.suppliers s ON s.id = i.supplier_id
+        JOIN {SCHEMA}.materials m ON m.id = i.material_id
+        ORDER BY i.created_at DESC LIMIT 200
+    """)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        for k in ('invoice_date','created_at'):
+            if r.get(k): r[k] = r[k].isoformat()
+        for k in ('unit_price','quantity','total_amount'):
+            if r.get(k) is not None: r[k] = float(r[k])
+    return rows
+
+def create_invoice(cur, body):
+    """Создать счёт. Если загружен PDF, но нет цены/даты — статус = новый."""
+    supplier_id = body.get('supplier_id')
+    material_id = body.get('material_id')
+    if not supplier_id or not material_id:
+        raise ValueError("Поставщик и материал обязательны")
+    inv_date    = body.get('invoice_date') or None
+    inv_num     = (body.get('invoice_number') or '').strip() or None
+    unit_price  = float(body['unit_price']) if body.get('unit_price') not in (None,'') else None
+    quantity    = float(body['quantity'])   if body.get('quantity')   not in (None,'') else None
+    pdf_url     = (body.get('pdf_file_url') or '').strip() or None
+    pdf_name    = (body.get('pdf_file_name') or '').strip() or None
+    rec_data    = body.get('recognized_data') or None
+    # Автостатус
+    status = body.get('recognition_status','новый')
+    if pdf_url and (not unit_price or not inv_date):
+        status = 'новый'
+    if status not in ('новый','обработан','требуется_проверка'): status = 'новый'
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.invoices
+            (supplier_id, material_id, invoice_date, invoice_number,
+             unit_price, quantity, pdf_file_url, pdf_file_name,
+             recognition_status, recognized_data)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        RETURNING id
+    """, (int(supplier_id), int(material_id), inv_date, inv_num,
+          unit_price, quantity, pdf_url, pdf_name, status, rec_data))
+    return {"id": cur.fetchone()[0]}
+
+def update_invoice(cur, iid, body):
+    """Обновить счёт (статус, распознанные данные, поля)."""
+    sets, vals = [], []
+    fields_map = {
+        'invoice_date':'invoice_date', 'invoice_number':'invoice_number',
+        'unit_price':'unit_price', 'quantity':'quantity',
+        'recognition_status':'recognition_status', 'recognized_data':'recognized_data',
+        'pdf_file_url':'pdf_file_url', 'pdf_file_name':'pdf_file_name',
+    }
+    for key, col in fields_map.items():
+        if key in body:
+            val = body[key]
+            if col == 'recognition_status' and val not in ('новый','обработан','требуется_проверка'):
+                val = 'требуется_проверка'
+            sets.append(f"{col}=%s"); vals.append(val)
+    if not sets: return False
+    sets.append("updated_at=now()"); vals.append(int(iid))
+    cur.execute(f"UPDATE {SCHEMA}.invoices SET {', '.join(sets)} WHERE id=%s", vals)
+    return True
+
+
+# ─── PURCHASE REQUESTS ────────────────────────────────────────────────────────
+
+def get_purchase_requests(cur):
+    """Список заявок на закупку с поставщиками."""
+    cur.execute(f"""
+        SELECT pr.id, pr.created_at, pr.staff_id, s.name as staff_name,
+               pr.material_id, m.name as material_name, m.unit, m.supplier_category,
+               pr.quantity, pr.needed_by, pr.status
+        FROM {SCHEMA}.purchase_requests pr
+        JOIN {SCHEMA}.staff s ON s.id = pr.staff_id
+        JOIN {SCHEMA}.materials m ON m.id = pr.material_id
+        ORDER BY pr.created_at DESC LIMIT 200
+    """)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    for r in rows:
+        for k in ('created_at','needed_by'):
+            if r.get(k): r[k] = r[k].isoformat()
+        if r.get('quantity') is not None: r['quantity'] = float(r['quantity'])
+        # Загружаем связанных поставщиков
+        cur.execute(f"""
+            SELECT sup.id, sup.name, sup.category, sup.rating
+            FROM {SCHEMA}.purchase_request_suppliers prs
+            JOIN {SCHEMA}.suppliers sup ON sup.id = prs.supplier_id
+            WHERE prs.request_id = %s
+        """, (r['id'],))
+        r['suppliers'] = [{"id": rr[0], "name": rr[1], "category": rr[2], "rating": rr[3]}
+                          for rr in cur.fetchall()]
+    return rows
+
+def create_purchase_request(cur, body):
+    """Создать заявку на закупку. Автоподбор поставщиков по категории материала."""
+    staff_id    = body.get('staff_id')
+    material_id = body.get('material_id')
+    if not staff_id or not material_id:
+        raise ValueError("Отправитель и материал обязательны")
+    quantity  = float(body.get('quantity', 1))
+    needed_by = body.get('needed_by') or None
+    status    = body.get('status', 'новая')
+    if status not in ('новая','в_работе','закрыта'): status = 'новая'
+
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.purchase_requests (staff_id, material_id, quantity, needed_by, status)
+        VALUES (%s,%s,%s,%s,%s) RETURNING id
+    """, (int(staff_id), int(material_id), quantity, needed_by, status))
+    req_id = cur.fetchone()[0]
+
+    # Автоподбор поставщиков по категории материала
+    cur.execute(f"SELECT supplier_category FROM {SCHEMA}.materials WHERE id=%s", (int(material_id),))
+    mat_row = cur.fetchone()
+    if mat_row and mat_row[0]:
+        cur.execute(f"""
+            SELECT id FROM {SCHEMA}.suppliers
+            WHERE category=%s AND is_active=TRUE LIMIT 20
+        """, (mat_row[0],))
+        for (sup_id,) in cur.fetchall():
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.purchase_request_suppliers (request_id, supplier_id)
+                VALUES (%s,%s) ON CONFLICT DO NOTHING
+            """, (req_id, sup_id))
+
+    # Добавить явно переданных поставщиков
+    for sid in (body.get('supplier_ids') or []):
+        cur.execute(f"""
+            INSERT INTO {SCHEMA}.purchase_request_suppliers (request_id, supplier_id)
+            VALUES (%s,%s) ON CONFLICT DO NOTHING
+        """, (req_id, int(sid)))
+
+    return {"id": req_id}
+
+def update_purchase_request(cur, rid, body):
+    """Обновить статус или данные заявки на закупку."""
+    sets, vals = [], []
+    if 'status' in body:
+        st = body['status']
+        if st not in ('новая','в_работе','закрыта'): st = 'в_работе'
+        sets.append("status=%s"); vals.append(st)
+    if 'quantity' in body:
+        sets.append("quantity=%s"); vals.append(float(body['quantity']))
+    if 'needed_by' in body:
+        sets.append("needed_by=%s"); vals.append(body['needed_by'] or None)
+    if sets:
+        sets.append("updated_at=now()"); vals.append(int(rid))
+        cur.execute(f"UPDATE {SCHEMA}.purchase_requests SET {', '.join(sets)} WHERE id=%s", vals)
+    # Перезаписать связанных поставщиков если переданы
+    if 'supplier_ids' in body:
+        cur.execute(f"DELETE FROM {SCHEMA}.purchase_request_suppliers WHERE request_id=%s", (int(rid),))
+        for sid in (body['supplier_ids'] or []):
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.purchase_request_suppliers (request_id, supplier_id)
+                VALUES (%s,%s) ON CONFLICT DO NOTHING
+            """, (int(rid), int(sid)))
+    return True
+
+
+# ─── PURCHASE PLAN ───────────────────────────────────────────────────────────
+
+def get_purchase_plan(cur):
+    """Плановые закупки."""
+    cur.execute(f"""
+        SELECT pp.id, pp.material_id, m.name as material_name, m.unit,
+               pp.planned_volume, pp.period, pp.period_start, pp.created_at
+        FROM {SCHEMA}.purchase_plan pp
+        JOIN {SCHEMA}.materials m ON m.id = pp.material_id
+        ORDER BY pp.period_start DESC, m.name
+    """)
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for r in rows:
+        for k in ('period_start','created_at'):
+            if r.get(k): r[k] = r[k].isoformat()
+        if r.get('planned_volume') is not None: r['planned_volume'] = float(r['planned_volume'])
+    return rows
+
+def create_purchase_plan(cur, body):
+    """Добавить позицию в план закупок."""
+    material_id = body.get('material_id')
+    if not material_id: raise ValueError("Материал обязателен")
+    volume = float(body.get('planned_volume', 0))
+    period = body.get('period','месяц')
+    if period not in ('неделя','месяц'): period = 'месяц'
+    period_start = body.get('period_start')
+    if not period_start: raise ValueError("Дата начала периода обязательна")
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.purchase_plan (material_id, planned_volume, period, period_start)
+        VALUES (%s,%s,%s,%s) RETURNING id
+    """, (int(material_id), volume, period, period_start))
+    return {"id": cur.fetchone()[0]}
+
+def delete_purchase_plan(cur, pid):
+    """Удалить позицию плана."""
+    cur.execute(f"DELETE FROM {SCHEMA}.purchase_plan WHERE id=%s", (int(pid),))
+    return {"deleted": pid}
+
+
 # ─── HANDLER ─────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context) -> dict:
@@ -3274,7 +3606,8 @@ def handler(event: dict, context) -> dict:
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
               "stage_durations", "estimate_works", "estimate_materials", "estimate",
               "contractors", "documents", "doc_templates", "contract_docs",
-              "notifications", "payout_requests", "realtors_report", "gantt_stages"}
+              "notifications", "payout_requests", "realtors_report", "gantt_stages",
+              "suppliers", "materials", "invoices", "purchase_requests", "purchase_plan"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -3552,6 +3885,95 @@ def handler(event: dict, context) -> dict:
                             body_text=f"{material} · заявка {mr_code}. Перейдите в раздел Снабжение для обработки.",
                             role="supplier",
                         )
+                    conn.commit()
+                    return ok(result, 201)
+
+        # ── SUPPLIERS ──────────────────────────────────────────────────────────
+        elif resource == "suppliers":
+            if method == "GET":
+                return ok(get_suppliers(cur))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "update":
+                    sid = int(body["id"])
+                    update_supplier(cur, sid, body)
+                    conn.commit()
+                    return ok({"ok": True})
+                elif action == "import_csv":
+                    result = import_suppliers_csv(cur, body.get("rows", []))
+                    conn.commit()
+                    return ok(result)
+                else:
+                    result = create_supplier(cur, body)
+                    conn.commit()
+                    return ok(result, 201)
+
+        # ── MATERIALS ──────────────────────────────────────────────────────────
+        elif resource == "materials":
+            if method == "GET":
+                return ok(get_materials(cur))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "update":
+                    mid = int(body["id"])
+                    update_material(cur, mid, body)
+                    conn.commit()
+                    return ok({"ok": True})
+                else:
+                    try:
+                        result = create_material(cur, body)
+                        conn.commit()
+                        return ok(result, 201)
+                    except Exception as e:
+                        if "unique" in str(e).lower():
+                            return err("Материал с таким наименованием и единицей уже существует")
+                        raise
+
+        # ── INVOICES ───────────────────────────────────────────────────────────
+        elif resource == "invoices":
+            if method == "GET":
+                return ok(get_invoices(cur))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "update":
+                    iid = int(body["id"])
+                    update_invoice(cur, iid, body)
+                    conn.commit()
+                    return ok({"ok": True})
+                else:
+                    result = create_invoice(cur, body)
+                    conn.commit()
+                    return ok(result, 201)
+
+        # ── PURCHASE REQUESTS ──────────────────────────────────────────────────
+        elif resource == "purchase_requests":
+            if method == "GET":
+                return ok(get_purchase_requests(cur))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "update":
+                    rid = int(body["id"])
+                    update_purchase_request(cur, rid, body)
+                    conn.commit()
+                    return ok({"ok": True})
+                else:
+                    result = create_purchase_request(cur, body)
+                    conn.commit()
+                    return ok(result, 201)
+
+        # ── PURCHASE PLAN ──────────────────────────────────────────────────────
+        elif resource == "purchase_plan":
+            if method == "GET":
+                return ok(get_purchase_plan(cur))
+            elif method == "POST":
+                action = body.get("action", "create")
+                if action == "delete":
+                    pid = int(body["id"])
+                    result = delete_purchase_plan(cur, pid)
+                    conn.commit()
+                    return ok(result)
+                else:
+                    result = create_purchase_plan(cur, body)
                     conn.commit()
                     return ok(result, 201)
 
