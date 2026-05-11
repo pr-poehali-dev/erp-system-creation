@@ -3249,6 +3249,209 @@ def add_gantt_substage(cur, project_id: int, body: dict):
     return {"id": new_id, "name": name, "parent_id": int(parent_id), "order_num": order_num}, None
 
 
+# ─── INVOICE AI RECOGNITION ──────────────────────────────────────────────────
+
+CHATGPT_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
+INVOICE_PROMPT  = """Ты — система извлечения данных из финансовых документов.
+Из предоставленного документа (счёт/накладная/инвойс) извлеки следующие данные и верни СТРОГО валидный JSON без markdown-блоков:
+{
+  "supplier_name": "название поставщика или null",
+  "material": "наименование материала/товара или null",
+  "unit": "единица измерения (шт/м3/т/пог.м/м2/компл) или null",
+  "unit_price": число или null,
+  "quantity": число или null,
+  "invoice_date": "дата в формате YYYY-MM-DD или null",
+  "invoice_number": "номер счёта/накладной или null"
+}
+Если поле не найдено — ставь null. Только JSON, без пояснений."""
+
+ALLOWED_EXTS = {'pdf','jpg','jpeg','png','xls','xlsx','docx'}
+
+def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
+    """Загружает файл счёта в S3, обновляет запись в invoices."""
+    ext = file_name.rsplit('.', 1)[-1].lower() if '.' in file_name else ''
+    if ext not in ALLOWED_EXTS:
+        return None, f"Неподдерживаемый формат. Разрешены: {', '.join(sorted(ALLOWED_EXTS))}"
+    key = f"invoices/inv_{invoice_id}_{file_name}"
+    cdn_url, _ = upload_file_to_s3(file_b64, key.split('/')[-1], "invoices")
+    cur.execute(f"""
+        UPDATE {SCHEMA}.invoices
+        SET pdf_file_url=%s, pdf_file_name=%s, updated_at=now()
+        WHERE id=%s
+        RETURNING id
+    """, (cdn_url, file_name, invoice_id))
+    if not cur.fetchone():
+        return None, "Счёт не найден"
+    return {"cdn_url": cdn_url, "file_name": file_name}, None
+
+
+def recognize_invoice(cur, invoice_id: int):
+    """Запускает AI-распознавание счёта через Polza.ai.
+    1. Загружает файл из S3 / по CDN-ссылке
+    2. Формирует мультимодальный или текстовый запрос в зависимости от типа
+    3. Парсит JSON-ответ
+    4. Матчит/создаёт поставщика и материал
+    5. Обновляет запись
+    """
+    import re
+
+    # 1. Получаем данные счёта
+    cur.execute(f"""
+        SELECT id, pdf_file_url, pdf_file_name, recognition_status
+        FROM {SCHEMA}.invoices WHERE id=%s
+    """, (invoice_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Счёт не найден"
+    _, file_url, file_name, _ = row
+    if not file_url:
+        return None, "Файл не загружен. Сначала прикрепите файл счёта."
+
+    ext = (file_name or '').rsplit('.', 1)[-1].lower() if file_name else ''
+
+    # 2. Скачиваем файл и кодируем в base64
+    import requests as req_lib
+    import base64
+    try:
+        resp = req_lib.get(file_url, timeout=30)
+        resp.raise_for_status()
+        file_bytes = resp.content
+        file_b64   = base64.b64encode(file_bytes).decode('utf-8')
+    except Exception as e:
+        return None, f"Не удалось загрузить файл: {e}"
+
+    # 3. Формируем запрос к Polza.ai
+    if ext in ('jpg', 'jpeg', 'png'):
+        # Мультимодальный запрос с изображением
+        mime = "image/jpeg" if ext in ('jpg','jpeg') else "image/png"
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": INVOICE_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
+            ]
+        }]
+        model = "openai/gpt-4o"  # мультимодальная модель
+    elif ext in ('xls', 'xlsx'):
+        # Excel: парсим ячейки через openpyxl и передаём как текст
+        try:
+            import openpyxl, io
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+            lines = []
+            for ws in wb.worksheets[:1]:
+                for row in list(ws.rows)[:50]:  # первые 50 строк
+                    vals = [str(c.value or '').strip() for c in row if c.value is not None]
+                    if vals:
+                        lines.append(" | ".join(vals))
+            text_content = "\n".join(lines[:100])
+        except Exception:
+            text_content = "[Не удалось прочитать Excel. Попробуйте другой формат.]"
+        messages = [{"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое таблицы Excel:\n{text_content}"}]
+        model = "openai/gpt-4o-mini"
+    else:
+        # PDF / DOCX / текст: передаём как есть через base64 или текст
+        # GPT-4o умеет читать PDF-файлы через file uploads, но для простоты
+        # передаём URL напрямую в текстовый контент
+        messages = [{"role": "user", "content": f"{INVOICE_PROMPT}\n\nФайл доступен по URL: {file_url}\nТип файла: {ext.upper()}"}]
+        model = "openai/gpt-4o"
+
+    # 4. Вызов Polza.ai
+    try:
+        polza_resp = req_lib.post(
+            f"{CHATGPT_URL}?action=generate",
+            json={"messages": messages, "model": model, "temperature": 0.1, "max_tokens": 512},
+            timeout=60
+        )
+        polza_resp.raise_for_status()
+        polza_data = polza_resp.json()
+        raw_content = polza_data.get("content", "")
+    except Exception as e:
+        return None, f"Ошибка Polza.ai: {e}"
+
+    # 5. Извлекаем JSON из ответа (убираем markdown-блоки если есть)
+    json_str = raw_content.strip()
+    # Снимаем ```json ... ``` если модель завернула в блок
+    m = re.search(r'```(?:json)?\s*([\s\S]+?)\s*```', json_str)
+    if m:
+        json_str = m.group(1).strip()
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError:
+        # Последняя попытка: ищем первый { ... } в строке
+        m2 = re.search(r'\{[\s\S]+\}', json_str)
+        if m2:
+            try:
+                parsed = json.loads(m2.group(0))
+            except Exception:
+                parsed = {}
+        else:
+            parsed = {}
+
+    # 6. Матчим/создаём поставщика
+    supplier_name = (parsed.get("supplier_name") or "").strip()
+    supplier_id   = None
+    if supplier_name:
+        cur.execute(f"SELECT id FROM {SCHEMA}.suppliers WHERE lower(name)=lower(%s) LIMIT 1", (supplier_name,))
+        sr = cur.fetchone()
+        if sr:
+            supplier_id = sr[0]
+        else:
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.suppliers (name, category)
+                VALUES (%s, 'прочее') RETURNING id
+            """, (supplier_name,))
+            supplier_id = cur.fetchone()[0]
+
+    # 7. Матчим/создаём материал
+    material_name = (parsed.get("material") or "").strip()
+    raw_unit      = (parsed.get("unit") or "шт").strip()
+    material_id   = None
+    if material_name:
+        # Нормализуем единицу
+        valid_units = ['шт','м3','т','пог.м','м2','компл']
+        unit = raw_unit if raw_unit in valid_units else 'шт'
+        cur.execute(f"""
+            SELECT id FROM {SCHEMA}.materials
+            WHERE lower(name)=lower(%s) AND unit=%s LIMIT 1
+        """, (material_name, unit))
+        mr = cur.fetchone()
+        if mr:
+            material_id = mr[0]
+        else:
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.materials (name, unit)
+                VALUES (%s, %s) RETURNING id
+            """, (material_name, unit))
+            material_id = cur.fetchone()[0]
+
+    # 8. Определяем статус распознавания
+    key_fields = [supplier_name, material_name, parsed.get("unit_price"), parsed.get("quantity")]
+    status = "обработан" if all(f is not None and f != "" for f in key_fields) else "требуется_проверка"
+
+    # 9. Обновляем счёт
+    sets, vals = ["recognition_status=%s", "recognized_data=%s", "updated_at=now()"], [status, json.dumps(parsed, ensure_ascii=False)]
+    if supplier_id:  sets.append("supplier_id=%s"); vals.append(supplier_id)
+    if material_id:  sets.append("material_id=%s"); vals.append(material_id)
+    if parsed.get("unit_price") is not None:
+        sets.append("unit_price=%s"); vals.append(float(parsed["unit_price"]))
+    if parsed.get("quantity") is not None:
+        sets.append("quantity=%s"); vals.append(float(parsed["quantity"]))
+    if parsed.get("invoice_date"):
+        sets.append("invoice_date=%s"); vals.append(parsed["invoice_date"])
+    if parsed.get("invoice_number"):
+        sets.append("invoice_number=%s"); vals.append(str(parsed["invoice_number"]))
+    vals.append(invoice_id)
+    cur.execute(f"UPDATE {SCHEMA}.invoices SET {', '.join(sets)} WHERE id=%s", vals)
+
+    return {
+        "status": status,
+        "parsed": parsed,
+        "supplier_id": supplier_id,
+        "material_id": material_id,
+        "raw_response": raw_content,
+    }, None
+
+
 # ─── SUPPLIERS ────────────────────────────────────────────────────────────────
 
 SUPPLIER_CATEGORIES = ['бетон','пиломатериалы','металл','кровля','инженерия','отделка','прочее']
@@ -3940,6 +4143,24 @@ def handler(event: dict, context) -> dict:
                     update_invoice(cur, iid, body)
                     conn.commit()
                     return ok({"ok": True})
+                elif action == "upload_file":
+                    iid      = int(body["invoice_id"])
+                    file_b64 = body.get("file_b64", "")
+                    file_name= (body.get("file_name") or "").strip()
+                    if not file_b64 or not file_name:
+                        return err("file_b64 и file_name обязательны")
+                    result, error = upload_invoice_file(cur, iid, file_b64, file_name)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "recognize":
+                    if user_role not in ("director", "supply_director", "supplier"):
+                        return err("Нет прав для AI-распознавания", 403)
+                    iid = int(body["invoice_id"])
+                    result, error = recognize_invoice(cur, iid)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
                 else:
                     result = create_invoice(cur, body)
                     conn.commit()

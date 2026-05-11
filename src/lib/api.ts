@@ -189,6 +189,10 @@ export const api = {
     list: () => request<Invoice[]>("invoices"),
     create: (body: object) => request<any>("invoices", "POST", body),
     update: (id: number, body: object) => request<any>("invoices", "POST", { action: "update", id, ...body }),
+    uploadFile: (invoice_id: number, file_b64: string, file_name: string) =>
+      request<{ cdn_url: string; file_name: string }>("invoices", "POST", { action: "upload_file", invoice_id, file_b64, file_name }),
+    recognize: (invoice_id: number) =>
+      request<{ status: string; parsed: Record<string, unknown>; raw_response: string }>("invoices", "POST", { action: "recognize", invoice_id }),
   },
 
   purchase_requests: {

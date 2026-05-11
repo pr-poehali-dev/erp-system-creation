@@ -235,7 +235,7 @@ export default function Procurement({ role }: Props) {
 
       {activeTab === "suppliers"         && <SuppliersTab />}
       {activeTab === "materials"         && <MaterialsTab />}
-      {activeTab === "invoices"          && <InvoicesTab />}
+      {activeTab === "invoices"          && <InvoicesTab role={role} />}
       {activeTab === "purchase_requests" && <PurchaseRequestsTab />}
       {activeTab === "plan"              && <PurchasePlanTab />}
 
