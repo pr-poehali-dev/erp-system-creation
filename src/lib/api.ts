@@ -160,6 +160,16 @@ export const api = {
     update: (body: object) => request<any>("individual_requests", "POST", body),
   },
 
+  gantt: {
+    list: (project_id: number) => request<GanttStage[]>("gantt_stages", "GET", undefined, { project_id: String(project_id) }),
+    updateProgress: (stage_id: number, progress_percent: number) =>
+      request<any>("gantt_stages", "POST", { action: "update_progress", stage_id, progress_percent }),
+    addGroup: (project_id: number, body: object) =>
+      request<any>("gantt_stages", "POST", { action: "add_group", project_id, ...body }),
+    addSubstage: (project_id: number, body: object) =>
+      request<any>("gantt_stages", "POST", { action: "add_substage", project_id, ...body }),
+  },
+
   contractors: {
     list: (type?: string) => request<Contractor[]>("contractors", "GET", undefined, type ? { type } : {}),
     create: (body: object) => request<any>("contractors", "POST", body),
@@ -797,4 +807,24 @@ export interface ClientPortalData {
   balance: number;
   paid_pct: number;
   budget: number;
+}
+
+export interface GanttStage {
+  id: number;
+  project_id: number;
+  parent_id: number | null;
+  name: string;
+  order_num: number;
+  stage_num: number | null;
+  planned_start: string | null;
+  planned_end: string | null;
+  actual_start: string | null;
+  actual_end: string | null;
+  status: string; // pending | in_progress | done
+  progress_percent: number; // 0 | 25 | 50 | 75 | 100
+  group_name: string | null;
+  duration_days: number;
+  deviation_days: number;
+  deviation_label: string | null; // Опережение | Отставание | По плану | null
+  children?: GanttStage[]; // только для групп (parent_id IS NULL)
 }

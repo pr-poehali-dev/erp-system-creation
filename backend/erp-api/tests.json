@@ -90,6 +90,20 @@
       "path": "/?r=client_portal&token=INVALID-TOKEN",
       "expectedStatus": 404,
       "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET gantt_stages no project_id",
+      "method": "GET",
+      "path": "/?r=gantt_stages&project_id=0",
+      "expectedStatus": 400,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "GET gantt_stages project 42",
+      "method": "GET",
+      "path": "/?r=gantt_stages&project_id=42",
+      "expectedStatus": 200,
+      "bodyMatcher": "partial"
     }
   ]
 }

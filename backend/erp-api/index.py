@@ -3032,6 +3032,192 @@ def get_reports(cur):
         }
     }
 
+# ─── GANTT ────────────────────────────────────────────────────────────────────
+
+def get_gantt_stages(cur, project_id: int):
+    """Возвращает иерархию Гант-этапов проекта: группы + подэтапы."""
+    cur.execute(f"""
+        SELECT id, project_id, parent_id, name, order_num, stage_num,
+               planned_start, planned_end, actual_start, actual_end,
+               status, progress_percent, group_name, duration_days
+        FROM {SCHEMA}.project_stages
+        WHERE project_id = %s
+        ORDER BY COALESCE(parent_id, id), order_num, id
+    """, (project_id,))
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    today = date.today().isoformat()
+    for r in rows:
+        for k, v in r.items():
+            if hasattr(v, 'isoformat'):
+                r[k] = v.isoformat()
+        # Вычисляем отклонение
+        pe = r.get("planned_end")
+        ae = r.get("actual_end")
+        if ae and pe:
+            delta = (date.fromisoformat(ae) - date.fromisoformat(pe)).days
+            r["deviation_days"] = delta
+            r["deviation_label"] = "Опережение" if delta < 0 else ("Отставание" if delta > 0 else "По плану")
+        elif not ae and pe and pe < today and r.get("status") not in ("done",):
+            delta = (date.today() - date.fromisoformat(pe)).days
+            r["deviation_days"] = delta
+            r["deviation_label"] = "Отставание"
+        else:
+            r["deviation_days"] = 0
+            r["deviation_label"] = None
+
+    # Группируем: сначала родительские (parent_id IS NULL), потом вложенные
+    groups = {r["id"]: {**r, "children": []} for r in rows if r["parent_id"] is None}
+    orphans = []
+    for r in rows:
+        if r["parent_id"] is not None:
+            if r["parent_id"] in groups:
+                groups[r["parent_id"]]["children"].append(r)
+            else:
+                orphans.append(r)
+
+    # Усреднённый прогресс для группы
+    for g in groups.values():
+        children = g["children"]
+        if children:
+            g["progress_percent"] = int(sum(c["progress_percent"] for c in children) / len(children))
+
+    result = list(groups.values()) + orphans
+    result.sort(key=lambda x: x["order_num"])
+    return result
+
+
+def update_stage_progress(cur, stage_id: int, progress: int):
+    """Обновляет прогресс этапа (0-100). При 100% ставит actual_end=сегодня и status=done."""
+    if progress < 0 or progress > 100:
+        return None, "Прогресс должен быть от 0 до 100"
+    progress = (progress // 25) * 25  # Округляем до ближайших 25%
+
+    today = date.today()
+    new_status = "done" if progress == 100 else ("in_progress" if progress > 0 else "pending")
+    actual_end = today if progress == 100 else None
+    actual_start_sql = ""
+
+    cur.execute(f"""
+        SELECT id, status, actual_start, parent_id, project_id
+        FROM {SCHEMA}.project_stages WHERE id=%s
+    """, (stage_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Этап не найден"
+    _, cur_status, cur_actual_start, parent_id, project_id = row
+
+    # Фиксируем actual_start при первом изменении прогресса с 0
+    if progress > 0 and not cur_actual_start:
+        actual_start_sql = ", actual_start=%s"
+
+    if actual_start_sql:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.project_stages
+            SET progress_percent=%s, status=%s, actual_end=%s {actual_start_sql}, updated_at=now()
+            WHERE id=%s
+            RETURNING id, progress_percent, status, actual_start, actual_end
+        """, (progress, new_status, actual_end, today, stage_id))
+    else:
+        cur.execute(f"""
+            UPDATE {SCHEMA}.project_stages
+            SET progress_percent=%s, status=%s, actual_end=%s, updated_at=now()
+            WHERE id=%s
+            RETURNING id, progress_percent, status, actual_start, actual_end
+        """, (progress, new_status, actual_end, stage_id))
+
+    r = cur.fetchone()
+    if not r:
+        return None, "Не удалось обновить этап"
+    result = {"id": r[0], "progress_percent": r[1], "status": r[2],
+              "actual_start": r[3].isoformat() if r[3] else None,
+              "actual_end": r[4].isoformat() if r[4] else None}
+
+    # Если это подэтап — пересчитываем прогресс родительской группы
+    if parent_id:
+        cur.execute(f"""
+            SELECT AVG(progress_percent) FROM {SCHEMA}.project_stages
+            WHERE parent_id=%s
+        """, (parent_id,))
+        avg_row = cur.fetchone()
+        if avg_row and avg_row[0] is not None:
+            parent_progress = int(avg_row[0])
+            parent_status = "done" if parent_progress == 100 else ("in_progress" if parent_progress > 0 else "pending")
+            cur.execute(f"""
+                UPDATE {SCHEMA}.project_stages
+                SET progress_percent=%s, status=%s, updated_at=now()
+                WHERE id=%s
+            """, (parent_progress, parent_status, parent_id))
+
+    return result, None
+
+
+def add_gantt_group(cur, project_id: int, body: dict):
+    """Добавляет группу этапов (parent_id IS NULL) в Гант-план проекта."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        return None, "Укажите название группы"
+
+    planned_start = body.get("planned_start")
+    planned_end   = body.get("planned_end")
+    duration      = int(body.get("duration_days", 7))
+
+    if planned_start and not planned_end:
+        ps = date.fromisoformat(planned_start)
+        planned_end = (ps + timedelta(days=duration)).isoformat()
+
+    cur.execute(f"""
+        SELECT COALESCE(MAX(order_num), 0) + 1 FROM {SCHEMA}.project_stages
+        WHERE project_id=%s AND parent_id IS NULL
+    """, (project_id,))
+    order_num = cur.fetchone()[0]
+
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.project_stages
+            (project_id, name, order_num, duration_days, planned_start, planned_end,
+             status, progress_percent, group_name)
+        VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, %s)
+        RETURNING id
+    """, (project_id, name, order_num, duration, planned_start, planned_end, name))
+    new_id = cur.fetchone()[0]
+    return {"id": new_id, "name": name, "order_num": order_num}, None
+
+
+def add_gantt_substage(cur, project_id: int, body: dict):
+    """Добавляет подэтап к группе (parent_id указан)."""
+    parent_id = body.get("parent_id")
+    if not parent_id:
+        return None, "parent_id обязателен"
+    name = (body.get("name") or "").strip()
+    if not name:
+        return None, "Укажите название"
+
+    planned_start = body.get("planned_start")
+    planned_end   = body.get("planned_end")
+    duration      = int(body.get("duration_days", 5))
+
+    if planned_start and not planned_end:
+        ps = date.fromisoformat(planned_start)
+        planned_end = (ps + timedelta(days=duration)).isoformat()
+
+    cur.execute(f"""
+        SELECT COALESCE(MAX(order_num), 0) + 1 FROM {SCHEMA}.project_stages
+        WHERE project_id=%s AND parent_id=%s
+    """, (project_id, int(parent_id)))
+    order_num = cur.fetchone()[0]
+
+    cur.execute(f"""
+        INSERT INTO {SCHEMA}.project_stages
+            (project_id, parent_id, name, order_num, duration_days, planned_start, planned_end,
+             status, progress_percent)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', 0)
+        RETURNING id
+    """, (project_id, int(parent_id), name, order_num, duration, planned_start, planned_end))
+    new_id = cur.fetchone()[0]
+    return {"id": new_id, "name": name, "parent_id": int(parent_id), "order_num": order_num}, None
+
+
 # ─── HANDLER ─────────────────────────────────────────────────────────────────
 
 def handler(event: dict, context) -> dict:
@@ -3057,7 +3243,7 @@ def handler(event: dict, context) -> dict:
               "employees", "reports", "slots", "serial_projects", "configurations", "individual_requests",
               "stage_durations", "estimate_works", "estimate_materials", "estimate",
               "contractors", "documents", "doc_templates", "contract_docs",
-              "notifications", "payout_requests", "realtors_report"}
+              "notifications", "payout_requests", "realtors_report", "gantt_stages"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -3246,6 +3432,36 @@ def handler(event: dict, context) -> dict:
                         return err("Недостаточно прав для завершения проекта.", 403)
                     pid = int(body["project_id"])
                     result, error = complete_project(cur, pid)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+
+        # ── GANTT STAGES ───────────────────────────────────────────────────────
+        elif resource == "gantt_stages":
+            if method == "GET":
+                project_id = int(qs.get("project_id", 0))
+                if not project_id:
+                    return err("project_id обязателен")
+                data = get_gantt_stages(cur, project_id)
+                return ok(data)
+            elif method == "POST":
+                action = body.get("action", "update_progress")
+                if action == "update_progress":
+                    stage_id = int(body["stage_id"])
+                    progress = int(body["progress_percent"])
+                    result, error = update_stage_progress(cur, stage_id, progress)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "add_group":
+                    project_id = int(body["project_id"])
+                    result, error = add_gantt_group(cur, project_id, body)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "add_substage":
+                    project_id = int(body["project_id"])
+                    result, error = add_gantt_substage(cur, project_id, body)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
