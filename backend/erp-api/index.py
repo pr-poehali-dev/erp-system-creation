@@ -3272,8 +3272,9 @@ def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
     ext = file_name.rsplit('.', 1)[-1].lower() if '.' in file_name else ''
     if ext not in ALLOWED_EXTS:
         return None, f"Неподдерживаемый формат. Разрешены: {', '.join(sorted(ALLOWED_EXTS))}"
-    key = f"invoices/inv_{invoice_id}_{file_name}"
-    cdn_url, _ = upload_file_to_s3(file_b64, key.split('/')[-1], "invoices")
+    # Уникальное имя файла: inv_{id}_{originalname}, папка invoices/
+    safe_name = f"inv_{invoice_id}_{file_name}"
+    cdn_url, _ = upload_file_to_s3(file_b64, safe_name, "invoices")
     cur.execute(f"""
         UPDATE {SCHEMA}.invoices
         SET pdf_file_url=%s, pdf_file_name=%s, updated_at=now()
@@ -3575,18 +3576,21 @@ def update_material(cur, mid, body):
 # ─── INVOICES ────────────────────────────────────────────────────────────────
 
 def get_invoices(cur):
-    """Список счетов с поставщиком и материалом."""
+    """Список счетов с поставщиком и материалом. LEFT JOIN — счета без поставщика/материала тоже видны."""
     cur.execute(f"""
-        SELECT i.id, i.supplier_id, s.name as supplier_name,
-               i.material_id, m.name as material_name, m.unit,
+        SELECT i.id, i.supplier_id,
+               CASE WHEN s.name = '(не указан)' OR s.name IS NULL THEN NULL ELSE s.name END as supplier_name,
+               i.material_id,
+               CASE WHEN m.name = '(не указан)' OR m.name IS NULL THEN NULL ELSE m.name END as material_name,
+               COALESCE(m.unit, 'шт') as unit,
                i.invoice_date, i.invoice_number,
                i.unit_price, i.quantity, i.total_amount,
                i.pdf_file_url, i.pdf_file_name,
                i.recognition_status, i.recognized_data,
                i.created_at
         FROM {SCHEMA}.invoices i
-        JOIN {SCHEMA}.suppliers s ON s.id = i.supplier_id
-        JOIN {SCHEMA}.materials m ON m.id = i.material_id
+        LEFT JOIN {SCHEMA}.suppliers s ON s.id = i.supplier_id
+        LEFT JOIN {SCHEMA}.materials m ON m.id = i.material_id
         ORDER BY i.created_at DESC LIMIT 200
     """)
     cols = [d[0] for d in cur.description]
@@ -3599,11 +3603,10 @@ def get_invoices(cur):
     return rows
 
 def create_invoice(cur, body):
-    """Создать счёт. Если загружен PDF, но нет цены/даты — статус = новый."""
-    supplier_id = body.get('supplier_id')
-    material_id = body.get('material_id')
-    if not supplier_id or not material_id:
-        raise ValueError("Поставщик и материал обязательны")
+    """Создать счёт. Поставщик и материал необязательны (могут быть заполнены после AI-распознавания).
+    Если загружен PDF, но нет цены/даты — статус = новый."""
+    supplier_id = body.get('supplier_id') or None
+    material_id = body.get('material_id') or None
     inv_date    = body.get('invoice_date') or None
     inv_num     = (body.get('invoice_number') or '').strip() or None
     unit_price  = float(body['unit_price']) if body.get('unit_price') not in (None,'') else None
@@ -3616,6 +3619,9 @@ def create_invoice(cur, body):
     if pdf_url and (not unit_price or not inv_date):
         status = 'новый'
     if status not in ('новый','обработан','требуется_проверка'): status = 'новый'
+    # supplier_id/material_id = 0 (заглушка «не указан») если не выбраны
+    sid = int(supplier_id) if supplier_id else 0
+    mid = int(material_id) if material_id else 0
     cur.execute(f"""
         INSERT INTO {SCHEMA}.invoices
             (supplier_id, material_id, invoice_date, invoice_number,
@@ -3623,8 +3629,7 @@ def create_invoice(cur, body):
              recognition_status, recognized_data)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         RETURNING id
-    """, (int(supplier_id), int(material_id), inv_date, inv_num,
-          unit_price, quantity, pdf_url, pdf_name, status, rec_data))
+    """, (sid, mid, inv_date, inv_num, unit_price, quantity, pdf_url, pdf_name, status, rec_data))
     return {"id": cur.fetchone()[0]}
 
 def update_invoice(cur, iid, body):
