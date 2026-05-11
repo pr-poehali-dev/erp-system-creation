@@ -6,6 +6,7 @@ interface Props {
   stages: GanttStage[];
   canEdit: boolean;
   onUpdateProgress: (stageId: number, progress: number) => Promise<void>;
+  onAddSubstage?: (parentId: number) => void;
 }
 
 const PROGRESS_STEPS = [0, 25, 50, 75, 100];
@@ -133,7 +134,7 @@ function StageRow({
   );
 }
 
-export default function GanttTable({ stages, canEdit, onUpdateProgress }: Props) {
+export default function GanttTable({ stages, canEdit, onUpdateProgress, onAddSubstage }: Props) {
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
 
   const toggleGroup = (id: number) => {
@@ -235,6 +236,16 @@ export default function GanttTable({ stages, canEdit, onUpdateProgress }: Props)
                 <td className="px-3 py-2.5">
                   {canEdit && !hasChildren && (
                     <ProgressButtons stage={stage} onUpdateProgress={onUpdateProgress} />
+                  )}
+                  {canEdit && isGroup && onAddSubstage && (
+                    <button
+                      onClick={() => onAddSubstage(stage.id)}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100 transition-colors whitespace-nowrap"
+                      title="Добавить подэтап к этой группе"
+                    >
+                      <Icon name="Plus" size={11} />
+                      подэтап
+                    </button>
                   )}
                 </td>
               </tr>,
