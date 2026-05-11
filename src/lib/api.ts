@@ -168,6 +168,8 @@ export const api = {
       request<any>("gantt_stages", "POST", { action: "add_group", project_id, ...body }),
     addSubstage: (project_id: number, body: object) =>
       request<any>("gantt_stages", "POST", { action: "add_substage", project_id, ...body }),
+    deleteStage: (stage_id: number) =>
+      request<any>("gantt_stages", "POST", { action: "delete_stage", stage_id }),
   },
 
   contractors: {
@@ -381,6 +383,8 @@ export interface Project {
   slot_id: number | null;
   slot_status: string | null; // free | booked | busy
   slot_start_date: string | null;
+  // Клиентский токен для ЛК
+  client_token: string | null;
 }
 
 export interface MaterialRequest {

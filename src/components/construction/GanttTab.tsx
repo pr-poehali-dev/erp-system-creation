@@ -258,6 +258,17 @@ export default function GanttTab({ project, role }: Props) {
     load();
   };
 
+  const handleDeleteStage = async (stage: GanttStage) => {
+    const what = stage.parent_id === null ? "группу" : "подэтап";
+    const withChildren = stage.parent_id === null && stage.children && stage.children.length > 0
+      ? ` (и все ${stage.children.length} подэтапов)`
+      : "";
+    if (!confirm(`Удалить ${what} «${stage.name}»${withChildren}?`)) return;
+    await api.gantt.deleteStage(stage.id);
+    setSuccessMsg(`«${stage.name}» удалён`);
+    load();
+  };
+
   // Только группы (parent_id === null) — для селекта подэтапа
   const groups = stages.filter(s => s.parent_id === null);
 
@@ -407,6 +418,7 @@ export default function GanttTab({ project, role }: Props) {
                 setShowAddSubstage(true);
                 setShowAddGroup(false);
               } : undefined}
+              onDeleteStage={canEdit ? handleDeleteStage : undefined}
             />
           ) : (
             <div className="p-4">

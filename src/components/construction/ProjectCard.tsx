@@ -59,6 +59,16 @@ export default function ProjectCard({
 }: Props) {
   const status = getProjectStatus(p);
   const [cardTab, setCardTab] = useState<CardTab>("main");
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyClientLink = () => {
+    if (!p.client_token) return;
+    const url = `${window.location.origin}/client/${p.client_token}`;
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    });
+  };
 
   const showGanttTab = ["construction_director", "director", "foreman"].includes(role);
 
@@ -321,6 +331,21 @@ export default function ProjectCard({
                 {p.deal_budget && <div><span className="text-hint">Сумма:</span><span className="font-medium text-emerald-700 ml-1">₽ {p.deal_budget.toLocaleString("ru")}</span></div>}
                 {p.signed_date && <div><span className="text-hint">Подписан:</span><span className="font-medium ml-1">{new Date(p.signed_date).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}</span></div>}
               </div>
+
+              {/* Кнопка «Ссылка на ЛК клиента» — всегда активна если есть токен */}
+              {p.client_token && (
+                <button
+                  onClick={handleCopyClientLink}
+                  className={`mt-3 w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border text-[12px] font-medium transition-colors ${
+                    copied
+                      ? "bg-emerald-50 border-emerald-300 text-emerald-700"
+                      : "bg-white border-blue-300 text-blue-700 hover:bg-blue-50"
+                  }`}
+                >
+                  <Icon name={copied ? "Check" : "Link"} size={13} />
+                  {copied ? "Ссылка скопирована!" : "Ссылка на ЛК клиента"}
+                </button>
+              )}
             </div>
           )}
 

@@ -7,6 +7,7 @@ interface Props {
   canEdit: boolean;
   onUpdateProgress: (stageId: number, progress: number) => Promise<void>;
   onAddSubstage?: (parentId: number) => void;
+  onDeleteStage?: (stage: GanttStage) => Promise<void>;
 }
 
 const PROGRESS_STEPS = [0, 25, 50, 75, 100];
@@ -41,11 +42,13 @@ function StageRow({
   stage,
   canEdit,
   onUpdateProgress,
+  onDeleteStage,
   isChild = false,
 }: {
   stage: GanttStage;
   canEdit: boolean;
   onUpdateProgress: (stageId: number, progress: number) => Promise<void>;
+  onDeleteStage?: (stage: GanttStage) => Promise<void>;
   isChild?: boolean;
 }) {
   const [saving, setSaving] = useState(false);
@@ -127,6 +130,16 @@ function StageRow({
             >
               {saving ? <Icon name="Loader" size={12} className="animate-spin" /> : <Icon name="Plus" size={12} />}
             </button>
+            {onDeleteStage && stage.status !== "done" && (
+              <button
+                onClick={() => onDeleteStage(stage)}
+                disabled={saving}
+                className="w-7 h-7 rounded flex items-center justify-center text-muted-foreground hover:bg-red-50 hover:text-red-500 transition-colors disabled:opacity-40"
+                title="Удалить этап"
+              >
+                <Icon name="Trash2" size={12} />
+              </button>
+            )}
           </div>
         )}
       </td>
@@ -134,7 +147,7 @@ function StageRow({
   );
 }
 
-export default function GanttTable({ stages, canEdit, onUpdateProgress, onAddSubstage }: Props) {
+export default function GanttTable({ stages, canEdit, onUpdateProgress, onAddSubstage, onDeleteStage }: Props) {
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
 
   const toggleGroup = (id: number) => {
@@ -234,19 +247,30 @@ export default function GanttTable({ stages, canEdit, onUpdateProgress, onAddSub
                 </td>
 
                 <td className="px-3 py-2.5">
-                  {canEdit && !hasChildren && (
-                    <ProgressButtons stage={stage} onUpdateProgress={onUpdateProgress} />
-                  )}
-                  {canEdit && isGroup && onAddSubstage && (
-                    <button
-                      onClick={() => onAddSubstage(stage.id)}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100 transition-colors whitespace-nowrap"
-                      title="Добавить подэтап к этой группе"
-                    >
-                      <Icon name="Plus" size={11} />
-                      подэтап
-                    </button>
-                  )}
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {canEdit && !hasChildren && (
+                      <ProgressButtons stage={stage} onUpdateProgress={onUpdateProgress} />
+                    )}
+                    {canEdit && isGroup && onAddSubstage && (
+                      <button
+                        onClick={() => onAddSubstage(stage.id)}
+                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-amber-700 bg-amber-50 border border-amber-200 hover:bg-amber-100 transition-colors whitespace-nowrap"
+                        title="Добавить подэтап"
+                      >
+                        <Icon name="Plus" size={11} />
+                        подэтап
+                      </button>
+                    )}
+                    {canEdit && onDeleteStage && stage.status !== "done" && (
+                      <button
+                        onClick={() => onDeleteStage(stage)}
+                        className="w-7 h-7 rounded flex items-center justify-center text-muted-foreground hover:bg-red-50 hover:text-red-500 transition-colors"
+                        title="Удалить"
+                      >
+                        <Icon name="Trash2" size={12} />
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>,
 
@@ -258,6 +282,7 @@ export default function GanttTable({ stages, canEdit, onUpdateProgress, onAddSub
                       stage={child}
                       canEdit={canEdit}
                       onUpdateProgress={onUpdateProgress}
+                      onDeleteStage={onDeleteStage}
                       isChild
                     />
                   ))

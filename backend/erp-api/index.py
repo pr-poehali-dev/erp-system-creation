@@ -1131,7 +1131,7 @@ def get_projects(cur, archived=False):
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id) as total_stages,
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id AND ps.status='done') as done_stages,
                d.code as deal_code, d.budget as deal_budget, d.signed_date, d.contract_status,
-               d.stage as deal_stage,
+               d.stage as deal_stage, d.client_token,
                sm.name as manager_name,
                sp.name as serial_project_name,
                cfg.name as configuration_name,
@@ -3184,6 +3184,37 @@ def add_gantt_group(cur, project_id: int, body: dict):
     return {"id": new_id, "name": name, "order_num": order_num}, None
 
 
+def delete_gantt_stage(cur, stage_id: int):
+    """Удаляет этап или группу из Гант-плана.
+    Если это группа (parent_id IS NULL) — удаляет также все её подэтапы.
+    Не позволяет удалять этапы в статусе done.
+    """
+    cur.execute(f"""
+        SELECT id, parent_id, status, name FROM {SCHEMA}.project_stages WHERE id=%s
+    """, (stage_id,))
+    row = cur.fetchone()
+    if not row:
+        return None, "Этап не найден"
+    sid, parent_id, status, name = row
+    if status == "done":
+        return None, f"Нельзя удалить завершённый этап «{name}»"
+
+    # Если это группа — удаляем подэтапы
+    if parent_id is None:
+        cur.execute(f"""
+            SELECT COUNT(*) FROM {SCHEMA}.project_stages
+            WHERE parent_id=%s AND status='done'
+        """, (stage_id,))
+        done_children = int(cur.fetchone()[0])
+        if done_children > 0:
+            return None, f"Нельзя удалить группу «{name}»: в ней есть завершённые подэтапы"
+        cur.execute(f"UPDATE {SCHEMA}.project_stages SET parent_id=NULL WHERE parent_id=%s", (stage_id,))
+        cur.execute(f"DELETE FROM {SCHEMA}.project_stages WHERE parent_id=%s", (stage_id,))
+
+    cur.execute(f"DELETE FROM {SCHEMA}.project_stages WHERE id=%s", (stage_id,))
+    return {"deleted": stage_id, "name": name}, None
+
+
 def add_gantt_substage(cur, project_id: int, body: dict):
     """Добавляет подэтап к группе (parent_id указан)."""
     parent_id = body.get("parent_id")
@@ -3462,6 +3493,12 @@ def handler(event: dict, context) -> dict:
                 elif action == "add_substage":
                     project_id = int(body["project_id"])
                     result, error = add_gantt_substage(cur, project_id, body)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "delete_stage":
+                    stage_id = int(body["stage_id"])
+                    result, error = delete_gantt_stage(cur, stage_id)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
