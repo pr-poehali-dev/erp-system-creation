@@ -371,6 +371,7 @@ export interface Project {
   days_left: number;
   stages: ProjectStage[];
   // Данные из сделки
+  deal_id: number | null;
   deal_code: string | null;
   deal_budget: number | null;
   deal_stage: string | null;

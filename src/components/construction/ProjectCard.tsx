@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
-import { Project, ProjectStage } from "@/lib/api";
+import { api, Project, ProjectStage } from "@/lib/api";
 import ProjectAddressField from "./ProjectAddressField";
 import GanttTab from "./GanttTab";
 
@@ -60,14 +60,45 @@ export default function ProjectCard({
   const status = getProjectStatus(p);
   const [cardTab, setCardTab] = useState<CardTab>("main");
   const [copied, setCopied] = useState(false);
+  const [clientToken, setClientToken] = useState<string | null>(p.client_token || null);
+  const [tokenLoading, setTokenLoading] = useState(false);
 
-  const handleCopyClientLink = () => {
-    if (!p.client_token) return;
-    const url = `${window.location.origin}/client/${p.client_token}`;
-    navigator.clipboard.writeText(url).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    });
+  const copyToClipboard = (text: string) => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+      } else {
+        fallbackCopy(text);
+      }
+    } catch { fallbackCopy(text); }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  };
+
+  const fallbackCopy = (text: string) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  };
+
+  const handleCopyClientLink = async () => {
+    if (clientToken) {
+      copyToClipboard(`${window.location.origin}/client/${clientToken}`);
+      return;
+    }
+    if (!p.deal_id) return;
+    setTokenLoading(true);
+    try {
+      const res = await api.client_portal.getToken(p.deal_id);
+      setClientToken(res.client_token);
+      copyToClipboard(`${window.location.origin}/client/${res.client_token}`);
+    } finally {
+      setTokenLoading(false);
+    }
   };
 
   const showGanttTab = ["construction_director", "director", "foreman"].includes(role);
@@ -332,17 +363,21 @@ export default function ProjectCard({
                 {p.signed_date && <div><span className="text-hint">Подписан:</span><span className="font-medium ml-1">{new Date(p.signed_date).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}</span></div>}
               </div>
 
-              {/* Кнопка «Ссылка на ЛК клиента» — всегда активна если есть токен */}
-              {p.client_token && (
+              {/* Кнопка «Ссылка на ЛК клиента» — для всех проектов со сделкой */}
+              {p.deal_id && (
                 <button
                   onClick={handleCopyClientLink}
+                  disabled={tokenLoading}
                   className={`mt-3 w-full flex items-center justify-center gap-1.5 py-2 rounded-lg border text-[12px] font-medium transition-colors ${
                     copied
                       ? "bg-emerald-50 border-emerald-300 text-emerald-700"
-                      : "bg-white border-blue-300 text-blue-700 hover:bg-blue-50"
+                      : "bg-white border-blue-300 text-blue-700 hover:bg-blue-50 disabled:opacity-60"
                   }`}
                 >
-                  <Icon name={copied ? "Check" : "Link"} size={13} />
+                  {tokenLoading
+                    ? <Icon name="Loader" size={13} className="animate-spin" />
+                    : <Icon name={copied ? "Check" : "Link"} size={13} />
+                  }
                   {copied ? "Ссылка скопирована!" : "Ссылка на ЛК клиента"}
                 </button>
               )}

@@ -1130,7 +1130,7 @@ def get_projects(cur, archived=False):
                p.address,
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id) as total_stages,
                (SELECT COUNT(*) FROM {SCHEMA}.project_stages ps WHERE ps.project_id=p.id AND ps.status='done') as done_stages,
-               d.code as deal_code, d.budget as deal_budget, d.signed_date, d.contract_status,
+               d.id as deal_id, d.code as deal_code, d.budget as deal_budget, d.signed_date, d.contract_status,
                d.stage as deal_stage, d.client_token,
                sm.name as manager_name,
                sp.name as serial_project_name,
