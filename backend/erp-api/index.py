@@ -4282,17 +4282,28 @@ def recognize_invoice(cur, invoice_id: int):
 
 
 def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, invoice_number, file_url: str, file_name: str):
-    """Создаёт отдельные записи счетов для каждой выбранной позиции."""
+    """Создаёт отдельные записи счетов для каждой выбранной позиции.
+    Все поля необязательны — supplier_name/supplier_id могут отсутствовать."""
     created_ids = []
     for item in items:
+        if not isinstance(item, dict):
+            continue
+        # Используем .get() для всех полей — ничего не обязательно
         s_id = item.get("supplier_id") or 0
         m_id = item.get("material_id") or 0
-        up   = item.get("unit_price")
-        qty  = item.get("quantity")
+        up   = _safe_float(item.get("unit_price"))
+        qty  = _safe_float(item.get("quantity"))
 
-        # supplier_name необязателен — статус определяется только по material, цене и кол-ву
-        key_ok = not any(_is_null(f) for f in [item.get("material"), up, qty])
+        # Статус: обработан только если есть material + цена + кол-во
+        material = item.get("material") or item.get("material_name") or None
+        key_ok   = bool(material and up is not None and qty is not None)
         item_status = "обработан" if key_ok else "требуется_проверка"
+
+        # Безопасная сериализация для recognized_data
+        try:
+            rec_data = json.dumps(item, ensure_ascii=False)
+        except Exception:
+            rec_data = None
 
         cur.execute(f"""
             INSERT INTO {SCHEMA}.invoices
@@ -4305,12 +4316,12 @@ def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, 
             int(s_id), int(m_id),
             invoice_date or None,
             invoice_number or None,
-            float(up)  if up  is not None else None,
-            float(qty) if qty is not None else None,
+            up,
+            qty,
             file_url  or None,
             file_name or None,
             item_status,
-            json.dumps(item, ensure_ascii=False),
+            rec_data,
         ))
         created_ids.append(cur.fetchone()[0])
     return created_ids
@@ -5668,8 +5679,18 @@ def handler(event: dict, context) -> dict:
         return err(str(ve), 400)
     except KeyError as ke:
         conn.rollback()
-        logger.warning(f"Missing required field: {ke}")
-        return err(f"Не указано обязательное поле: {ke}", 400)
+        key = str(ke).strip("'\"")
+        logger.warning(f"Missing required field: {key}")
+        # Понятные сообщения вместо технических названий ключей
+        _field_labels = {
+            "invoice_id":    "ID счёта",
+            "invoice_date":  "дата счёта",
+            "unit_price":    "цена за единицу",
+            "quantity":      "количество",
+            "material":      "наименование материала",
+        }
+        label = _field_labels.get(key, key)
+        return err(f"Не указано обязательное поле: {label}", 400)
     except Exception as e:
         conn.rollback()
         # Логируем полный traceback для диагностики
