@@ -196,19 +196,19 @@ export interface UploadedFile {
   name: string;
 }
 
-// ── Prямое распознавание файла через Polza.ai (без Cloud Function) ────────────
-// Используется для Excel и PDF с QR — обходит таймаут бэкенда.
+// ── Прямое распознавание файла через Polza.ai (без Cloud Function) ──────────
+// Excel → SheetJS → Canvas PNG → Gemini. PDF → data:application/pdf → Gemini.
 const POLZA_URL = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf";
 
-const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечения данных из счетов.
-Я передаю содержимое файла счёта. Извлеки ВСЕ позиции без исключений.
+const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечения данных из счетов. Перед тобой изображение таблицы счёта.
+Извлеки ВСЕ позиции без исключений.
 
 Для каждой позиции верни:
-- material: полное название (не сокращай)
+- material: полное название (не сокращай, включая размеры и артикулы)
 - quantity: число (может быть дробным)
 - unit: единица измерения (м3, шт, м, пог.м, м2 и т.д.)
 - unit_price: цена за единицу
-- amount: сумма строки (unit_price × quantity)
+- amount: сумма строки
 
 Поставщика, дату и номер счёта ищи в начале документа (шапке).
 
@@ -221,87 +221,208 @@ const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечени
 Верни строго JSON без markdown-обёрток:
 {"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
 
+// ── Парсер JSON-ответа ────────────────────────────────────────────────────────
 function _parseAiJson(raw: string): { ai_obj: Record<string, unknown>; items: unknown[] } {
   const s = raw.trim().replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
   try {
     const p = JSON.parse(s);
-    if (typeof p === "object" && p && "items" in p) return { ai_obj: p as Record<string, unknown>, items: (p as Record<string, unknown[]>).items as unknown[] };
+    if (typeof p === "object" && p && "items" in p)
+      return { ai_obj: p as Record<string, unknown>, items: (p as Record<string, unknown[]>).items as unknown[] };
   } catch { /* fallback */ }
-  const m = [...s.matchAll(/\{[\s\S]+\}/g)].sort((a, b) => b[0].length - a[0].length);
-  for (const match of m) {
+  const matches = [...s.matchAll(/\{[\s\S]+\}/g)].sort((a, b) => b[0].length - a[0].length);
+  for (const m of matches) {
     try {
-      const p = JSON.parse(match[0]);
-      if (typeof p === "object" && p && "items" in p) return { ai_obj: p as Record<string, unknown>, items: (p as Record<string, unknown[]>).items as unknown[] };
+      const p = JSON.parse(m[0]);
+      if (typeof p === "object" && p && "items" in p)
+        return { ai_obj: p as Record<string, unknown>, items: (p as Record<string, unknown[]>).items as unknown[] };
     } catch { /* continue */ }
   }
   return { ai_obj: {}, items: [] };
 }
 
+// ── Excel → PNG через SheetJS + Canvas (без сторонних зависимостей) ──────────
+async function _excelToPngB64(file_b64: string): Promise<string> {
+  const XLSX = await import("xlsx");
+
+  // Декодируем base64 → Uint8Array
+  const binary = atob(file_b64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const wb = XLSX.read(bytes, { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows: string[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][];
+
+  // Убираем полностью пустые строки
+  const data = rows.filter(r => r.some(c => String(c).trim() !== ""));
+  if (!data.length) throw new Error("Excel пустой");
+
+  const ncols = Math.max(...data.map(r => r.length), 1);
+  const filled = data.map(r => [...r, ...Array(ncols - r.length).fill("")]);
+
+  // Параметры рендера
+  const FONT  = 13;
+  const PAD   = 6;
+  const ROW_H = FONT + PAD * 2;
+
+  // Ширины колонок по содержимому (символ ≈ 7.5px, минимум 40, максимум 300)
+  const colW = Array.from({ length: ncols }, (_, ci) => {
+    const max = Math.max(...filled.map(r => String(r[ci] ?? "").length), 0);
+    return Math.min(300, Math.max(ci === 0 ? 40 : ci === 1 ? 200 : 90, max * 7.5 + PAD * 2));
+  });
+
+  const W = colW.reduce((a, b) => a + b, 0) + 2;
+  const H = filled.length * ROW_H + 2;
+
+  const canvas = document.createElement("canvas");
+  canvas.width  = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d")!;
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, W, H);
+  ctx.font = `${FONT}px monospace`;
+  ctx.textBaseline = "middle";
+
+  filled.forEach((row, ri) => {
+    const y = ri * ROW_H;
+    ctx.fillStyle = ri % 2 === 0 ? "#f0f4f8" : "#ffffff";
+    ctx.fillRect(0, y, W, ROW_H);
+
+    let x = 1;
+    row.forEach((cell, ci) => {
+      const cw = colW[ci];
+      const maxChars = Math.floor((cw - PAD * 2) / 7.5);
+      const text = String(cell).slice(0, maxChars + 1).length > maxChars
+        ? String(cell).slice(0, maxChars - 1) + "…"
+        : String(cell);
+
+      ctx.fillStyle = "#111827";
+      ctx.fillText(text, x + PAD, y + ROW_H / 2);
+
+      ctx.fillStyle = "#d1d5db";
+      ctx.fillRect(x + cw - 1, y, 1, ROW_H);   // вертикальный разделитель
+      x += cw;
+    });
+
+    ctx.fillStyle = "#d1d5db";
+    ctx.fillRect(0, y + ROW_H - 1, W, 1);   // горизонтальный разделитель
+  });
+
+  // Масштабируем до максимума 2400px (Gemini хорошо читает крупные изображения)
+  const MAX = 2400;
+  if (W > MAX || H > MAX) {
+    const scale = MAX / Math.max(W, H);
+    const c2 = document.createElement("canvas");
+    c2.width  = Math.round(W * scale);
+    c2.height = Math.round(H * scale);
+    c2.getContext("2d")!.drawImage(canvas, 0, 0, c2.width, c2.height);
+    return c2.toDataURL("image/png").split(",")[1];
+  }
+  return canvas.toDataURL("image/png").split(",")[1];
+}
+
+// ── Отправить один запрос в Polza.ai ─────────────────────────────────────────
+async function _callPolza(imagePngB64: string, prompt: string): Promise<string> {
+  const resp = await fetch(`${POLZA_URL}?action=generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "google/gemini-3.1-flash-lite",
+      temperature: 0,
+      max_tokens: 8192,
+      messages: [
+        {
+          role: "system",
+          content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown-обёрток.",
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text",      text: prompt },
+            { type: "image_url", image_url: { url: `data:image/png;base64,${imagePngB64}` } },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(`Polza ${resp.status}: ${t.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return data.content ?? "";
+}
+
 /**
- * Распознаёт файл напрямую через Polza.ai из браузера.
- * file_b64 — base64 содержимого, file_name — имя (для определения типа).
- * onProgress — колбэк для обновления текста статуса.
+ * Распознаёт Excel или PDF напрямую через Polza.ai из браузера (без Cloud Function).
+ * Excel конвертируется в PNG через SheetJS + Canvas.
+ * PDF передаётся как data:application/pdf.
  */
 export async function recognizeViaPolza(
   file_b64: string,
   file_name: string,
   onProgress?: (msg: string) => void,
 ): Promise<{ success: boolean; ai_obj: Record<string, unknown>; items: unknown[]; raw: string; error?: string }> {
-  const ext = file_name.split(".").pop()?.toLowerCase() ?? "";
+  const ext     = file_name.split(".").pop()?.toLowerCase() ?? "";
+  const isExcel = ["xls", "xlsx"].includes(ext);
 
   onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
 
-  // Gemini Flash поддерживает PDF и Excel через data URI (image_url)
-  const mimeMap: Record<string, string> = {
-    pdf:  "application/pdf",
-    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    xls:  "application/vnd.ms-excel",
-    jpg:  "image/jpeg",
-    jpeg: "image/jpeg",
-    png:  "image/png",
-  };
-  const mime   = mimeMap[ext] ?? "application/octet-stream";
-  const dataUrl = `data:${mime};base64,${file_b64}`;
-
-  const messages = [
-    {
-      role: "system" as const,
-      content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown-обёрток.",
-    },
-    {
-      role: "user" as const,
-      content: [
-        { type: "text",      text: _RECOGNIZE_PROMPT },
-        { type: "image_url", image_url: { url: dataUrl } },
-      ] as unknown as string,
-    },
-  ];
-
   try {
-    const resp = await fetch(`${POLZA_URL}?action=generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        messages,
-        model: "google/gemini-3.1-flash-lite",
-        temperature: 0,
-        max_tokens: 8192,
-      }),
-    });
+    let imagePngB64: string;
 
-    if (!resp.ok) {
-      const errText = await resp.text();
-      return { success: false, ai_obj: {}, items: [], raw: errText, error: `Polza вернул ${resp.status}: ${errText.slice(0, 200)}` };
+    if (isExcel) {
+      onProgress?.("Преобразование Excel в изображение...");
+      imagePngB64 = await _excelToPngB64(file_b64);
+      onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
+    } else {
+      // PDF / JPG / PNG — для PDF Gemini принимает application/pdf через image_url
+      const mimeMap: Record<string, string> = {
+        pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      };
+      const mime = mimeMap[ext] ?? "image/jpeg";
+      // Для PDF используем специальный путь — не PNG, а оригинал
+      if (ext === "pdf") {
+        const resp = await fetch(`${POLZA_URL}?action=generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "google/gemini-3.1-flash-lite",
+            temperature: 0,
+            max_tokens: 8192,
+            messages: [
+              { role: "system", content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON." },
+              { role: "user",   content: [
+                  { type: "text",      text: _RECOGNIZE_PROMPT },
+                  { type: "image_url", image_url: { url: `data:${mime};base64,${file_b64}` } },
+              ]},
+            ],
+          }),
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          return { success: false, ai_obj: {}, items: [], raw: t, error: `Polza ${resp.status}: ${t.slice(0, 200)}` };
+        }
+        const raw = (await resp.json()).content ?? "";
+        if (!raw.trim()) return { success: false, ai_obj: {}, items: [], raw, error: "Пустой ответ. Попробуйте снова." };
+        const { ai_obj, items } = _parseAiJson(raw);
+        return { success: true, ai_obj, items, raw };
+      }
+      // JPG/PNG — конвертируем в PNG canvas (сжатие/нормализация)
+      imagePngB64 = file_b64;
     }
 
-    const data = await resp.json();
-    const raw: string = data.content ?? "";
+    const raw = await _callPolza(imagePngB64, _RECOGNIZE_PROMPT);
 
-    if (!raw.trim()) {
-      return { success: false, ai_obj: {}, items: [], raw, error: `Пустой ответ от модели. Попробуйте снова.` };
-    }
+    if (!raw.trim())
+      return { success: false, ai_obj: {}, items: [], raw, error: "Пустой ответ от модели. Попробуйте снова." };
 
     const { ai_obj, items } = _parseAiJson(raw);
+    if (!items.length)
+      return { success: false, ai_obj: {}, items: [], raw, error: `Модель не извлекла позиции. Ответ: ${raw.slice(0, 300)}` };
+
     return { success: true, ai_obj, items, raw };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
