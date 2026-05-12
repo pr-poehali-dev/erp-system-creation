@@ -4198,13 +4198,10 @@ def recognize_invoice(cur, invoice_id: int):
                 corr_obj, corr_items, corr_err = _parse_ai_invoice_response(raw_corr)
                 if corr_items:
                     all_raw_items = corr_items
-                    # Обновляем meta если пришла
-                    if corr_obj.get("supplier_name"):
-                        supplier_name = _clean(corr_obj["supplier_name"]) or supplier_name
-                    if corr_obj.get("invoice_date"):
-                        invoice_date = _clean(corr_obj["invoice_date"]) or invoice_date
-                    if corr_obj.get("invoice_number"):
-                        invoice_number = _clean(corr_obj["invoice_number"]) or invoice_number
+                    # Обновляем meta если пришла — используем .get() везде
+                    supplier_name  = _clean(corr_obj.get("supplier_name"))  or supplier_name
+                    invoice_date   = _clean(corr_obj.get("invoice_date"))   or invoice_date
+                    invoice_number = _clean(corr_obj.get("invoice_number")) or invoice_number
                     debug_log.append(f"correction {attempt + 1}: {len(corr_items)} items")
                 else:
                     debug_log.append(f"correction {attempt + 1} parse failed: {corr_err}")
@@ -5691,16 +5688,16 @@ def handler(event: dict, context) -> dict:
         conn.rollback()
         key = str(ke).strip("'\"")
         logger.warning(f"Missing required field: {key}\n{traceback.format_exc()}")
-        # Понятные сообщения вместо технических названий ключей
+        # supplier_name — необязательное поле, не должно блокировать операцию
+        # Но раз мы здесь — значит баг в коде. Логируем и даём понятное сообщение.
         _field_labels = {
             "invoice_id":    "ID счёта",
             "invoice_date":  "дата счёта",
             "unit_price":    "цена за единицу",
             "quantity":      "количество",
             "material":      "наименование материала",
-            "supplier_name": "поставщик (необязательное поле — сообщите в поддержку)",
         }
-        label = _field_labels.get(key, key)
+        label = _field_labels.get(key, f"«{key}»")
         return err(f"Не указано обязательное поле: {label}", 400)
     except Exception as e:
         conn.rollback()
