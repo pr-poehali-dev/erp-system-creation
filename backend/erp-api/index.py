@@ -3252,14 +3252,15 @@ def add_gantt_substage(cur, project_id: int, body: dict):
 # ─── INVOICE AI RECOGNITION ──────────────────────────────────────────────────
 
 CHATGPT_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
-INVOICE_PROMPT = """Извлеки ВСЕ позиции товаров/материалов из этого счёта (инвойса).
-Ответь СТРОГО JSON-массивом объектов, один объект = одна позиция:
+INVOICE_PROMPT = """Ты — ассистент для извлечения данных из счетов. Верни ВСЕ позиции из этого документа строго одним JSON-массивом.
+ВНИМАНИЕ: верни массив для ВСЕХ строк счёта, даже если их 20 или больше. Не сокращай и не обрезай список.
+Каждая позиция — отдельный объект в массиве:
 [{"supplier_name":"Название поставщика из шапки или null","material":"Наименование товара/материала","unit":"шт|м3|т|пог.м|м2|компл|null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер счёта или null"}]
 Правила:
 - Если дата и номер общие — продублируй в каждом объекте
 - unit_price и quantity — только числа (без единиц и символов валюты)
 - Игнорируй строки НДС, итогов, заголовков и пустые строки
-- Ответ начинается с [ и заканчивается ] — ничего кроме JSON-массива"""
+- Ответ начинается с [ и заканчивается ] — ТОЛЬКО JSON-массив, никакого другого текста"""
 
 INVOICE_PROMPT_EXCEL = """Это данные из Excel-файла (счёт или накладная). Найди строки с товарами/материалами.
 Игнорируй пустые строки, шапки таблицы, итоги, строки НДС и подписи.
@@ -3441,44 +3442,54 @@ def _call_polza(req_lib, messages: list, max_tokens: int = 1024) -> str:
 
 def _parse_items_response(raw: str):
     """
-    Парсит ответ модели → list[dict] | None, error_str.
-    Уровень 2 парсинга: strip markdown → json.loads → regex fallback → wrap dict.
+    Парсит ответ модели → (list[dict] | None, error_str | None).
+    Порядок попыток:
+      1. json.loads всей строки (после зачистки markdown)
+      2. Жадный regex на самый большой [...] блок (GREEDY, не lazy!)
+      3. Жадный regex на самый большой {...} блок → wrap в список
     """
     import re
     s = raw.strip()
+    # Убираем markdown-обёртки ```json ... ``` и ``` ... ```
     s = re.sub(r'```(?:json)?\s*', '', s)
-    s = re.sub(r'\s*```', '', s).strip()
+    s = re.sub(r'```', '', s).strip()
 
-    # Прямой парсинг
+    # ── 1. Прямой парсинг целой строки ───────────────────────────────────────
     try:
         result = json.loads(s)
         if isinstance(result, dict):
             result = [result]
         if isinstance(result, list):
             return result, None
-    except json.JSONDecodeError as e1:
+        return None, f"Неожиданный корневой тип: {type(result).__name__}"
+    except json.JSONDecodeError:
         pass
-    else:
-        return None, f"Неожиданный тип данных: {type(result)}"
 
-    # Regex fallback: первый [...] блок
-    m = re.search(r'\[[\s\S]+?\]', s)
-    if m:
+    # ── 2. Жадный regex: самый длинный [...] блок ────────────────────────────
+    # ВАЖНО: используем ЖАДНЫЙ квантификатор + (не ленивый +?)
+    # чтобы захватить весь массив целиком, а не первый закрывающий ]
+    bracket_matches = list(re.finditer(r'\[[\s\S]+\]', s))
+    if bracket_matches:
+        # Берём самый длинный match (на случай нескольких блоков)
+        longest = max(bracket_matches, key=lambda m: len(m.group(0)))
         try:
-            result = json.loads(m.group(0))
+            result = json.loads(longest.group(0))
             if isinstance(result, list):
                 return result, None
-        except Exception as e2:
+            if isinstance(result, dict):
+                return [result], None
+        except json.JSONDecodeError as e2:
             pass
 
-    # Regex fallback: первый {...} блок → wrap
-    m2 = re.search(r'\{[\s\S]+?\}', s)
-    if m2:
+    # ── 3. Жадный regex: самый длинный {...} блок → wrap ─────────────────────
+    brace_matches = list(re.finditer(r'\{[\s\S]+\}', s))
+    if brace_matches:
+        longest = max(brace_matches, key=lambda m: len(m.group(0)))
         try:
-            obj = json.loads(m2.group(0))
+            obj = json.loads(longest.group(0))
             if isinstance(obj, dict):
                 return [obj], None
-        except Exception:
+        except json.JSONDecodeError:
             pass
 
     return None, f"JSON-массив не найден в ответе модели. Фрагмент: {s[:500]}"
@@ -3621,6 +3632,52 @@ def recognize_invoice(cur, invoice_id: int):
 
     raw_list, parse_error = _parse_items_response(raw_content)
 
+    # ── 4b. Count-check + Continuation ───────────────────────────────────────
+    # Спрашиваем модель: сколько всего позиций в документе?
+    # Если получили меньше — автоматически дозапрашиваем продолжение.
+    continuation_log = []
+    if raw_list and len(raw_list) > 0:
+        try:
+            count_msg = {"role": "user",
+                         "content": "Сколько всего строк-позиций товаров/материалов в этом документе? "
+                                    "Ответь ТОЛЬКО одним целым числом, без пояснений."}
+            count_raw = _call_polza(req_lib, [system_msg, user_msg, count_msg], max_tokens=16)
+            import re as _re
+            count_match = _re.search(r'\d+', count_raw.strip())
+            expected_count = int(count_match.group(0)) if count_match else 0
+            continuation_log.append(f"count_raw='{count_raw.strip()}' expected={expected_count} got={len(raw_list)}")
+        except Exception as ce:
+            expected_count = 0
+            continuation_log.append(f"count-check error: {ce}")
+
+        # Если ожидаемых позиций больше чем получено — запрашиваем продолжение
+        MAX_CONTINUATION_ROUNDS = 3
+        for _round in range(MAX_CONTINUATION_ROUNDS):
+            if expected_count <= 0 or len(raw_list) >= expected_count:
+                break
+            got_so_far = len(raw_list)
+            continuation_log.append(f"round {_round+1}: requesting continuation from pos {got_so_far+1}")
+            try:
+                cont_prompt = (
+                    f"Предыдущий ответ содержал {got_so_far} позиций, но в документе их {expected_count}. "
+                    f"Продолжи извлечение с позиции {got_so_far+1}. "
+                    f"Верни ТОЛЬКО JSON-массив недостающих позиций, начиная с позиции {got_so_far+1}. "
+                    f"Формат: [{{\"supplier_name\":\"...\",\"material\":\"...\",\"unit\":\"...\","
+                    f"\"unit_price\":число,\"quantity\":число,\"invoice_date\":\"...\",\"invoice_number\":\"...\"}}]"
+                )
+                cont_user_msg = {"role": "user", "content": cont_prompt}
+                cont_raw = _call_polza(req_lib, [system_msg, user_msg, cont_user_msg], max_tokens=2048)
+                cont_list, cont_err = _parse_items_response(cont_raw)
+                if cont_list and len(cont_list) > 0:
+                    raw_list = raw_list + cont_list
+                    continuation_log.append(f"  → got {len(cont_list)} more, total now {len(raw_list)}")
+                else:
+                    continuation_log.append(f"  → continuation returned 0 items, stopping. err={cont_err}")
+                    break
+            except Exception as cont_e:
+                continuation_log.append(f"  → continuation error: {cont_e}")
+                break
+
     # ── 5. УРОВЕНЬ 2: PDF fallback → первая страница → JPEG ──────────────────
     if ext == "pdf" and (raw_list is None or len(raw_list) == 0):
         fallback_used = True
@@ -3695,17 +3752,19 @@ def recognize_invoice(cur, invoice_id: int):
     )
 
     return {
-        "status":       status,
-        "meta":         {"invoice_date": meta_date, "invoice_number": meta_num},
-        "items":        norm_items,
-        "parse_error":  parse_error,
+        "status":        status,
+        "meta":          {"invoice_date": meta_date, "invoice_number": meta_num},
+        "items":         norm_items,
+        "items_count":   len(norm_items),
+        "parse_error":   parse_error,
         "fallback_used": fallback_used,
         "debug": {
-            "raw_response":   raw_content,
-            "raw_response_2": raw_content_2,
-            "parse_error":    parse_error,
-            "fallback_used":  fallback_used,
-            "items_debug":    items_debug,
+            "raw_response":     raw_content,
+            "raw_response_2":   raw_content_2,
+            "parse_error":      parse_error,
+            "fallback_used":    fallback_used,
+            "items_debug":      items_debug,
+            "continuation_log": continuation_log,
         },
     }, None
 

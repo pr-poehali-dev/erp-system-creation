@@ -130,12 +130,14 @@ export interface AiRecognizeResult {
   items: AiItem[];
   parse_error: string | null;
   fallback_used?: boolean;
+  items_count?: number;
   debug: {
     raw_response: string | null;
     raw_response_2?: string | null;
     parse_error: string | null;
     fallback_used?: boolean;
     items_debug: string[];
+    continuation_log?: string[];
   };
 }
 

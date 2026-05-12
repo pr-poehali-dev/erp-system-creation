@@ -391,6 +391,21 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
                 </div>
               </div>
             )}
+
+            {/* continuation_log */}
+            {(result.debug.continuation_log?.length ?? 0) > 0 && (
+              <div className="rounded-lg border border-violet-200 bg-white overflow-hidden">
+                <div className="px-3 py-2 bg-violet-50 text-[11px] font-semibold text-violet-700 flex items-center gap-1.5">
+                  <Icon name="GitMerge" size={11} />
+                  Дозапрос (continuation)
+                </div>
+                <div className="px-3 py-2 space-y-0.5 max-h-24 overflow-y-auto">
+                  {result.debug.continuation_log!.map((line, i) => (
+                    <div key={i} className="text-[10px] font-mono text-muted-foreground">{line}</div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
