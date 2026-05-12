@@ -4385,23 +4385,29 @@ def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
 
 def _call_polza_model(req_lib, messages: list, model: str, max_tokens: int = 4096) -> str:
     """Вызов Polza.ai с явным указанием модели. Возвращает строку-ответ."""
+    import time as _time
     payload = {
         "messages": messages,
         "model":    model,
         "temperature": 0.0,
         "max_tokens": max_tokens,
     }
-    logger.warning("_call_polza_model: model=%s msg_count=%d", model, len(messages))
+    t0 = _time.monotonic()
+    logger.warning("_call_polza_model START: model=%s msg_count=%d", model, len(messages))
     resp = req_lib.post(
         f"{CHATGPT_URL}?action=generate",
         json=payload,
-        timeout=120,
+        timeout=180,   # 3 минуты — запас для медленных моделей
     )
+    elapsed = _time.monotonic() - t0
+    logger.warning("_call_polza_model END: model=%s elapsed=%.1fs status=%d", model, elapsed, resp.status_code)
     if not resp.ok:
         try:    err_text = str(resp.json())
         except Exception: err_text = resp.text[:500]
         raise RuntimeError(f"polza {resp.status_code}: {err_text}")
-    return resp.json().get("content", "")
+    content = resp.json().get("content", "")
+    logger.warning("_call_polza_model CONTENT: model=%s len=%d first100=%r", model, len(content), content[:100])
+    return content
 
 
 def recognize_invoice(cur, invoice_id: int):
