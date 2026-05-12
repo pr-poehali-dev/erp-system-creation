@@ -147,16 +147,25 @@ export default function InvoicesTab({ role }: { role?: Role }) {
               const { total_chunks } = info;
               const CHUNK_SIZE = 20;
               const allItems: AiItem[] = [];
+              let excelMeta: { invoice_date: string | null; invoice_number: string | null } = { invoice_date: null, invoice_number: null };
               for (let ci = 0; ci < total_chunks; ci++) {
                 setChunkProgress({ current: ci + 1, total: total_chunks });
                 const chunk = await api.invoices.recognizeExcelChunk(invoiceId, ci, CHUNK_SIZE);
                 if (chunk.items?.length) allItems.push(...(chunk.items as AiItem[]));
+                // Мета приходит только в первом чанке
+                type ChunkWithMeta = typeof chunk & { meta?: Record<string, string | null> };
+                if (ci === 0 && (chunk as ChunkWithMeta).meta) {
+                  const m = (chunk as ChunkWithMeta).meta as Record<string, string | null>;
+                  excelMeta = {
+                    invoice_date:   m.invoice_date   ?? null,
+                    invoice_number: m.invoice_number ?? null,
+                  };
+                }
               }
               setChunkProgress(null);
-              // Превращаем в AiRecognizeResult-подобный объект
               const fakeResult: AiRecognizeResult = {
                 status: "обработан",
-                meta: { invoice_date: null, invoice_number: null },
+                meta: excelMeta,
                 items: allItems,
                 items_count: allItems.length,
                 parse_error: null,

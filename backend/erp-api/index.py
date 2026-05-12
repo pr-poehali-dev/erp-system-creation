@@ -4076,18 +4076,38 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
             mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
             return base64.b64encode(file_bytes).decode("utf-8"), mime
 
-    # ── PDF → передаём напрямую в Gemini (поддерживает PDF через data URL) ───
+    # ── PDF → рендерим первую страницу в JPG через pypdfium2 (150 dpi) ────────
     if ext == "pdf":
-        PDF_LIMIT = 500 * 1024  # 500 KB
-        if len(file_bytes) > PDF_LIMIT:
-            debug_log.append(f"pdf too large: {len(file_bytes)} > {PDF_LIMIT}")
-            return None, (
-                f"PDF слишком большой ({len(file_bytes)//1024} КБ, лимит 500 КБ). "
-                "Сохраните нужную страницу счёта как JPG и загрузите изображение."
-            )
-        b64 = base64.b64encode(file_bytes).decode("utf-8")
-        debug_log.append(f"pdf: size={len(file_bytes)}, sending as application/pdf")
-        return b64, "application/pdf"
+        debug_log.append(f"pdf: size={len(file_bytes)}, converting to jpg")
+        try:
+            import pypdfium2 as _pdfium
+            from PIL import Image as _PILImage
+
+            doc  = _pdfium.PdfDocument(file_bytes)
+            page = doc[0]
+            # 150 dpi: scale = dpi / 72
+            scale  = 150 / 72
+            bitmap = page.render(scale=scale, rotation=0)
+            pil_img = bitmap.to_pil()
+            doc.close()
+
+            # Конвертируем в RGB JPEG
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
+            buf = _io.BytesIO()
+            pil_img.save(buf, format="JPEG", quality=88)
+            jpg_bytes = buf.getvalue()
+            b64 = base64.b64encode(jpg_bytes).decode("utf-8")
+            debug_log.append(f"pdf→jpg: size={len(jpg_bytes)}, dims={pil_img.size}")
+            return b64, "image/jpeg"
+
+        except ImportError:
+            debug_log.append("pypdfium2 not available, fallback to direct pdf")
+            b64 = base64.b64encode(file_bytes).decode("utf-8")
+            return b64, "application/pdf"
+        except Exception as e:
+            debug_log.append(f"pdf render error: {e}")
+            return None, f"Не удалось обработать PDF: {e}"
 
     # ── Excel → текстовая таблица (Gemini хорошо читает структурированный текст)
     if ext in ("xls", "xlsx"):
@@ -4145,26 +4165,84 @@ def _read_excel_rows(file_bytes: bytes, ext: str) -> list:
     return [r for r in rows_raw if any(str(c).strip() for c in r)]
 
 
-# Промпт для чанка Excel — только позиции, без мета
-_PROMPT_EXCEL_CHUNK = """Извлеки все строки товаров/материалов из таблицы ниже.
-Верни ТОЛЬКО JSON-массив без обёртки:
-[{"material":"...", "quantity":..., "unit":"...", "unit_price":..., "amount":...}, ...]
+# Модель для Excel-чанков — DeepSeek точнее работает с табличными данными
+_EXCEL_MODEL = "deepseek/deepseek-v4-flash"
+
+# Промпт для мета-информации из начала Excel
+_PROMPT_EXCEL_META = """Ты получаешь первые строки таблицы счёта в формате TSV (табуляция как разделитель).
+Найди и верни JSON-объект с реквизитами:
+{"supplier_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD или null"}
 
 Правила:
-- Пропускай строки-заголовки, итоги, пустые строки
-- quantity и unit_price — числа (без пробелов и валюты)
-- unit — единица измерения: шт, м3, м2, пог.м, т, кг, л, уп, компл и т.д.
-- Если поле не найдено — null
-- НЕ добавляй пояснений, только JSON-массив
+- supplier_name — название поставщика/компании если указано, иначе null
+- invoice_number — номер счёта или накладной если указан, иначе null
+- invoice_date — дата в формате YYYY-MM-DD если указана, иначе null
+- Отвечай ТОЛЬКО JSON-объектом без пояснений и markdown
 """
+
+# Промпт для позиций чанка Excel
+_PROMPT_EXCEL_CHUNK = """Ты получаешь фрагмент таблицы счёта в формате TSV (табуляция как разделитель).
+Извлеки каждую строку как позицию товара/материала.
+Для каждой позиции верни: material (полное название), quantity (число), unit (единица измерения), unit_price (число), amount (число или null).
+Если какое-то поле не указано или неразборчиво — ставь null.
+Не пропускай товарные строки. Пропускай только заголовки столбцов, итоговые строки и пустые строки.
+Ответь строго JSON-массивом объектов без пояснений и markdown:
+[{"material":"...", "quantity":..., "unit":"...", "unit_price":..., "amount":...}, ...]
+"""
+
+
+def _call_deepseek(req_lib, messages: list, max_tokens: int = 2048) -> str:
+    """Вызов DeepSeek через Polza.ai. Возвращает строку-ответ."""
+    payload = {
+        "messages": messages,
+        "model": _EXCEL_MODEL,
+        "temperature": 0.0,
+        "max_tokens": max_tokens,
+    }
+    resp = req_lib.post(f"{CHATGPT_URL}?action=generate", json=payload, timeout=120)
+    resp.raise_for_status()
+    return resp.json().get("content", "")
+
+
+def _parse_json_array(raw: str) -> list:
+    """Парсит JSON-массив из сырого ответа модели, с очисткой markdown."""
+    import re as _re, json as _json
+    raw = raw.strip()
+    raw = _re.sub(r'```(?:json)?\s*', '', raw)
+    raw = _re.sub(r'```', '', raw).strip()
+    for m in sorted(_re.finditer(r'\[[\s\S]+\]', raw), key=lambda x: -len(x.group(0))):
+        try:
+            arr = _json.loads(m.group(0))
+            if isinstance(arr, list):
+                return arr
+        except Exception:
+            continue
+    return []
+
+
+def _parse_json_object(raw: str) -> dict:
+    """Парсит JSON-объект из сырого ответа модели."""
+    import re as _re, json as _json
+    raw = raw.strip()
+    raw = _re.sub(r'```(?:json)?\s*', '', raw)
+    raw = _re.sub(r'```', '', raw).strip()
+    for m in sorted(_re.finditer(r'\{[\s\S]+\}', raw), key=lambda x: -len(x.group(0))):
+        try:
+            obj = _json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            continue
+    return {}
 
 
 def recognize_excel_chunk(cur, invoice_id: int, chunk_index: int, chunk_size: int = 20):
     """
-    Распознаёт один чанк строк Excel (chunk_index * chunk_size .. (chunk_index+1) * chunk_size).
-    Возвращает (items_list, error) где items_list — нормализованные позиции.
+    Распознаёт один чанк строк Excel через DeepSeek V4 Flash.
+    chunk_index=0 дополнительно извлекает мета (поставщик, дата, номер).
+    Возвращает ({items, meta?, total_chunks, chunk_index}, error).
     """
-    import requests as req_lib, base64, io as _io
+    import requests as req_lib
 
     cur.execute(
         f"SELECT pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
@@ -4186,35 +4264,40 @@ def recognize_excel_chunk(cur, invoice_id: int, chunk_index: int, chunk_size: in
     start = chunk_index * chunk_size
     end   = start + chunk_size
     chunk_rows = all_rows[start:end]
-    total_chunks = (len(all_rows) + chunk_size - 1) // chunk_size
+    total_chunks = max(1, (len(all_rows) + chunk_size - 1) // chunk_size)
 
     if not chunk_rows:
         return {"items": [], "total_chunks": total_chunks, "chunk_index": chunk_index}, None
 
     tsv = "\n".join("\t".join(str(c) for c in r) for r in chunk_rows)
-    prompt = _PROMPT_EXCEL_CHUNK + f"\n\nТаблица (строки {start+1}–{min(end, len(all_rows))} из {len(all_rows)}):\n{tsv}"
 
-    sys_msg = {"role": "system", "content": "Отвечай ТОЛЬКО JSON-массивом без пояснений."}
-    usr_msg = {"role": "user", "content": [{"type": "text", "text": prompt}]}
+    # ── Запрос позиций ───────────────────────────────────────────────────────
+    chunk_prompt = (
+        _PROMPT_EXCEL_CHUNK
+        + f"\n\nФрагмент таблицы (строки {start+1}–{min(end, len(all_rows))} из {len(all_rows)}):\n{tsv}"
+    )
+    sys_items = {"role": "system", "content": "Отвечай ТОЛЬКО JSON-массивом без пояснений."}
+    usr_items = {"role": "user", "content": [{"type": "text", "text": chunk_prompt}]}
+    raw_items = _call_deepseek(req_lib, [sys_items, usr_items])
+    items_raw = _parse_json_array(raw_items)
 
-    raw = _call_polza(req_lib, [sys_msg, usr_msg], max_tokens=2048)
+    result = {"items": items_raw, "total_chunks": total_chunks, "chunk_index": chunk_index}
 
-    # Парсим ответ
-    import re as _re, json as _json
-    raw = raw.strip()
-    raw = _re.sub(r'```(?:json)?\s*', '', raw)
-    raw = _re.sub(r'```', '', raw).strip()
-    items_raw = []
-    for m in sorted(_re.finditer(r'\[[\s\S]+\]', raw), key=lambda x: -len(x.group(0))):
+    # ── Мета только для первого чанка ───────────────────────────────────────
+    if chunk_index == 0:
+        # Берём первые 10 строк для поиска реквизитов
+        meta_rows = all_rows[:10]
+        meta_tsv  = "\n".join("\t".join(str(c) for c in r) for r in meta_rows)
+        meta_prompt = _PROMPT_EXCEL_META + f"\n\nПервые строки файла:\n{meta_tsv}"
+        sys_meta = {"role": "system", "content": "Отвечай ТОЛЬКО JSON-объектом без пояснений."}
+        usr_meta = {"role": "user", "content": [{"type": "text", "text": meta_prompt}]}
         try:
-            arr = _json.loads(m.group(0))
-            if isinstance(arr, list):
-                items_raw = arr
-                break
+            raw_meta = _call_deepseek(req_lib, [sys_meta, usr_meta], max_tokens=256)
+            result["meta"] = _parse_json_object(raw_meta)
         except Exception:
-            continue
+            result["meta"] = {}
 
-    return {"items": items_raw, "total_chunks": total_chunks, "chunk_index": chunk_index}, None
+    return result, None
 
 
 def recognize_invoice(cur, invoice_id: int):
