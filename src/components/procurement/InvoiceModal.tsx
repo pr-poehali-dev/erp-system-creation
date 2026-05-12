@@ -14,8 +14,8 @@ interface Props {
   localFile: File | null;
   uploadedFile: UploadedFile | null;
   saving: boolean;
-  /** "idle" | "converting" — подготовка изображения | "recognizing" — AI */
-  procStage: "idle" | "converting" | "recognizing";
+  /** "idle" | "converting" — подготовка изображения | "recognizing" — AI | "excel_chunking" — TSV DeepSeek */
+  procStage: "idle" | "converting" | "recognizing" | "excel_chunking";
   autoRecognize: boolean;
   error: string;
   recognizing: boolean;
@@ -170,6 +170,13 @@ export default function InvoiceModal({
             <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
               <Icon name="Loader" size={13} className="animate-spin shrink-0" />
               Распознавание... обычно 3–8 секунд
+            </div>
+          )}
+
+          {procStage === "excel_chunking" && (
+            <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+              <Icon name="Loader" size={13} className="animate-spin shrink-0" />
+              Обработка Excel... анализируем строки таблицы
             </div>
           )}
 

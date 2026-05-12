@@ -4241,6 +4241,138 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
     )
 
 
+def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
+    """
+    Пайплайн распознавания Excel через TSV + DeepSeek V4 Pro.
+    Разбивает строки на чанки по 15, отправляет каждый отдельным запросом.
+    Возвращает (ai_obj, all_items, error) — совместимо с _parse_ai_invoice_response.
+    Для индикации прогресса складывает статусы в debug_log как 'excel_chunk N/M'.
+    """
+    import io as _io, json as _json
+
+    # ── Читаем строки ──────────────────────────────────────────────────────────
+    if ext == "xlsx":
+        import openpyxl
+        wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active or wb.worksheets[0]
+        raw_rows = []
+        for row in ws.iter_rows(max_row=200, values_only=True):
+            raw_rows.append([str(c) if c is not None else "" for c in row])
+        wb.close()
+    else:
+        import xlrd
+        wb_xls = xlrd.open_workbook(file_contents=file_bytes)
+        ws_xls = wb_xls.sheet_by_index(0)
+        raw_rows = []
+        for ri in range(min(ws_xls.nrows, 200)):
+            raw_rows.append([str(ws_xls.cell_value(ri, ci)) for ci in range(ws_xls.ncols)])
+
+    # Убираем полностью пустые строки
+    rows = [r for r in raw_rows if any(str(c).strip() for c in r)]
+    if not rows:
+        return {}, [], "Excel пустой"
+
+    # Конвертируем в TSV
+    def _to_tsv(chunk):
+        return "\n".join("\t".join(str(c) for c in r) for r in chunk)
+
+    CHUNK = 15
+    chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
+    total  = len(chunks)
+    debug_log.append(f"excel_tsv: {len(rows)} rows → {total} chunks")
+
+    _EXCEL_PROMPT = (
+        "Ты получаешь фрагмент счёта в формате TSV (столбцы разделены табуляцией).\n"
+        "Извлеки ВСЕ позиции товаров/материалов из таблицы.\n"
+        "Поставщика, дату и номер счёта ищи в первых строках (шапке).\n\n"
+        "Для каждой позиции верни:\n"
+        "- material: полное название (не сокращай)\n"
+        "- quantity: число (может быть дробным)\n"
+        "- unit: единица измерения (м3, шт, м, пог.м и т.д.)\n"
+        "- unit_price: цена за единицу\n"
+        "- amount: сумма строки\n\n"
+        "ПРАВИЛА:\n"
+        "1. Строки-заголовки таблицы (№, Наименование, Кол-во...) — пропускай.\n"
+        "2. Если значение отсутствует — ставь null.\n"
+        "3. Числа — только цифры без пробелов и символов валюты.\n"
+        "4. Не добавляй комментариев.\n\n"
+        "Отвечай строгим JSON:\n"
+        '{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...",\n'
+        '"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}'
+    )
+
+    sys_msg = {
+        "role": "system",
+        "content": "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО JSON без пояснений и markdown."
+    }
+
+    all_items     = []
+    meta_obj      = {}
+    import re as _re2
+
+    def _parse_chunk(raw: str):
+        s = raw.strip()
+        s = _re2.sub(r'```(?:json)?\s*', '', s)
+        s = _re2.sub(r'```', '', s).strip()
+        try:
+            p = _json.loads(s)
+            if isinstance(p, dict) and "items" in p:
+                return p, p.get("items") or []
+        except Exception:
+            pass
+        for m in sorted(_re2.finditer(r'\{[\s\S]+\}', s), key=lambda x: -len(x.group(0))):
+            try:
+                p = _json.loads(m.group(0))
+                if isinstance(p, dict) and "items" in p:
+                    return p, p.get("items") or []
+            except Exception:
+                continue
+        return {}, []
+
+    for idx, chunk in enumerate(chunks):
+        debug_log.append(f"excel_chunk {idx+1}/{total}")
+        tsv_text = _to_tsv(chunk)
+        usr_msg  = {"role": "user", "content": [
+            {"type": "text", "text": _EXCEL_PROMPT + f"\n\nФРАГМЕНТ {idx+1} из {total}:\n{tsv_text}"},
+        ]}
+        try:
+            raw = _call_polza_model(
+                req_lib,
+                messages=[sys_msg, usr_msg],
+                model="deepseek/deepseek-v4-0709",
+                max_tokens=4096,
+            )
+            obj, items = _parse_chunk(raw)
+            debug_log.append(f"excel_chunk {idx+1}: got {len(items)} items")
+            # Мета берём из первого чанка
+            if not meta_obj and obj:
+                meta_obj = obj
+            all_items.extend(items)
+        except Exception as ce:
+            debug_log.append(f"excel_chunk {idx+1} error: {ce}")
+
+    if not all_items:
+        return {}, [], f"DeepSeek не смог извлечь позиции из Excel (chunks={total})"
+
+    return meta_obj, all_items, None
+
+
+def _call_polza_model(req_lib, messages: list, model: str, max_tokens: int = 4096) -> str:
+    """Вызов Polza.ai с явным указанием модели. Возвращает строку-ответ."""
+    payload = {"messages": messages, "model": model,
+               "temperature": 0.0, "max_tokens": max_tokens}
+    resp = req_lib.post(
+        f"{CHATGPT_URL}?action=generate",
+        json=payload,
+        timeout=120,
+    )
+    if not resp.ok:
+        try:    err_text = resp.json()
+        except Exception: err_text = resp.text[:500]
+        raise RuntimeError(f"polza {resp.status_code}: {err_text}")
+    return resp.json().get("content", "")
+
+
 def recognize_invoice(cur, invoice_id: int):
     """
     Конвейер распознавания счёта:
@@ -4279,7 +4411,38 @@ def recognize_invoice(cur, invoice_id: int):
 
     debug_log.append(f"file={file_name} ext={ext} size={len(file_bytes)}")
 
-    # ── 2. Конвертация в JPG если нужно ──────────────────────────────────────
+    # ── 2a. Excel — отдельный пайплайн TSV + DeepSeek ─────────────────────────
+    if ext in ("xls", "xlsx"):
+        debug_log.append("routing to excel_tsv pipeline")
+        ai_obj, all_raw_items, excel_err = _recognize_excel_tsv(req_lib, file_bytes, ext, debug_log)
+        if excel_err and not all_raw_items:
+            return None, f"Не удалось извлечь данные из Excel: {excel_err}"
+        # Дальше используем общий постобработчик — перепрыгиваем через блок image
+        supplier_name  = _clean(ai_obj.get("supplier_name")) or ""
+        invoice_date   = _clean(ai_obj.get("invoice_date"))
+        invoice_number = _clean(ai_obj.get("invoice_number"))
+        footer_total   = _safe_float(ai_obj.get("footer_total"))
+        debug_log.append(f"excel meta: supplier={supplier_name!r} date={invoice_date} num={invoice_number}")
+        # Постобработка и матчинг — такой же как для JPG
+        processed  = _postprocess_items(all_raw_items, supplier_name=supplier_name,
+                                        invoice_date=invoice_date, invoice_number=invoice_number)
+        norm_items = _normalize_postprocessed(cur, processed)
+        all_ok     = bool(norm_items) and all(i.get("complete") for i in norm_items)
+        status     = "обработан" if all_ok else "требуется_проверка"
+        cur.execute(
+            f"UPDATE {SCHEMA}.invoices SET recognition_status=%s, recognized_data=%s, updated_at=now() WHERE id=%s",
+            (status, json.dumps(all_raw_items, ensure_ascii=False), invoice_id)
+        )
+        return {
+            "status": status,
+            "meta": {"supplier_name": supplier_name, "invoice_date": invoice_date,
+                     "invoice_number": invoice_number, "footer_total": footer_total},
+            "items": norm_items,
+            "parse_error": excel_err,
+            "debug": debug_log,
+        }, None
+
+    # ── 2. Конвертация в JPG если нужно (JPG/PNG/PDF) ────────────────────────
     file_b64, mime = _convert_to_jpg_b64(file_bytes, ext, debug_log)
     if file_b64 is None:
         return None, mime  # mime содержит сообщение об ошибке
@@ -4356,30 +4519,22 @@ def recognize_invoice(cur, invoice_id: int):
 
     ai_obj, all_raw_items, parse_err = _parse_ai_invoice_response(raw_response)
 
-    # ── Попытка 2: PDF с пустым ответом — повторяем с усиленным промптом ──────
+    # ── PDF с пустым ответом: проверяем на QR-код ─────────────────────────────
     if not all_raw_items and ext == "pdf":
-        debug_log.append(f"attempt 1 empty, retrying PDF with QR-ignore prompt")
-        _qr_hint = (
-            "\n\nВАЖНО: Этот PDF содержит QR-код или сложную графику. "
-            "Полностью игнорируй QR-коды, штрих-коды, логотипы и любую графику. "
-            "Сосредоточься ТОЛЬКО на текстовой таблице с позициями и реквизитах в шапке. "
-            "Верни JSON как описано выше."
+        debug_log.append(f"pdf empty response, checking for QR")
+        # Если PDF содержит текстовый маркер QR или ответ намекает на графику — даём понятную подсказку
+        raw_lower = raw_response.lower()
+        has_qr_hint = (
+            "qr" in raw_lower or "qr-код" in raw_lower or
+            "штрих" in raw_lower or "barcode" in raw_lower or
+            len(raw_response.strip()) < 30   # почти пустой ответ = Gemini не смог прочитать
         )
-        usr_msg2 = {"role": "user", "content": [
-            {"type": "text", "text": _PROMPT_IMAGE_DIRECT + _qr_hint},
-            img_content,
-        ]}
-        try:
-            raw_response2 = _call_polza(req_lib, [sys_msg, usr_msg2], max_tokens=4096)
-            debug_log.append(f"attempt 2: {len(raw_response2)} chars")
-            ai_obj2, items2, err2 = _parse_ai_invoice_response(raw_response2)
-            if items2:
-                ai_obj, all_raw_items, parse_err = ai_obj2, items2, err2
-                debug_log.append(f"attempt 2 success: {len(items2)} items")
-            else:
-                debug_log.append(f"attempt 2 also empty: {err2}")
-        except Exception as pe2:
-            debug_log.append(f"attempt 2 error: {pe2}")
+        if has_qr_hint:
+            return None, (
+                "qr_detected|"
+                "Документ содержит QR‑код или графику, которую система не может корректно обработать. "
+                "Пожалуйста, откройте счёт и сделайте скриншот первой страницы в JPG, затем загрузите его."
+            )
 
     if not all_raw_items:
         debug_log.append(f"all attempts empty: {parse_err}")

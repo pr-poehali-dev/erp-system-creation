@@ -24,8 +24,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
 
   const [saving,      setSaving]      = useState(false);
-  // "idle" | "converting" | "recognizing"
-  const [procStage,   setProcStage]   = useState<"idle" | "converting" | "recognizing">("idle");
+  // "idle" | "converting" | "recognizing" | "excel_chunking"
+  const [procStage,   setProcStage]   = useState<"idle" | "converting" | "recognizing" | "excel_chunking">("idle");
   const [error,       setError]       = useState("");
   const [recognizing, setRecognizing] = useState(false);
   const [applying,    setApplying]    = useState(false);
@@ -137,14 +137,20 @@ export default function InvoicesTab({ role }: { role?: Role }) {
           setSaving(false);
           setEditItem((prev) => ({ ...prev, id: invoiceId, recognition_status: "новый" } as Invoice));
           setRecognizing(true);
-          setProcStage("recognizing");
+          const isExcel = /\.(xls|xlsx)$/i.test(name);
+          setProcStage(isExcel ? "excel_chunking" : "recognizing");
           setAiError("");
           try {
             const res = await api.invoices.recognize(invoiceId);
             setAiResult(res);
             load();
           } catch (err: unknown) {
-            setAiError(err instanceof Error ? err.message : "Ошибка распознавания");
+            const msg = err instanceof Error ? err.message : "Ошибка распознавания";
+            if (msg.startsWith("qr_detected|")) {
+              setAiError(msg.replace("qr_detected|", ""));
+            } else {
+              setAiError(msg);
+            }
           } finally {
             setRecognizing(false);
             setProcStage("idle");
@@ -166,15 +172,17 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   // AI: только для редактируемого счёта с уже загруженным файлом на S3
   const handleRecognize = async () => {
     if (!editItem?.id) { setAiError("Сначала сохраните счёт"); return; }
+    const isExcel = /\.(xls|xlsx)$/i.test(editItem.pdf_file_name || "");
     setRecognizing(true); setAiError(""); setAiResult(null);
+    setProcStage(isExcel ? "excel_chunking" : "recognizing");
     try {
       const res = await api.invoices.recognize(editItem.id);
-      // Сохраняем весь ответ — supplier_id/material_id берём напрямую из него
       setAiResult(res);
-      load(); // обновляем список — счёт уже обновлён в БД
+      load();
     } catch (err: unknown) {
-      setAiError(err instanceof Error ? err.message : "Ошибка AI-распознавания");
-    } finally { setRecognizing(false); }
+      const msg = err instanceof Error ? err.message : "Ошибка AI-распознавания";
+      setAiError(msg.startsWith("qr_detected|") ? msg.replace("qr_detected|", "") : msg);
+    } finally { setRecognizing(false); setProcStage("idle"); }
   };
 
   const handleApplyAI = async (selectedItems: AiItem[], invoiceDate: string, invoiceNumber: string) => {
