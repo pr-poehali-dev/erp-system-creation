@@ -4487,6 +4487,7 @@ def get_invoices(cur):
 def create_invoice(cur, body):
     """Создать счёт. Поставщик и материал необязательны (могут быть заполнены после AI-распознавания).
     Если загружен PDF, но нет цены/даты — статус = новый."""
+    logger.info(f"create_invoice body keys: {list(body.keys())}, supplier_id={body.get('supplier_id')!r}, recognition_status={body.get('recognition_status')!r}")
     supplier_id = body.get('supplier_id') or None
     material_id = body.get('material_id') or None
     inv_date    = body.get('invoice_date') or None

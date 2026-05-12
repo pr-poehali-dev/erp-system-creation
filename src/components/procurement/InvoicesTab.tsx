@@ -91,15 +91,16 @@ export default function InvoicesTab({ role }: { role?: Role }) {
     setError("");
     try {
       const body = {
-        supplier_id:        form.supplier_id ? Number(form.supplier_id) : null,
-        material_id:        form.material_id ? Number(form.material_id) : null,
+        supplier_id:        form.supplier_id ? Number(form.supplier_id) : 0,
+        material_id:        form.material_id ? Number(form.material_id) : 0,
         invoice_date:       form.invoice_date    || null,
         invoice_number:     form.invoice_number  || null,
         unit_price:         form.unit_price  ? Number(form.unit_price)  : null,
         quantity:           form.quantity    ? Number(form.quantity)    : null,
-        recognition_status: form.recognition_status,
+        recognition_status: form.recognition_status || "новый",
         recognized_data:    form.recognized_data || null,
       };
+      console.log("[Invoice] saving payload:", body);
 
       let invoiceId: number;
       if (editItem) {
