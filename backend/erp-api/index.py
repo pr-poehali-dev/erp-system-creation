@@ -3450,9 +3450,9 @@ def _call_polza(req_lib, messages: list, max_tokens: int = 4096) -> str:
 
 def _parse_json_list(raw: str):
     """
-    Надёжный парсинг ответа модели в список.
+    Надёжный парсинг ответа модели в список позиций.
+    Если ответ — объект с полем "items" — возвращает items[].
     Возвращает (list | None, error_str | None).
-    Использует ЖАДНЫЙ regex — НЕ lazy — чтобы захватить весь массив.
     """
     import re
     s = raw.strip()
@@ -3462,8 +3462,14 @@ def _parse_json_list(raw: str):
     # 1. Прямой json.loads
     try:
         r = json.loads(s)
-        if isinstance(r, dict): r = [r]
-        if isinstance(r, list): return r, None
+        # Если объект с items — извлекаем items (новый формат AI)
+        if isinstance(r, dict):
+            if "items" in r and isinstance(r["items"], list):
+                return r["items"], None
+            # Объект без items — единичная позиция
+            return [r], None
+        if isinstance(r, list):
+            return r, None
     except json.JSONDecodeError:
         pass
 
@@ -3472,15 +3478,17 @@ def _parse_json_list(raw: str):
         try:
             r = json.loads(m.group(0))
             if isinstance(r, list): return r, None
-            if isinstance(r, dict): return [r], None
         except json.JSONDecodeError:
             continue
 
-    # 3. Жадный поиск {...} → wrap
+    # 3. Жадный поиск {...} с items
     for m in sorted(re.finditer(r'\{[\s\S]+\}', s), key=lambda x: -len(x.group(0))):
         try:
             r = json.loads(m.group(0))
-            if isinstance(r, dict): return [r], None
+            if isinstance(r, dict):
+                if "items" in r and isinstance(r["items"], list):
+                    return r["items"], None
+                return [r], None
         except json.JSONDecodeError:
             continue
 
@@ -4241,7 +4249,7 @@ def recognize_invoice(cur, invoice_id: int):
                 debug_log.append(f"sum OK after {correction_attempts} corrections: {final_total:.2f}")
 
     # ── 9. Сохраняем в БД ────────────────────────────────────────────────────
-    all_ok = bool(norm_items) and all(i["complete"] for i in norm_items)
+    all_ok = bool(norm_items) and all(i.get("complete") for i in norm_items)
     status = "обработан" if all_ok else "требуется_проверка"
 
     cur.execute(
@@ -4272,8 +4280,10 @@ def recognize_invoice(cur, invoice_id: int):
             "text_source":       "image_direct",
             "correction_rounds": correction_attempts,
             "items_debug":       [
-                f"[{it['material'] or '?'}] up={it['unit_price']} qty={it['quantity']} "
-                f"quality={it['quality']} fix={it['price_fixed']}"
+                f"[{it.get('material') or '?'}] up={it.get('unit_price')} "
+                f"qty={it.get('quantity')} quality={it.get('quality')} "
+                f"fix={it.get('price_fixed')} sid={it.get('supplier_id')} "
+                f"sname={it.get('supplier_name')}"
                 for it in norm_items
             ],
             "continuation_log":  debug_log,
@@ -5680,7 +5690,7 @@ def handler(event: dict, context) -> dict:
     except KeyError as ke:
         conn.rollback()
         key = str(ke).strip("'\"")
-        logger.warning(f"Missing required field: {key}")
+        logger.warning(f"Missing required field: {key}\n{traceback.format_exc()}")
         # Понятные сообщения вместо технических названий ключей
         _field_labels = {
             "invoice_id":    "ID счёта",
@@ -5688,6 +5698,7 @@ def handler(event: dict, context) -> dict:
             "unit_price":    "цена за единицу",
             "quantity":      "количество",
             "material":      "наименование материала",
+            "supplier_name": "поставщик (необязательное поле — сообщите в поддержку)",
         }
         label = _field_labels.get(key, key)
         return err(f"Не указано обязательное поле: {label}", 400)
