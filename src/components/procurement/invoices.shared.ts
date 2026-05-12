@@ -36,17 +36,8 @@ export async function fileToBase64(file: File): Promise<string> {
 }
 
 // ── Сжатие изображения через Canvas ──────────────────────────────────────────
-async function compressImageToJpeg(
-  source: HTMLImageElement | HTMLCanvasElement,
-  maxPx = 1400,
-  quality = 0.80,
-): Promise<string> {
-  let w: number, h: number;
-  if (source instanceof HTMLImageElement) {
-    w = source.naturalWidth; h = source.naturalHeight;
-  } else {
-    w = source.width; h = source.height;
-  }
+async function compressImageToJpeg(img: HTMLImageElement, maxPx = 1400, quality = 0.80): Promise<string> {
+  let w = img.naturalWidth, h = img.naturalHeight;
   if (w > maxPx || h > maxPx) {
     const scale = maxPx / Math.max(w, h);
     w = Math.round(w * scale); h = Math.round(h * scale);
@@ -56,112 +47,18 @@ async function compressImageToJpeg(
   const ctx = canvas.getContext("2d")!;
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(source, 0, 0, w, h);
+  ctx.drawImage(img, 0, 0, w, h);
   return canvas.toDataURL("image/jpeg", quality).split(",")[1];
 }
 
-// ── PDF первая страница → JPG через pdf.js ────────────────────────────────────
-export async function pdfToJpeg(file: File): Promise<string> {
-  const pdfjsLib = await import("pdfjs-dist");
-
-  // Vite: указываем путь к воркеру через URL-импорт (корректно для v5 .mjs)
-  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/build/pdf.worker.min.mjs",
-      import.meta.url,
-    ).toString();
-  }
-
-  const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({
-    data: new Uint8Array(arrayBuffer),
-    useSystemFonts: true,
-  }).promise;
-
-  const page = await pdf.getPage(1);
-
-  // 150 dpi: scale = 150 / 72 ≈ 2.08
-  const viewport = page.getViewport({ scale: 150 / 72 });
-  const canvas   = document.createElement("canvas");
-  canvas.width   = Math.round(viewport.width);
-  canvas.height  = Math.round(viewport.height);
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise;
-  pdf.destroy();
-
-  return compressImageToJpeg(canvas, 1400, 0.80);
-}
-
-// ── Excel → JPG через SheetJS + Canvas ───────────────────────────────────────
-export async function excelToJpeg(file: File): Promise<string> {
-  const XLSX = await import("xlsx");
-
-  const arrayBuffer = await file.arrayBuffer();
-  const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: "array" });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const rows: string[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][];
-
-  // Убираем полностью пустые строки
-  const clean = rows.filter(r => r.some(c => String(c).trim() !== ""));
-  // Не более 120 строк (при 120 ≈ высота ~2400px, хватит для Gemini)
-  const display = clean.slice(0, 120);
-  const ncols = Math.max(...display.map(r => r.length), 1);
-
-  // Параметры отрисовки
-  const FONT_PX  = 13;
-  const PAD      = 5;
-  const ROW_H    = FONT_PX + PAD * 2 + 1;
-  // Ширина колонок: первые 2 шире (номер/наименование), остальные по 110
-  const colW = (ci: number) => ci === 0 ? 40 : ci === 1 ? 280 : 110;
-  const totalW = Array.from({ length: ncols }, (_, i) => colW(i)).reduce((a, b) => a + b, 0);
-  const totalH = display.length * ROW_H + 2;
-
-  const canvas = document.createElement("canvas");
-  canvas.width  = totalW + 2;
-  canvas.height = totalH;
-  const ctx = canvas.getContext("2d")!;
-
-  // Фон
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  ctx.font = `${FONT_PX}px monospace`;
-  ctx.textBaseline = "middle";
-
-  display.forEach((row, ri) => {
-    const y = ri * ROW_H;
-    // Зебра
-    ctx.fillStyle = ri % 2 === 0 ? "#f5f7fa" : "#ffffff";
-    ctx.fillRect(0, y, canvas.width, ROW_H);
-
-    // Разделитель строки
-    ctx.fillStyle = "#e2e8f0";
-    ctx.fillRect(0, y + ROW_H - 1, canvas.width, 1);
-
-    let x = 1;
-    for (let ci = 0; ci < ncols; ci++) {
-      const cw = colW(ci);
-      const cell = String(row[ci] ?? "");
-      // Клип для ячейки
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(x + PAD, y, cw - PAD * 2, ROW_H);
-      ctx.clip();
-      ctx.fillStyle = "#1a202c";
-      ctx.fillText(cell, x + PAD, y + ROW_H / 2);
-      ctx.restore();
-
-      // Разделитель колонки
-      ctx.fillStyle = "#e2e8f0";
-      ctx.fillRect(x + cw - 1, y, 1, ROW_H);
-      x += cw;
-    }
+// Читаем файл в base64
+async function fileToB64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload  = () => resolve((reader.result as string).split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
-
-  return compressImageToJpeg(canvas, 1400, 0.80);
 }
 
 export async function prepareFileForUpload(
@@ -178,10 +75,7 @@ export async function prepareFileForUpload(
     const b64 = await new Promise<string>((resolve, reject) => {
       const img = new Image();
       const url = URL.createObjectURL(file);
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        compressImageToJpeg(img, 1400, 0.80).then(resolve).catch(reject);
-      };
+      img.onload = () => { URL.revokeObjectURL(url); compressImageToJpeg(img, 1400, 0.80).then(resolve).catch(reject); };
       img.onerror = reject;
       img.src = url;
     });
@@ -189,27 +83,15 @@ export async function prepareFileForUpload(
     return { b64, name: name.endsWith(".jpg") ? name : name + ".jpg" };
   }
 
-  // ── PDF → JPG на фронте через pdf.js ──────────────────────────────────────
-  if (isPdf) {
+  // ── PDF и Excel — передаём байты на бэкенд, он конвертирует в JPG ──────────
+  if (isPdf || isExcel) {
     onProgress?.("converting");
-    const b64 = await pdfToJpeg(file);
+    const b64 = await fileToB64(file);
     onProgress?.("ready");
-    const name = file.name.replace(/\.pdf$/i, ".jpg");
-    return { b64, name };
+    return { b64, name: file.name };
   }
 
-  // ── Excel → JPG на фронте через SheetJS + Canvas ──────────────────────────
-  if (isExcel) {
-    onProgress?.("converting");
-    const b64 = await excelToJpeg(file);
-    onProgress?.("ready");
-    const name = file.name.replace(/\.xlsx?$/i, ".jpg");
-    return { b64, name };
-  }
-
-  throw new Error(
-    "Неподдерживаемый формат. Загрузите JPG, PNG, PDF или Excel (XLS/XLSX)."
-  );
+  throw new Error("Неподдерживаемый формат. Загрузите JPG, PNG, PDF или Excel (XLS/XLSX).");
 }
 
 export interface InvoiceForm {

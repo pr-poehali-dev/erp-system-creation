@@ -3416,12 +3416,141 @@ def _parse_ai_response(raw_content: str):
         return {}, f"JSON не найден. Raw:{json_str[:300]}"
 
 
+def _pdf_to_jpg_b64(file_bytes: bytes) -> str:
+    """
+    Конвертирует PDF в JPEG.
+    Пытается через PyMuPDF (fitz) если доступен, иначе возвращает None — 
+    тогда PDF будет передан в Gemini напрямую как application/pdf.
+    """
+    try:
+        import fitz, base64, io as _io
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        page = doc[0]
+        mat = fitz.Matrix(150 / 72, 150 / 72)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        from PIL import Image as _PIL
+        img = _PIL.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        MAX = 1400
+        w, h = img.size
+        if w > MAX or h > MAX:
+            scale = MAX / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), _PIL.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=88)
+        doc.close()
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except ImportError:
+        # PyMuPDF не установлен — вернём None, PDF пойдёт напрямую в Gemini
+        return None
+
+
+def _excel_to_jpg_b64(file_bytes: bytes, ext: str) -> str:
+    """Читает Excel и отрисовывает таблицу в JPEG через Pillow. Возвращает base64."""
+    import base64, io as _io
+    from PIL import Image as _PIL, ImageDraw as _Draw, ImageFont as _Font
+
+    # ── Читаем строки Excel ───────────────────────────────────────────────────
+    if ext == "xlsx":
+        import openpyxl
+        wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active or wb.worksheets[0]
+        rows_raw = []
+        for row in ws.iter_rows(max_row=100, values_only=True):
+            rows_raw.append([str(c) if c is not None else "" for c in row])
+        wb.close()
+    else:
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=file_bytes)
+        ws = wb.sheet_by_index(0)
+        rows_raw = []
+        for ri in range(min(ws.nrows, 100)):
+            rows_raw.append([str(ws.cell_value(ri, ci)) for ci in range(min(ws.ncols, 15))])
+
+    # Убираем пустые строки, ограничиваем 12 колонок
+    rows = [r[:12] for r in rows_raw if any(str(c).strip() for c in r)]
+    if not rows:
+        rows = [["(пустой файл)"]]
+
+    ncols = max(len(r) for r in rows)
+    rows  = [r + [""] * (ncols - len(r)) for r in rows]  # выравниваем ширину
+
+    # ── Параметры рендера ─────────────────────────────────────────────────────
+    FONT_SZ = 12
+    PAD     = 5
+    ROW_H   = FONT_SZ + PAD * 2
+    # Первые две колонки шире (номер + наименование), остальные по 100px
+    col_widths = [40, 260] + [100] * max(0, ncols - 2)
+    col_widths = col_widths[:ncols]
+    IMG_W  = sum(col_widths) + 2
+    IMG_H  = len(rows) * ROW_H + 2
+
+    img  = _PIL.new("RGB", (IMG_W, IMG_H), "#ffffff")
+    draw = _Draw.Draw(img)
+
+    # Шрифт — пробуем DejaVu, иначе встроенный
+    try:
+        font = _Font.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", FONT_SZ)
+    except Exception:
+        font = _Font.load_default()
+
+    for ri, row in enumerate(rows):
+        y = ri * ROW_H
+        bg = "#eef2f7" if ri % 2 == 0 else "#ffffff"
+        draw.rectangle([0, y, IMG_W, y + ROW_H], fill=bg)
+        x = 1
+        for ci, cell in enumerate(row):
+            cw = col_widths[ci] if ci < len(col_widths) else 100
+            # Обрезаем слишком длинный текст
+            text = str(cell)[:32]
+            draw.text((x + PAD, y + PAD), text, fill="#1a202c", font=font)
+            draw.line([(x + cw - 1, y), (x + cw - 1, y + ROW_H)], fill="#d1d9e0")
+            x += cw
+        draw.line([(0, y + ROW_H - 1), (IMG_W, y + ROW_H - 1)], fill="#d1d9e0")
+
+    # Масштабируем если > 1400px по большей стороне
+    MAX = 1400
+    w, h = img.size
+    if w > MAX or h > MAX:
+        scale = MAX / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), _PIL.LANCZOS)
+
+    buf = _io.BytesIO()
+    img.save(buf, format="JPEG", quality=88)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
 def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
-    """Загружает файл счёта в S3, обновляет запись в invoices."""
+    """
+    Загружает файл счёта в S3.
+    PDF и Excel автоматически конвертируются в JPG на бэкенде перед сохранением.
+    """
+    import base64 as _b64
     ext = file_name.rsplit('.', 1)[-1].lower() if '.' in file_name else ''
     if ext not in ALLOWED_EXTS:
         return None, f"Неподдерживаемый формат. Разрешены: {', '.join(sorted(ALLOWED_EXTS))}"
-    # Уникальное имя файла: inv_{id}_{originalname}, папка invoices/
+
+    file_bytes = _b64.b64decode(file_b64)
+
+    # ── Конвертируем PDF → JPG (если fitz доступен), иначе сохраняем as-is ────
+    if ext == "pdf":
+        try:
+            jpg_b64 = _pdf_to_jpg_b64(file_bytes)
+            if jpg_b64 is not None:
+                file_b64  = jpg_b64
+                file_name = file_name[:-4] + ".jpg"
+            # else: fitz недоступен — сохраняем PDF, Gemini прочитает напрямую
+        except Exception as e:
+            return None, f"Не удалось обработать PDF: {e}"
+
+    # ── Конвертируем Excel → JPG ──────────────────────────────────────────────
+    elif ext in ("xls", "xlsx"):
+        try:
+            file_b64 = _excel_to_jpg_b64(file_bytes, ext)
+            file_name = file_name.rsplit(".", 1)[0] + ".jpg"
+        except Exception as e:
+            return None, f"Не удалось обработать Excel: {e}"
+
+    # Уникальное имя: inv_{id}_{name}, папка invoices/
     safe_name = f"inv_{invoice_id}_{file_name}"
     cdn_url, _ = upload_file_to_s3(file_b64, safe_name, "invoices")
     cur.execute(f"""
@@ -4053,7 +4182,7 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
     """
     import base64, io as _io
 
-    # Принимаем jpg/jpeg/png — сжимаем через Pillow если доступна
+    # JPG/PNG — сжимаем через Pillow
     if ext in ("jpg", "jpeg", "png"):
         try:
             from PIL import Image as _PILImage
@@ -4072,9 +4201,19 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
             mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
             return base64.b64encode(file_bytes).decode("utf-8"), mime
 
+    # PDF — пробуем fitz, иначе передаём напрямую в Gemini (поддерживает PDF)
+    if ext == "pdf":
+        jpg_b64 = _pdf_to_jpg_b64(file_bytes)
+        if jpg_b64:
+            debug_log.append(f"pdf → jpg via fitz, size={len(jpg_b64)}")
+            return jpg_b64, "image/jpeg"
+        # fitz недоступен: отправляем PDF напрямую
+        debug_log.append(f"pdf → direct (fitz unavailable), size={len(file_bytes)}")
+        return base64.b64encode(file_bytes).decode("utf-8"), "application/pdf"
+
     return None, (
-        f"Формат «{ext.upper()}» не поддерживается на стороне сервера. "
-        "Фронт должен конвертировать PDF/Excel в JPG перед загрузкой."
+        f"Формат «{ext.upper()}» не поддерживается. "
+        "Загрузите JPG, PNG или PDF."
     )
 
 
@@ -4178,20 +4317,12 @@ def recognize_invoice(cur, invoice_id: int):
         "content": "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО JSON без пояснений и markdown."
     }
 
-    if mime == "text/plain":
-        # Excel → текстовый промпт (без изображения)
-        import base64 as _b64
-        tsv_text = _b64.b64decode(file_b64).decode("utf-8")
-        usr_msg = {"role": "user", "content": [
-            {"type": "text", "text": _PROMPT_IMAGE_DIRECT + f"\n\nТаблица из Excel (TSV-формат):\n{tsv_text[:8000]}"},
-        ]}
-    else:
-        # JPG/PNG/PDF → отправляем как data URL
-        img_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
-        usr_msg = {"role": "user", "content": [
-            {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
-            img_content,
-        ]}
+    # JPG / PNG / PDF (application/pdf) — всё передаём как data URL
+    img_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
+    usr_msg = {"role": "user", "content": [
+        {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
+        img_content,
+    ]}
 
     try:
         raw_response = _call_polza(req_lib, [sys_msg, usr_msg], max_tokens=4096)
