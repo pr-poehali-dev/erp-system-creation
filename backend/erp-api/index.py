@@ -4281,6 +4281,8 @@ def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
     total  = len(chunks)
     debug_log.append(f"excel_tsv: {len(rows)} rows → {total} chunks")
 
+    _SYS_EXCEL = "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown."
+
     _EXCEL_PROMPT = (
         "Ты получаешь фрагмент счёта в формате TSV (столбцы разделены табуляцией).\n"
         "Извлеки ВСЕ позиции товаров/материалов из таблицы.\n"
@@ -4301,13 +4303,8 @@ def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
         '"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}'
     )
 
-    sys_msg = {
-        "role": "system",
-        "content": "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО JSON без пояснений и markdown."
-    }
-
-    all_items     = []
-    meta_obj      = {}
+    all_items = []
+    meta_obj  = {}
     import re as _re2
 
     def _parse_chunk(raw: str):
@@ -4329,45 +4326,84 @@ def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
                 continue
         return {}, []
 
+    # Флаг: если DeepSeek недоступен — переключаемся на Gemini для оставшихся чанков
+    use_fallback = False
+
     for idx, chunk in enumerate(chunks):
-        debug_log.append(f"excel_chunk {idx+1}/{total}")
         tsv_text = _to_tsv(chunk)
-        usr_msg  = {"role": "user", "content": [
-            {"type": "text", "text": _EXCEL_PROMPT + f"\n\nФРАГМЕНТ {idx+1} из {total}:\n{tsv_text}"},
-        ]}
+        model_used = "google/gemini-3.1-flash-lite" if use_fallback else "deepseek/deepseek-v4-pro"
+
+        logger.warning(
+            "Отправка чанка Excel в %s, часть %d из %d",
+            "DeepSeek V4 Pro" if not use_fallback else "Gemini (fallback)",
+            idx + 1, total,
+        )
+        debug_log.append(f"excel_chunk {idx+1}/{total} model={model_used}")
+
+        # Формируем сообщения как plain-text (DeepSeek не поддерживает vision-формат)
+        user_text = _EXCEL_PROMPT + f"\n\nСчёт в формате TSV (фрагмент {idx+1} из {total}):\n{tsv_text}"
+        messages  = [
+            {"role": "system", "content": _SYS_EXCEL},
+            {"role": "user",   "content": user_text},
+        ]
+
         try:
-            raw = _call_polza_model(
-                req_lib,
-                messages=[sys_msg, usr_msg],
-                model="deepseek/deepseek-v4-0709",
-                max_tokens=4096,
-            )
+            raw = _call_polza_model(req_lib, messages=messages, model=model_used, max_tokens=4096)
             obj, items = _parse_chunk(raw)
+            logger.warning(
+                "Чанк %d/%d: извлечено %d позиций (model=%s)",
+                idx + 1, total, len(items), model_used,
+            )
             debug_log.append(f"excel_chunk {idx+1}: got {len(items)} items")
-            # Мета берём из первого чанка
             if not meta_obj and obj:
                 meta_obj = obj
             all_items.extend(items)
-        except Exception as ce:
-            debug_log.append(f"excel_chunk {idx+1} error: {ce}")
+        except RuntimeError as ce:
+            err_str = str(ce)
+            debug_log.append(f"excel_chunk {idx+1} error: {err_str}")
+            logger.warning("Чанк %d/%d ошибка (%s): %s", idx + 1, total, model_used, err_str)
+            # 400/404 от DeepSeek → переключаемся на fallback и повторяем этот чанк
+            if not use_fallback and ("400" in err_str or "404" in err_str or "model" in err_str.lower()):
+                use_fallback = True
+                logger.warning("DeepSeek недоступен, переключаемся на Gemini для оставшихся чанков")
+                debug_log.append("excel: switching to gemini fallback")
+                try:
+                    fallback_msgs = [
+                        {"role": "system", "content": _SYS_EXCEL},
+                        {"role": "user",   "content": user_text},
+                    ]
+                    raw2 = _call_polza_model(req_lib, messages=fallback_msgs,
+                                             model="google/gemini-3.1-flash-lite", max_tokens=4096)
+                    obj2, items2 = _parse_chunk(raw2)
+                    debug_log.append(f"excel_chunk {idx+1} fallback: got {len(items2)} items")
+                    if not meta_obj and obj2:
+                        meta_obj = obj2
+                    all_items.extend(items2)
+                except Exception as fe:
+                    debug_log.append(f"excel_chunk {idx+1} fallback also failed: {fe}")
 
     if not all_items:
-        return {}, [], f"DeepSeek не смог извлечь позиции из Excel (chunks={total})"
+        return {}, [], f"Не удалось извлечь позиции из Excel (chunks={total})"
 
     return meta_obj, all_items, None
 
 
 def _call_polza_model(req_lib, messages: list, model: str, max_tokens: int = 4096) -> str:
     """Вызов Polza.ai с явным указанием модели. Возвращает строку-ответ."""
-    payload = {"messages": messages, "model": model,
-               "temperature": 0.0, "max_tokens": max_tokens}
+    payload = {
+        "messages": messages,
+        "model":    model,
+        "temperature": 0.0,
+        "max_tokens": max_tokens,
+    }
+    logger.warning("_call_polza_model: model=%s msg_count=%d", model, len(messages))
     resp = req_lib.post(
         f"{CHATGPT_URL}?action=generate",
         json=payload,
         timeout=120,
     )
     if not resp.ok:
-        try:    err_text = resp.json()
+        try:    err_text = str(resp.json())
         except Exception: err_text = resp.text[:500]
         raise RuntimeError(f"polza {resp.status_code}: {err_text}")
     return resp.json().get("content", "")
