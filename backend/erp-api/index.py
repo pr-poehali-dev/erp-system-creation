@@ -3437,13 +3437,21 @@ def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
 # ── Утилиты ──────────────────────────────────────────────────────────────────
 
 def _call_polza(req_lib, messages: list, max_tokens: int = 4096) -> str:
-    """Вызов Polza.ai / GPT-4o. Возвращает строку-ответ модели."""
+    """Вызов Polza.ai. Возвращает строку-ответ модели."""
+    model = "google/gemini-3.1-flash-lite"
+    payload = {"messages": messages, "model": model,
+               "temperature": 0.0, "max_tokens": max_tokens}
+    logger.info(f"_call_polza: model={model} messages_count={len(messages)} max_tokens={max_tokens}")
     resp = req_lib.post(
         f"{CHATGPT_URL}?action=generate",
-        json={"messages": messages, "model": "openai/gpt-4o",
-              "temperature": 0.0, "max_tokens": max_tokens},
+        json=payload,
         timeout=120
     )
+    if not resp.ok:
+        err_text = ""
+        try: err_text = resp.json()
+        except Exception: err_text = resp.text[:500]
+        logger.error(f"_call_polza error {resp.status_code}: {err_text}")
     resp.raise_for_status()
     return resp.json().get("content", "")
 

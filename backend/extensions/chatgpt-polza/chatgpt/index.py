@@ -128,12 +128,6 @@ def handle_generate(body: dict) -> dict:
     temperature = body.get("temperature", 0.7)
     max_tokens = body.get("max_tokens")
 
-    # Validate model starts with openai/
-    if not model.startswith("openai/"):
-        return cors_response(400, {
-            "error": "This extension only supports OpenAI models (openai/*)"
-        })
-
     request_data = {
         "model": model,
         "messages": messages,
@@ -177,15 +171,13 @@ def handle_models(body: dict) -> dict:
     try:
         result = make_request("models", method="GET")
 
-        # Filter only OpenAI models
         models = []
         for model in result.get("data", []):
             model_id = model.get("id", "")
-            if model_id.startswith("openai/"):
-                models.append({
-                    "id": model_id,
-                    "name": model_id.replace("openai/", "").upper(),
-                })
+            models.append({
+                "id": model_id,
+                "name": model.get("name", model_id),
+            })
 
         return cors_response(200, {
             "success": True,
