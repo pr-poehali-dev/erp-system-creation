@@ -24,12 +24,11 @@ interface Props {
 function manualToAiItem(row: ManualRow): AiItem {
   return {
     ...EMPTY_AI_ITEM,
-    supplier_name: row.supplier_name.trim() || null,
-    material:      row.material.trim()      || null,
-    unit:          row.unit,
-    unit_price:    row.unit_price  ? parseFloat(row.unit_price.replace(",", "."))  : null,
-    quantity:      row.quantity    ? parseFloat(row.quantity.replace(",", "."))    : null,
-    complete:      !!(row.material.trim() && row.unit_price && row.quantity),
+    material:   row.material.trim()   || null,
+    unit:       row.unit,
+    unit_price: row.unit_price  ? parseFloat(row.unit_price.replace(",", "."))  : null,
+    quantity:   row.quantity    ? parseFloat(row.quantity.replace(",", "."))    : null,
+    complete:   !!(row.material.trim() && row.unit_price && row.quantity),
   };
 }
 

@@ -96,8 +96,8 @@ export const EMPTY_FORM: InvoiceForm = {
 
 // Одна распознанная позиция из счёта
 export interface AiItem {
-  supplier_name: string | null;
   supplier_id: number | null;
+  supplier_name?: string | null;   // только для отображения из бэкенда, не передаётся при создании
   supplier_created: boolean;
   material: string | null;
   material_id: number | null;
@@ -115,8 +115,8 @@ export interface AiItem {
 
 // Пустая позиция для ручного ввода
 export const EMPTY_AI_ITEM: AiItem = {
-  supplier_name: null, supplier_id: null, supplier_created: false,
-  material: null,      material_id: null, material_created: false,
+  supplier_id: null, supplier_created: false,
+  material: null,    material_id: null, material_created: false,
   unit: "шт", unit_price: null, quantity: null,
   invoice_date: null, invoice_number: null, complete: false,
   quality: "ok", price_fixed: false,

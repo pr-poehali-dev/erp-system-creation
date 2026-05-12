@@ -3668,7 +3668,7 @@ def _postprocess_items(raw_items: list, supplier_name: str, invoice_date: str | 
                        invoice_number: str | None) -> list:
     """
     Постобработка и валидация позиций:
-    - Заполняет supplier_name / invoice_date / invoice_number из мета если нет
+    - Заполняет invoice_date / invoice_number из мета если нет
     - Исправляет unit_price × 1000 для тяжёлых материалов с ценой < 1000 (путаница руб/коп или т/кг)
     - Проставляет quality: 'ok' | 'suspicious' | 'bad'
     """
@@ -3681,6 +3681,7 @@ def _postprocess_items(raw_items: list, supplier_name: str, invoice_date: str | 
         unit   = _clean(item.get("unit")) or "шт"
         up     = _safe_float(item.get("unit_price"))
         qty    = _safe_float(item.get("quantity"))
+        # supplier_name берём из мета для отображения (не для записи в БД)
         s_name = _clean(item.get("supplier_name")) or supplier_name or None
         idate  = _clean(item.get("invoice_date"))  or invoice_date  or None
         inum   = _clean(item.get("invoice_number")) or invoice_number or None
@@ -5687,15 +5688,17 @@ def handler(event: dict, context) -> dict:
     except KeyError as ke:
         conn.rollback()
         key = str(ke).strip("'\"")
-        logger.warning(f"Missing required field: {key}\n{traceback.format_exc()}")
-        # supplier_name — необязательное поле, не должно блокировать операцию
-        # Но раз мы здесь — значит баг в коде. Логируем и даём понятное сообщение.
+        logger.error(f"Unexpected KeyError: {key}\n{traceback.format_exc()}")
+        # Технические поля (supplier_name и т.п.) не должны блокировать пользователя
+        _non_blocking = {"supplier_name", "supplier", "vendor"}
+        if key in _non_blocking:
+            return err("Не удалось определить поставщика. Счёт будет создан без поставщика.", 400)
         _field_labels = {
-            "invoice_id":    "ID счёта",
-            "invoice_date":  "дата счёта",
-            "unit_price":    "цена за единицу",
-            "quantity":      "количество",
-            "material":      "наименование материала",
+            "invoice_id":   "ID счёта",
+            "invoice_date": "дата счёта",
+            "unit_price":   "цена за единицу",
+            "quantity":     "количество",
+            "material":     "наименование материала",
         }
         label = _field_labels.get(key, f"«{key}»")
         return err(f"Не указано обязательное поле: {label}", 400)

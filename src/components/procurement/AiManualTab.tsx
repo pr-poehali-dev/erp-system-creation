@@ -3,7 +3,6 @@ import Icon from "@/components/ui/icon";
 const UNITS = ["шт", "м3", "т", "пог.м", "м2", "компл"];
 
 export interface ManualRow {
-  supplier_name: string;
   material: string;
   unit: string;
   unit_price: string;
@@ -11,7 +10,7 @@ export interface ManualRow {
 }
 
 export const EMPTY_MANUAL: ManualRow = {
-  supplier_name: "", material: "", unit: "шт", unit_price: "", quantity: "",
+  material: "", unit: "шт", unit_price: "", quantity: "",
 };
 
 interface Props {
@@ -39,22 +38,16 @@ export default function AiManualTab({
           <table className="w-full text-[11px]">
             <thead>
               <tr className="bg-secondary/60 text-hint">
-                <th className="px-2 py-1.5 text-left font-medium w-[22%]">Поставщик</th>
-                <th className="px-2 py-1.5 text-left font-medium w-[28%]">Материал *</th>
-                <th className="px-2 py-1.5 text-left font-medium w-[10%]">Ед.</th>
-                <th className="px-2 py-1.5 text-right font-medium w-[16%]">Цена</th>
-                <th className="px-2 py-1.5 text-right font-medium w-[16%]">Кол-во</th>
+                <th className="px-2 py-1.5 text-left font-medium w-[36%]">Материал *</th>
+                <th className="px-2 py-1.5 text-left font-medium w-[12%]">Ед.</th>
+                <th className="px-2 py-1.5 text-right font-medium w-[20%]">Цена</th>
+                <th className="px-2 py-1.5 text-right font-medium w-[20%]">Кол-во</th>
                 <th className="px-2 py-1.5 w-7"></th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border bg-white">
               {rows.map((row, idx) => (
                 <tr key={idx}>
-                  <td className="px-1 py-1">
-                    <input value={row.supplier_name} onChange={e => onUpdate(idx, "supplier_name", e.target.value)}
-                      placeholder="Поставщик"
-                      className="w-full border border-border rounded px-1.5 py-1 text-[11px] outline-none focus:ring-1 focus:ring-primary" />
-                  </td>
                   <td className="px-1 py-1">
                     <input value={row.material} onChange={e => onUpdate(idx, "material", e.target.value)}
                       placeholder="Наименование *"
