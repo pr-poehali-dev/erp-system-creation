@@ -4078,6 +4078,13 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
 
     # ── PDF → передаём напрямую в Gemini (поддерживает PDF через data URL) ───
     if ext == "pdf":
+        PDF_LIMIT = 500 * 1024  # 500 KB
+        if len(file_bytes) > PDF_LIMIT:
+            debug_log.append(f"pdf too large: {len(file_bytes)} > {PDF_LIMIT}")
+            return None, (
+                f"PDF слишком большой ({len(file_bytes)//1024} КБ, лимит 500 КБ). "
+                "Сохраните нужную страницу счёта как JPG и загрузите изображение."
+            )
         b64 = base64.b64encode(file_bytes).decode("utf-8")
         debug_log.append(f"pdf: size={len(file_bytes)}, sending as application/pdf")
         return b64, "application/pdf"
@@ -4114,6 +4121,100 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
             return None, f"Не удалось прочитать Excel: {e}. Попробуйте сохранить как JPG и загрузить повторно."
 
     return None, f"Формат «{ext.upper()}» не поддерживается. Загрузите JPG, PNG, PDF или Excel."
+
+
+def _read_excel_rows(file_bytes: bytes, ext: str) -> list:
+    """Читает Excel и возвращает список непустых строк (каждая строка — список строк)."""
+    import io as _io
+    if ext == "xlsx":
+        import openpyxl as _openpyxl
+        wb = _openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+        ws = wb.active or wb.worksheets[0]
+        rows_raw = []
+        for row in ws.iter_rows(max_row=500, values_only=True):
+            rows_raw.append([str(c) if c is not None else "" for c in row])
+        wb.close()
+    else:
+        import xlrd as _xlrd
+        wb = _xlrd.open_workbook(file_contents=file_bytes)
+        ws = wb.sheet_by_index(0)
+        rows_raw = []
+        for ri in range(min(ws.nrows, 500)):
+            rows_raw.append([str(ws.cell_value(ri, ci)) for ci in range(min(ws.ncols, 15))])
+
+    return [r for r in rows_raw if any(str(c).strip() for c in r)]
+
+
+# Промпт для чанка Excel — только позиции, без мета
+_PROMPT_EXCEL_CHUNK = """Извлеки все строки товаров/материалов из таблицы ниже.
+Верни ТОЛЬКО JSON-массив без обёртки:
+[{"material":"...", "quantity":..., "unit":"...", "unit_price":..., "amount":...}, ...]
+
+Правила:
+- Пропускай строки-заголовки, итоги, пустые строки
+- quantity и unit_price — числа (без пробелов и валюты)
+- unit — единица измерения: шт, м3, м2, пог.м, т, кг, л, уп, компл и т.д.
+- Если поле не найдено — null
+- НЕ добавляй пояснений, только JSON-массив
+"""
+
+
+def recognize_excel_chunk(cur, invoice_id: int, chunk_index: int, chunk_size: int = 20):
+    """
+    Распознаёт один чанк строк Excel (chunk_index * chunk_size .. (chunk_index+1) * chunk_size).
+    Возвращает (items_list, error) где items_list — нормализованные позиции.
+    """
+    import requests as req_lib, base64, io as _io
+
+    cur.execute(
+        f"SELECT pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
+        (invoice_id,)
+    )
+    row = cur.fetchone()
+    if not row: return None, "Счёт не найден"
+    file_url, file_name = row
+    if not file_url: return None, "Файл не прикреплён"
+
+    ext = (file_name or "").rsplit(".", 1)[-1].lower()
+    if ext not in ("xls", "xlsx"): return None, "Файл не является Excel"
+
+    resp = req_lib.get(file_url, timeout=30)
+    resp.raise_for_status()
+    file_bytes = resp.content
+
+    all_rows = _read_excel_rows(file_bytes, ext)
+    start = chunk_index * chunk_size
+    end   = start + chunk_size
+    chunk_rows = all_rows[start:end]
+    total_chunks = (len(all_rows) + chunk_size - 1) // chunk_size
+
+    if not chunk_rows:
+        return {"items": [], "total_chunks": total_chunks, "chunk_index": chunk_index}, None
+
+    tsv = "\n".join("\t".join(str(c) for c in r) for r in chunk_rows)
+    prompt = _PROMPT_EXCEL_CHUNK + f"\n\nТаблица (строки {start+1}–{min(end, len(all_rows))} из {len(all_rows)}):\n{tsv}"
+
+    sys_msg = {"role": "system", "content": "Отвечай ТОЛЬКО JSON-массивом без пояснений."}
+    usr_msg = {"role": "user", "content": [{"type": "text", "text": prompt}]}
+
+    raw = _call_polza(req_lib, [sys_msg, usr_msg], max_tokens=2048)
+
+    # Парсим ответ
+    import re as _re, json as _json
+    raw = raw.strip()
+    raw = _re.sub(r'```(?:json)?\s*', '', raw)
+    raw = _re.sub(r'```', '', raw).strip()
+    items_raw = []
+    for m in sorted(_re.finditer(r'\[[\s\S]+\]', raw), key=lambda x: -len(x.group(0))):
+        try:
+            arr = _json.loads(m.group(0))
+            if isinstance(arr, list):
+                items_raw = arr
+                break
+        except Exception:
+            continue
+
+    return {"items": items_raw, "total_chunks": total_chunks, "chunk_index": chunk_index}, None
 
 
 def recognize_invoice(cur, invoice_id: int):
@@ -5157,6 +5258,37 @@ def handler(event: dict, context) -> dict:
                     result, error = recognize_invoice(cur, iid)
                     if error: return err(error)
                     conn.commit()
+                    return ok(result)
+                elif action == "excel_chunk_info":
+                    # Возвращает инфо о файле: кол-во строк, кол-во чанков
+                    if user_role not in ("director", "supply_director", "supplier"):
+                        return err("Нет прав", 403)
+                    iid        = int(body["invoice_id"])
+                    chunk_size = int(body.get("chunk_size") or 20)
+                    cur.execute(
+                        f"SELECT pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
+                        (iid,)
+                    )
+                    row = cur.fetchone()
+                    if not row: return err("Счёт не найден")
+                    file_url, file_name = row
+                    if not file_url: return err("Файл не прикреплён")
+                    ext = (file_name or "").rsplit(".", 1)[-1].lower()
+                    if ext not in ("xls", "xlsx"): return err("Файл не является Excel")
+                    import requests as _rq
+                    resp = _rq.get(file_url, timeout=30)
+                    resp.raise_for_status()
+                    all_rows = _read_excel_rows(resp.content, ext)
+                    total_chunks = (len(all_rows) + chunk_size - 1) // chunk_size
+                    return ok({"total_rows": len(all_rows), "total_chunks": total_chunks, "chunk_size": chunk_size})
+                elif action == "recognize_excel_chunk":
+                    if user_role not in ("director", "supply_director", "supplier"):
+                        return err("Нет прав", 403)
+                    iid         = int(body["invoice_id"])
+                    chunk_index = int(body.get("chunk_index") or 0)
+                    chunk_size  = int(body.get("chunk_size") or 20)
+                    result, error = recognize_excel_chunk(cur, iid, chunk_index, chunk_size)
+                    if error: return err(error)
                     return ok(result)
                 elif action == "apply_items":
                     if user_role not in ("director", "supply_director", "supplier"):

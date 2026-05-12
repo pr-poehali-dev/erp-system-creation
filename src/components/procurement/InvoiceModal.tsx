@@ -18,6 +18,7 @@ interface Props {
   autoRecognize: boolean;
   error: string;
   recognizing: boolean;
+  chunkProgress: { current: number; total: number } | null;
   applying: boolean;
   aiResult: AiRecognizeResult | null;
   aiError: string;
@@ -38,7 +39,7 @@ export default function InvoiceModal({
   editItem, form, setForm,
   localFile, uploadedFile,
   saving, converting, autoRecognize, error,
-  recognizing, applying, aiResult, aiError, canRecognize, canSeeRawData,
+  recognizing, chunkProgress, applying, aiResult, aiError, canRecognize, canSeeRawData,
   suppliers, materials,
   onClose, onSave, onFileSelect, onRemoveFile,
   onRecognize, onApplyAI, onDismissAI,
@@ -137,7 +138,9 @@ export default function InvoiceModal({
                 <button type="button" onClick={onRecognize} disabled={recognizing}
                   className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed border-primary/30 rounded-xl text-[13px] font-medium text-primary hover:bg-primary/5 transition-colors disabled:opacity-60">
                   {recognizing
-                    ? <><Icon name="Loader" size={14} className="animate-spin" />Распознаём через ИИ...</>
+                    ? chunkProgress
+                      ? <><Icon name="Loader" size={14} className="animate-spin" />Часть {chunkProgress.current} из {chunkProgress.total}...</>
+                      : <><Icon name="Loader" size={14} className="animate-spin" />Распознаём PDF...</>
                     : <><Icon name="Sparkles" size={14} />Распознать через ИИ</>
                   }
                 </button>
@@ -161,12 +164,37 @@ export default function InvoiceModal({
           {converting && (
             <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
               <Icon name="Loader" size={13} className="animate-spin shrink-0" />
-              Преобразование файла в изображение...
+              Загрузка файла...
+            </div>
+          )}
+
+          {recognizing && chunkProgress && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[12px] text-primary">
+                <span className="flex items-center gap-1.5">
+                  <Icon name="Loader" size={12} className="animate-spin shrink-0" />
+                  Обработка части {chunkProgress.current} из {chunkProgress.total}...
+                </span>
+                <span className="text-muted-foreground">{Math.round((chunkProgress.current / chunkProgress.total) * 100)}%</span>
+              </div>
+              <div className="w-full bg-secondary rounded-full h-1.5 overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all duration-500"
+                  style={{ width: `${(chunkProgress.current / chunkProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {recognizing && !chunkProgress && (
+            <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+              <Icon name="Loader" size={13} className="animate-spin shrink-0" />
+              Распознавание PDF... это может занять до 15 секунд
             </div>
           )}
 
           <div className="flex gap-2 pt-1">
-            <button type="submit" disabled={saving || converting}
+            <button type="submit" disabled={saving || converting || recognizing}
               className="flex-1 py-2.5 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50 flex items-center justify-center gap-1.5 transition-colors">
               {saving
                 ? <><Icon name="Loader" size={13} className="animate-spin" />Сохраняем...</>

@@ -195,6 +195,14 @@ export const api = {
       request<import("@/components/procurement/invoices.shared").AiRecognizeResult>(
         "invoices", "POST", { action: "recognize", invoice_id }
       ),
+    excelChunkInfo: (invoice_id: number, chunk_size = 20) =>
+      request<{ total_rows: number; total_chunks: number; chunk_size: number }>(
+        "invoices", "POST", { action: "excel_chunk_info", invoice_id, chunk_size }
+      ),
+    recognizeExcelChunk: (invoice_id: number, chunk_index: number, chunk_size = 20) =>
+      request<{ items: object[]; total_chunks: number; chunk_index: number }>(
+        "invoices", "POST", { action: "recognize_excel_chunk", invoice_id, chunk_index, chunk_size }
+      ),
     applyItems: (params: {
       invoice_id: number;
       items: import("@/components/procurement/invoices.shared").AiItem[];

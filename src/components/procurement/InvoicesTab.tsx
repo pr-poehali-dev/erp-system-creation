@@ -24,9 +24,11 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
 
   const [saving,      setSaving]      = useState(false);
-  const [converting,  setConverting]  = useState(false);  // индикатор конвертации PDF/Excel
+  const [converting,  setConverting]  = useState(false);
   const [error,       setError]       = useState("");
   const [recognizing, setRecognizing] = useState(false);
+  // Прогресс чанкования Excel: null = нет прогресса
+  const [chunkProgress, setChunkProgress] = useState<{ current: number; total: number } | null>(null);
   const [applying,    setApplying]    = useState(false);
   const [aiResult,    setAiResult]    = useState<AiRecognizeResult | null>(null);
   const [aiError,     setAiError]     = useState("");
@@ -132,15 +134,50 @@ export default function InvoicesTab({ role }: { role?: Role }) {
         if (autoRecognize) {
           setConverting(false);
           setSaving(false);
-          // Обновляем editItem чтобы handleRecognize знал ID
           setEditItem((prev) => ({ ...prev, id: invoiceId, recognition_status: "новый" } as Invoice));
           setRecognizing(true);
           setAiError("");
+          const savedExt = uploaded.file_name.split(".").pop()?.toLowerCase() ?? "";
+          const isExcel = ["xls", "xlsx"].includes(savedExt);
+
           try {
-            const res = await api.invoices.recognize(invoiceId);
-            setAiResult(res);
+            if (isExcel) {
+              // Excel: чанкование с прогрессом
+              const info = await api.invoices.excelChunkInfo(invoiceId);
+              const { total_chunks } = info;
+              const CHUNK_SIZE = 20;
+              const allItems: AiItem[] = [];
+              for (let ci = 0; ci < total_chunks; ci++) {
+                setChunkProgress({ current: ci + 1, total: total_chunks });
+                const chunk = await api.invoices.recognizeExcelChunk(invoiceId, ci, CHUNK_SIZE);
+                if (chunk.items?.length) allItems.push(...(chunk.items as AiItem[]));
+              }
+              setChunkProgress(null);
+              // Превращаем в AiRecognizeResult-подобный объект
+              const fakeResult: AiRecognizeResult = {
+                status: "обработан",
+                meta: { invoice_date: null, invoice_number: null },
+                items: allItems,
+                items_count: allItems.length,
+                parse_error: null,
+                fallback_used: false,
+                template_used: false,
+                template: { id: null, name: null, score: null },
+                need_template_setup: false,
+                table_headers: [],
+                ai_col_suggestion: {},
+                template_fallback_info: null,
+                debug: { raw_response: null, parse_error: null, fallback_used: false, items_debug: [], continuation_log: [] },
+              };
+              setAiResult(fakeResult);
+            } else {
+              // PDF / JPG — стандартный путь
+              const res = await api.invoices.recognize(invoiceId);
+              setAiResult(res);
+            }
             load();
           } catch (err: unknown) {
+            setChunkProgress(null);
             setAiError(err instanceof Error ? err.message : "Ошибка распознавания");
           } finally {
             setRecognizing(false);
@@ -307,6 +344,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
           autoRecognize={!!(localFile && needsConversion(localFile) && canUseAI)}
           error={error}
           recognizing={recognizing}
+          chunkProgress={chunkProgress}
           applying={applying}
           aiResult={aiResult}
           aiError={aiError}
