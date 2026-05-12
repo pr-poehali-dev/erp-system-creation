@@ -14,6 +14,8 @@ interface Props {
   result: AiRecognizeResult;
   showDebug: boolean;
   applying: boolean;
+  /** invoice_id нужен для apply_locally (перечитывает файл на бэкенде) */
+  invoiceId?: number;
   onApply: (selectedItems: AiItem[], invoiceDate: string, invoiceNumber: string) => void;
   onDismiss: () => void;
 }
@@ -34,12 +36,15 @@ function manualToAiItem(row: ManualRow): AiItem {
 const pluralInvoice = (n: number) => n === 1 ? "счёт" : n < 5 ? "счёта" : "счетов";
 
 // ─── Компонент ───────────────────────────────────────────────────────────────
-export default function InvoiceAiPanel({ result, showDebug, applying, onApply, onDismiss }: Props) {
+export default function InvoiceAiPanel({
+  result, showDebug, applying, invoiceId, onApply, onDismiss,
+}: Props) {
   const hasItems      = result.items.length > 0;
   const hasParseError = !!result.parse_error;
   const needWizard    = !!result.need_template_setup && (result.table_headers?.length ?? 0) > 0;
   const templateUsed  = !!result.template_used;
   const templateInfo  = result.template;
+  const fallbackInfo  = result.template_fallback_info ?? null;
 
   const defaultTab: Tab = needWizard && !hasItems
     ? "template_wizard"
@@ -47,26 +52,46 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
     ? "items"
     : showDebug ? "raw" : "manual";
 
-  const [tab,           setTab]           = useState<Tab>(defaultTab);
-  const [selected,      setSelected]      = useState<boolean[]>(() => result.items.map(() => true));
-  const [invoiceDate,   setInvoiceDate]   = useState(result.meta.invoice_date   || "");
-  const [invoiceNumber, setInvoiceNumber] = useState(result.meta.invoice_number || "");
-  const [savingTpl,     setSavingTpl]     = useState(false);
-  const [tplSaved,      setTplSaved]      = useState<{ id: number; name: string } | null>(null);
-  const [manualRows,    setManualRows]    = useState<ManualRow[]>([{ ...EMPTY_MANUAL }]);
+  const [tab,              setTab]              = useState<Tab>(defaultTab);
+  const [selected,         setSelected]         = useState<boolean[]>(() => result.items.map(() => true));
+  const [invoiceDate,      setInvoiceDate]      = useState(result.meta.invoice_date   || "");
+  const [invoiceNumber,    setInvoiceNumber]    = useState(result.meta.invoice_number || "");
+  const [savingTpl,        setSavingTpl]        = useState(false);
+  const [savingAndApplying, setSavingAndApplying] = useState(false);
+  const [tplSaved,         setTplSaved]         = useState<{ id: number; name: string } | null>(null);
+  const [manualRows,       setManualRows]       = useState<ManualRow[]>([{ ...EMPTY_MANUAL }]);
 
-  const checkedCount = selected.filter(Boolean).length;
-  const allComplete  = result.items.every(i => i.complete);
+  // Позиции из локального (без AI) применения шаблона
+  const [localItems,     setLocalItems]     = useState<AiItem[] | null>(null);
+  const [localSelected,  setLocalSelected]  = useState<boolean[]>([]);
+  const [localLowQuality, setLocalLowQuality] = useState(false);
+
+  // Что показывать в таблице позиций: результат AI или локальный
+  const displayItems  = localItems ?? result.items;
+  const displaySelected = localItems ? localSelected : selected;
+
+  const checkedCount = displaySelected.filter(Boolean).length;
+  const allComplete  = displayItems.every(i => i.complete);
 
   const toggleAll = () => {
-    const allOn = selected.every(Boolean);
-    setSelected(selected.map(() => !allOn));
+    if (localItems) {
+      const allOn = localSelected.every(Boolean);
+      setLocalSelected(localSelected.map(() => !allOn));
+    } else {
+      const allOn = selected.every(Boolean);
+      setSelected(selected.map(() => !allOn));
+    }
   };
-  const toggleOne = (idx: number) =>
-    setSelected(s => s.map((v, i) => i === idx ? !v : v));
+  const toggleOne = (idx: number) => {
+    if (localItems) {
+      setLocalSelected(s => s.map((v, i) => i === idx ? !v : v));
+    } else {
+      setSelected(s => s.map((v, i) => i === idx ? !v : v));
+    }
+  };
 
   const handleApplyFromAI = () => {
-    const items = result.items.filter((_, i) => selected[i]);
+    const items = displayItems.filter((_, i) => displaySelected[i]);
     onApply(items, invoiceDate, invoiceNumber);
   };
   const handleApplyManual = () => {
@@ -80,6 +105,7 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
   const updateManualRow = (i: number, field: keyof ManualRow, value: string) =>
     setManualRows(r => r.map((row, idx) => idx === i ? { ...row, [field]: value } : row));
 
+  // ── Только сохранить шаблон ──────────────────────────────────────────────
   const handleSaveTemplate = useCallback(async (colMap: Record<string, number | null>, name: string) => {
     setSavingTpl(true);
     try {
@@ -90,13 +116,53 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
         column_map: colMap,
       });
       setTplSaved({ id: res.id, name: res.name });
-      setTab(hasItems ? "items" : "manual");
+      setTab(displayItems.length > 0 ? "items" : "manual");
     } catch {
-      // ошибка — остаёмся в Мастере
+      // остаёмся в Мастере
     } finally {
       setSavingTpl(false);
     }
-  }, [result.table_headers, hasItems]);
+  }, [result.table_headers, displayItems.length]);
+
+  // ── Сохранить и применить ────────────────────────────────────────────────
+  const handleSaveAndApply = useCallback(async (colMap: Record<string, number | null>, name: string) => {
+    setSavingAndApplying(true);
+    try {
+      // 1. Сохраняем шаблон
+      const saveRes = await api.post("table_templates", {
+        action: "save",
+        name,
+        headers: result.table_headers ?? [],
+        column_map: colMap,
+      });
+      setTplSaved({ id: saveRes.id, name: saveRes.name });
+
+      // 2. Применяем шаблон локально (без AI) — бэкенд перечитает файл
+      if (!invoiceId) {
+        setTab("items");
+        return;
+      }
+      const applyRes = await api.post("table_templates", {
+        action:         "apply_locally",
+        invoice_id:     invoiceId,
+        column_map:     colMap,
+        supplier_name:  result.meta.invoice_date ? "" : "",
+        invoice_date:   invoiceDate   || null,
+        invoice_number: invoiceNumber || null,
+      });
+
+      const newItems: AiItem[] = applyRes.items ?? [];
+      setLocalItems(newItems);
+      setLocalSelected(newItems.map(() => true));
+      setLocalLowQuality(!!applyRes.low_quality);
+      setTab("items");
+    } catch {
+      // При ошибке просто переключаем на результат AI
+      setTab(displayItems.length > 0 ? "items" : "manual");
+    } finally {
+      setSavingAndApplying(false);
+    }
+  }, [result.table_headers, invoiceId, invoiceDate, invoiceNumber, displayItems.length]);
 
   // ── Цвет шапки ──
   const headerCls = hasParseError && !hasItems
@@ -108,9 +174,19 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
   const titleIcon = hasParseError && !hasItems ? "AlertOctagon"
     : hasParseError ? "AlertTriangle" : "Sparkles";
 
+  // Заголовок с учётом локальных позиций
+  const itemCount = displayItems.length;
+  const titleText = !itemCount && hasParseError
+    ? "AI не смог разобрать — проверьте вручную"
+    : !itemCount && needWizard
+    ? "Новый формат счёта — настройте шаблон"
+    : itemCount
+    ? `${localItems ? "Шаблон распознал" : "ИИ распознал"} ${itemCount} ${itemCount === 1 ? "позицию" : itemCount < 5 ? "позиции" : "позиций"}`
+    : "Позиции не найдены";
+
   // ── Список вкладок ──
   const tabs: { key: Tab; label: string }[] = [
-    { key: "items",           label: `Позиции AI (${result.items.length})` },
+    { key: "items",           label: `Позиции (${itemCount})` },
     ...(needWizard ? [{ key: "template_wizard" as Tab, label: "Мастер шаблона" }] : []),
     { key: "manual",          label: "Ручной ввод" },
     ...(showDebug ? [{ key: "raw" as Tab, label: "Ответ AI" }] : []),
@@ -127,21 +203,37 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
           <div className="flex items-center justify-between">
             <span className={`flex items-center gap-1.5 text-[13px] font-semibold ${titleCls}`}>
               <Icon name={titleIcon} size={14} />
-              {!hasItems && hasParseError
-                ? "AI не смог разобрать — проверьте вручную"
-                : !hasItems && needWizard
-                ? "Новый формат счёта — настройте шаблон"
-                : hasItems
-                ? `ИИ распознал ${result.items.length} ${result.items.length === 1 ? "позицию" : result.items.length < 5 ? "позиции" : "позиций"}`
-                : "Позиции не найдены"
-              }
+              {titleText}
             </span>
             <button type="button" onClick={onDismiss} className="text-muted-foreground hover:text-foreground p-0.5">
               <Icon name="X" size={14} />
             </button>
           </div>
 
-          {/* Плашка шаблона */}
+          {/* Плашка автоотката шаблона — жёлтая */}
+          {fallbackInfo && (
+            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <Icon name="AlertTriangle" size={13} className="text-amber-600 shrink-0 mt-0.5" />
+              <span className="text-[11px] text-amber-800">
+                Шаблон «{fallbackInfo.name}» дал лишь{" "}
+                <strong>{Math.round(fallbackInfo.complete_ratio * 100)}%</strong> успешных позиций.
+                Система автоматически переключилась на AI-распознавание и предлагает создать новый шаблон.
+              </span>
+            </div>
+          )}
+
+          {/* Плашка: позиции после локального применения с низким качеством */}
+          {localLowQuality && localItems && (
+            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <Icon name="AlertTriangle" size={13} className="text-amber-600 shrink-0 mt-0.5" />
+              <span className="text-[11px] text-amber-800">
+                Шаблон распознал менее 50% позиций — возможно, маппинг колонок неверный.
+                Проверьте данные или скорректируйте Мастер шаблона.
+              </span>
+            </div>
+          )}
+
+          {/* Плашка применённого шаблона */}
           {templateUsed && templateInfo?.name && (
             <div className="flex items-center justify-between gap-2 bg-white/70 border border-emerald-200 rounded-lg px-3 py-1.5">
               <div className="flex items-center gap-1.5 text-[11px] text-emerald-700">
@@ -192,12 +284,12 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
           </div>
         </div>
 
-        {/* ── Вкладка: позиции AI ── */}
+        {/* ── Вкладка: позиции ── */}
         {tab === "items" && (
           <div className="px-4 pb-4 space-y-3">
             <AiItemsTab
-              items={result.items}
-              selected={selected}
+              items={displayItems}
+              selected={displaySelected}
               applying={applying}
               checkedCount={checkedCount}
               allComplete={allComplete}
@@ -220,8 +312,10 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
             <TemplateWizard
               headers={result.table_headers ?? []}
               aiSuggestion={result.ai_col_suggestion ?? {}}
-              onSave={handleSaveTemplate}
               saving={savingTpl}
+              savingAndApplying={savingAndApplying}
+              onSave={handleSaveTemplate}
+              onSaveAndApply={handleSaveAndApply}
             />
           </div>
         )}
@@ -232,7 +326,7 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
             <AiManualTab
               rows={manualRows}
               applying={applying}
-              hasItems={hasItems}
+              hasItems={displayItems.length > 0}
               pluralInvoice={pluralInvoice}
               onUpdate={updateManualRow}
               onAdd={addManualRow}

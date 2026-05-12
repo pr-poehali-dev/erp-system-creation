@@ -4142,6 +4142,8 @@ def recognize_invoice(cur, invoice_id: int):
     else:
         debug_log.append("no table header row detected")
 
+    template_fallback_info = None  # заполняется при автооткате
+
     if matched_template:
         # ── 5a. Шаблон найден — парсим без AI ────────────────────────────────
         raw_from_template = _apply_template(
@@ -4168,6 +4170,12 @@ def recognize_invoice(cur, invoice_id: int):
             debug_log.append(
                 f"template quality too low ({complete_ratio:.0%}) — falling back to AI"
             )
+            # Сохраняем информацию для плашки автоотката на фронте
+            template_fallback_info = {
+                "id":             matched_template["id"],
+                "name":           matched_template["name"],
+                "complete_ratio": round(complete_ratio, 2),
+            }
             matched_template = None  # сбрасываем, идём в AI ветку
 
     if not matched_template:
@@ -4249,9 +4257,10 @@ def recognize_invoice(cur, invoice_id: int):
             "name":  matched_template["name"] if matched_template else None,
             "score": matched_template["score"] if matched_template else None,
         },
-        "need_template_setup": need_template_setup,
-        "table_headers":      table_headers,      # заголовки таблицы из документа
-        "ai_col_suggestion":  ai_col_suggestion,  # предложение AI для Мастера
+        "need_template_setup":   need_template_setup,
+        "table_headers":         table_headers,
+        "ai_col_suggestion":     ai_col_suggestion,
+        "template_fallback_info": template_fallback_info,  # при автооткате: {id, name, complete_ratio}
         "debug": {
             "raw_response":     raw_text[:2000],
             "raw_response_2":   "",
@@ -5054,6 +5063,71 @@ def handler(event: dict, context) -> dict:
                     result = save_user_template(cur, _rl, name, headers, column_map)
                     conn.commit()
                     return ok(result, 201)
+                elif action == "apply_locally":
+                    # Парсинг таблицы счёта через col_map — без AI.
+                    # Перечитываем файл из S3, извлекаем текст и применяем шаблон.
+                    import requests as _rl, base64 as _b64, io as _io
+                    invoice_id_al  = int(body["invoice_id"])
+                    column_map     = body.get("column_map") or {}
+                    supplier_name  = (body.get("supplier_name") or "").strip() or ""
+                    invoice_date   = body.get("invoice_date") or None
+                    invoice_number = body.get("invoice_number") or None
+
+                    if not column_map:
+                        return err("column_map обязателен")
+
+                    # Получаем файл из БД
+                    cur.execute(
+                        f"SELECT pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
+                        (invoice_id_al,)
+                    )
+                    inv_row = cur.fetchone()
+                    if not inv_row or not inv_row[0]:
+                        return err("Файл счёта не найден")
+                    file_url_al, file_name_al = inv_row
+                    ext_al = (file_name_al or "").rsplit(".", 1)[-1].lower() if file_name_al else ""
+
+                    # Скачиваем файл
+                    try:
+                        resp_al = _rl.get(file_url_al, timeout=30)
+                        resp_al.raise_for_status()
+                        file_bytes_al = resp_al.content
+                    except Exception as fe:
+                        return err(f"Не удалось загрузить файл: {fe}")
+
+                    # Извлекаем текст (те же функции что в recognize_invoice)
+                    if ext_al in ("xls", "xlsx"):
+                        raw_text_al = _extract_text_excel(file_bytes_al)
+                    elif ext_al == "pdf":
+                        raw_text_al, _ = _extract_text_pdf(file_bytes_al)
+                    else:
+                        return err(f"Формат {ext_al} не поддерживается для локального парсинга")
+
+                    zones_al = _split_document(raw_text_al)
+                    table_lines_al = zones_al["table_lines"]
+                    tbl_headers_al, hdr_idx_al = _find_table_header_row(table_lines_al)
+
+                    raw_items = _apply_template(
+                        table_lines_al, column_map, hdr_idx_al,
+                        supplier_name, invoice_date, invoice_number
+                    )
+                    processed_al = _postprocess_items(
+                        raw_items, supplier_name, invoice_date, invoice_number
+                    )
+                    norm_items = _normalize_postprocessed(cur, processed_al)
+
+                    complete_ratio = (
+                        sum(1 for it in norm_items if it.get("unit_price") and it.get("quantity"))
+                        / max(len(norm_items), 1)
+                    )
+
+                    conn.commit()
+                    return ok({
+                        "items":          norm_items,
+                        "items_count":    len(norm_items),
+                        "complete_ratio": round(complete_ratio, 2),
+                        "low_quality":    complete_ratio < 0.5,
+                    })
                 elif action == "delete":
                     tid = int(body["id"])
                     ok_res = delete_table_template(cur, tid)

@@ -127,6 +127,7 @@ export default function InvoiceModal({
                   result={aiResult}
                   showDebug={canSeeRawData}
                   applying={applying}
+                  invoiceId={editItem?.id}
                   onApply={onApplyAI}
                   onDismiss={onDismissAI}
                 />

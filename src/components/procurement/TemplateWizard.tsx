@@ -5,11 +5,16 @@ import { MAPPABLE_FIELDS } from "./invoices.shared";
 interface Props {
   headers: string[];
   aiSuggestion: Record<string, number | null>;
-  onSave: (columnMap: Record<string, number | null>, name: string) => Promise<void>;
   saving: boolean;
+  savingAndApplying: boolean;
+  onSave: (columnMap: Record<string, number | null>, name: string) => Promise<void>;
+  onSaveAndApply: (columnMap: Record<string, number | null>, name: string) => Promise<void>;
 }
 
-export default function TemplateWizard({ headers, aiSuggestion, onSave, saving }: Props) {
+export default function TemplateWizard({
+  headers, aiSuggestion, saving, savingAndApplying,
+  onSave, onSaveAndApply,
+}: Props) {
   const [colMap, setColMap] = useState<Record<string, number | null>>(() => {
     const init: Record<string, number | null> = {};
     for (const f of MAPPABLE_FIELDS) {
@@ -21,6 +26,8 @@ export default function TemplateWizard({ headers, aiSuggestion, onSave, saving }
   const [tplName, setTplName] = useState(
     "Шаблон: " + headers.slice(0, 4).join(" / ")
   );
+
+  const busy = saving || savingAndApplying;
 
   return (
     <div className="space-y-3">
@@ -77,14 +84,27 @@ export default function TemplateWizard({ headers, aiSuggestion, onSave, saving }
           className="w-full border border-border rounded-lg px-2 py-1.5 text-[12px] outline-none focus:ring-1 focus:ring-primary" />
       </div>
 
-      <button type="button" disabled={saving}
-        onClick={() => onSave(colMap, tplName)}
-        className="flex items-center gap-1.5 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors disabled:opacity-50">
-        {saving
-          ? <><Icon name="Loader" size={13} className="animate-spin" />Сохраняем...</>
-          : <><Icon name="BookmarkPlus" size={13} />Сохранить шаблон</>
-        }
-      </button>
+      <div className="flex gap-2 flex-wrap">
+        {/* Основная кнопка: сохранить И применить */}
+        <button type="button" disabled={busy}
+          onClick={() => onSaveAndApply(colMap, tplName)}
+          className="flex items-center gap-1.5 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors disabled:opacity-50">
+          {savingAndApplying
+            ? <><Icon name="Loader" size={13} className="animate-spin" />Применяем...</>
+            : <><Icon name="BookmarkPlus" size={13} />Сохранить и применить</>
+          }
+        </button>
+
+        {/* Вторичная кнопка: только сохранить */}
+        <button type="button" disabled={busy}
+          onClick={() => onSave(colMap, tplName)}
+          className="flex items-center gap-1.5 px-3 py-2 border border-border bg-white rounded-lg text-[12px] text-muted-foreground hover:bg-secondary transition-colors disabled:opacity-50">
+          {saving
+            ? <><Icon name="Loader" size={12} className="animate-spin" />Сохраняем...</>
+            : <><Icon name="Bookmark" size={12} />Только сохранить</>
+          }
+        </button>
+      </div>
     </div>
   );
 }

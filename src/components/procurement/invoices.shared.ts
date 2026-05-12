@@ -165,6 +165,8 @@ export interface AiRecognizeResult {
   need_template_setup?: boolean;
   table_headers?: string[];
   ai_col_suggestion?: Record<string, number | null>;
+  /** Заполняется при автооткате шаблона: что за шаблон не справился */
+  template_fallback_info?: { id: number; name: string; complete_ratio: number } | null;
   debug: {
     raw_response: string | null;
     raw_response_2?: string | null;
