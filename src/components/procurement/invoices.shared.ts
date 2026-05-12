@@ -110,18 +110,31 @@ export interface AiItem {
   unit: string;
   unit_price: number | null;
   quantity: number | null;
+  invoice_date: string | null;
+  invoice_number: string | null;
   complete: boolean;
 }
 
-// Полный ответ от бэкенда после AI-распознавания (новый формат с items[])
+// Пустая позиция для ручного ввода
+export const EMPTY_AI_ITEM: AiItem = {
+  supplier_name: null, supplier_id: null, supplier_created: false,
+  material: null,      material_id: null, material_created: false,
+  unit: "шт", unit_price: null, quantity: null,
+  invoice_date: null, invoice_number: null, complete: false,
+};
+
+// Полный ответ от бэкенда после AI-распознавания
 export interface AiRecognizeResult {
   status: string;
   meta: { invoice_date: string | null; invoice_number: string | null };
   items: AiItem[];
   parse_error: string | null;
+  fallback_used?: boolean;
   debug: {
     raw_response: string | null;
+    raw_response_2?: string | null;
     parse_error: string | null;
+    fallback_used?: boolean;
     items_debug: string[];
   };
 }

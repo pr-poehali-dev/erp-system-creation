@@ -3252,10 +3252,20 @@ def add_gantt_substage(cur, project_id: int, body: dict):
 # ─── INVOICE AI RECOGNITION ──────────────────────────────────────────────────
 
 CHATGPT_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
-INVOICE_PROMPT  = """Извлеки все позиции из счёта. Ответь СТРОГО JSON-массивом объектов, каждый объект — одна позиция:
-[{"supplier_name":"название поставщика или null","material":"наименование или null","unit":"ед.изм.(шт/м3/т/пог.м/м2/компл) или null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер или null"}]
-Если дата и номер общие для всего счёта — продублируй их в каждом объекте.
-Ответ начинается с [ и заканчивается ]. Без комментариев, без markdown."""
+INVOICE_PROMPT = """Извлеки ВСЕ позиции товаров/материалов из этого счёта (инвойса).
+Ответь СТРОГО JSON-массивом объектов, один объект = одна позиция:
+[{"supplier_name":"Название поставщика из шапки или null","material":"Наименование товара/материала","unit":"шт|м3|т|пог.м|м2|компл|null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер счёта или null"}]
+Правила:
+- Если дата и номер общие — продублируй в каждом объекте
+- unit_price и quantity — только числа (без единиц и символов валюты)
+- Игнорируй строки НДС, итогов, заголовков и пустые строки
+- Ответ начинается с [ и заканчивается ] — ничего кроме JSON-массива"""
+
+INVOICE_PROMPT_EXCEL = """Это данные из Excel-файла (счёт или накладная). Найди строки с товарами/материалами.
+Игнорируй пустые строки, шапки таблицы, итоги, строки НДС и подписи.
+Верни JSON-массив позиций — один объект = одна строка товара:
+[{"supplier_name":"Название поставщика если есть или null","material":"Наименование товара","unit":"шт|м3|т|пог.м|м2|компл|null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер или null"}]
+Числа — только цифры без пробелов, символов валюты и единиц. Ответ: только JSON-массив от [ до ]."""
 
 ALLOWED_EXTS = {'pdf','jpg','jpeg','png','xls','xlsx','docx'}
 
@@ -3375,135 +3385,125 @@ def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
     return {"cdn_url": cdn_url, "file_name": file_name}, None
 
 
-def recognize_invoice(cur, invoice_id: int):
-    """Запускает AI-распознавание счёта через Polza.ai.
-    Возвращает массив позиций items[]. Минимальная устойчивая версия.
+def _excel_to_markdown(file_bytes: bytes) -> str:
+    """Конвертирует Excel в Markdown-таблицу для AI. Уровень 1 защиты."""
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+    ws = wb.worksheets[0]
+
+    rows_raw = []
+    for r in list(ws.rows)[:80]:
+        cells = []
+        for c in r:
+            v = c.value
+            if v is None:
+                cells.append("")
+            elif isinstance(v, float):
+                # Убираем .0 для целых чисел
+                cells.append(str(int(v)) if v == int(v) else str(round(v, 4)))
+            else:
+                cells.append(str(v).strip())
+        # Пропускаем полностью пустые строки
+        if any(cells):
+            rows_raw.append(cells)
+
+    if not rows_raw:
+        return "(Excel пустой)"
+
+    # Выравниваем колонки до одной ширины
+    max_cols = max(len(r) for r in rows_raw)
+    rows_padded = [r + [""] * (max_cols - len(r)) for r in rows_raw]
+
+    col_widths = [max(len(rows_padded[i][j]) for i in range(len(rows_padded))) for j in range(max_cols)]
+
+    def fmt_row(r):
+        return "| " + " | ".join(cell.ljust(col_widths[j]) for j, cell in enumerate(r)) + " |"
+
+    lines = [fmt_row(rows_padded[0])]
+    lines.append("| " + " | ".join("-" * w for w in col_widths) + " |")
+    for row in rows_padded[1:]:
+        lines.append(fmt_row(row))
+
+    return "\n".join(lines[:100])
+
+
+def _call_polza(req_lib, messages: list, max_tokens: int = 1024) -> str:
+    """Вызов Polza.ai. Возвращает строку-ответ модели."""
+    resp = req_lib.post(
+        f"{CHATGPT_URL}?action=generate",
+        json={"messages": messages, "model": "openai/gpt-4o",
+              "temperature": 0.0, "max_tokens": max_tokens},
+        timeout=90
+    )
+    resp.raise_for_status()
+    return resp.json().get("content", "")
+
+
+def _parse_items_response(raw: str):
+    """
+    Парсит ответ модели → list[dict] | None, error_str.
+    Уровень 2 парсинга: strip markdown → json.loads → regex fallback → wrap dict.
     """
     import re
-    import requests as req_lib
-    import base64
+    s = raw.strip()
+    s = re.sub(r'```(?:json)?\s*', '', s)
+    s = re.sub(r'\s*```', '', s).strip()
 
-    raw_content  = ""
-    parse_error  = None
-    items_debug  = []
-
-    # 1. Данные счёта
-    cur.execute(
-        f"SELECT id, pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
-        (invoice_id,)
-    )
-    row = cur.fetchone()
-    if not row:
-        return None, "Счёт не найден"
-    _, file_url, file_name = row
-    if not file_url:
-        return None, "Файл не загружен. Сначала прикрепите файл счёта."
-
-    ext = (file_name or '').rsplit('.', 1)[-1].lower() if file_name else ''
-
-    # 2. Скачиваем файл
+    # Прямой парсинг
     try:
-        resp = req_lib.get(file_url, timeout=30)
-        resp.raise_for_status()
-        file_bytes = resp.content
-        file_b64   = base64.b64encode(file_bytes).decode('utf-8')
-    except Exception as e:
-        return None, f"Не удалось загрузить файл: {e}"
-
-    # 3. Сообщения для модели
-    system_msg = {"role": "system", "content": "Ты — OCR. Отвечай ТОЛЬКО JSON-массивом, без пояснений и markdown."}
-
-    if ext in ('jpg', 'jpeg', 'png'):
-        mime = "image/jpeg" if ext in ('jpg','jpeg') else "image/png"
-        user_msg = {"role": "user", "content": [
-            {"type": "text", "text": INVOICE_PROMPT},
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
-        ]}
-    elif ext in ('xls', 'xlsx'):
-        try:
-            import openpyxl, io as _io
-            wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
-            lines = []
-            for ws in wb.worksheets[:1]:
-                for r in list(ws.rows)[:60]:
-                    vals = [str(c.value or '').strip() for c in r if c.value is not None]
-                    if vals: lines.append(" | ".join(vals))
-            text_content = "\n".join(lines[:120])
-        except Exception as xe:
-            text_content = f"[Ошибка чтения Excel: {xe}]"
-        user_msg = {"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое Excel:\n{text_content}"}
-    elif ext == 'pdf':
-        user_msg = {"role": "user", "content": [
-            {"type": "text", "text": INVOICE_PROMPT},
-            {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64}"}}
-        ]}
-    else:
-        try:
-            from docx import Document
-            import io as _io
-            doc = Document(_io.BytesIO(file_bytes))
-            text_content = "\n".join(p.text for p in doc.paragraphs if p.text.strip())[:3000]
-        except Exception:
-            text_content = f"[Файл типа {ext.upper()} не поддерживается]"
-        user_msg = {"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое документа:\n{text_content}"}
-
-    # 4. Вызов Polza.ai
-    try:
-        polza_resp = req_lib.post(
-            f"{CHATGPT_URL}?action=generate",
-            json={"messages": [system_msg, user_msg], "model": "openai/gpt-4o",
-                  "temperature": 0.0, "max_tokens": 1024},
-            timeout=90
-        )
-        polza_resp.raise_for_status()
-        raw_content = polza_resp.json().get("content", "")
-    except Exception as e:
-        return None, f"Ошибка Polza.ai: {e}"
-
-    # 5. Парсинг ответа — ожидаем JSON-массив
-    json_str = raw_content.strip()
-    json_str = re.sub(r'```(?:json)?\s*', '', json_str)
-    json_str = re.sub(r'\s*```', '', json_str).strip()
-
-    raw_list = None
-    try:
-        raw_list = json.loads(json_str)
+        result = json.loads(s)
+        if isinstance(result, dict):
+            result = [result]
+        if isinstance(result, list):
+            return result, None
     except json.JSONDecodeError as e1:
-        # fallback: ищем [...] в строке
-        m = re.search(r'\[[\s\S]+\]', json_str)
-        if m:
-            try:
-                raw_list = json.loads(m.group(0))
-            except Exception as e2:
-                parse_error = f"Не удалось распарсить ответ: {e1}; {e2}"
-        else:
-            parse_error = f"Массив позиций не найден в ответе. Raw: {json_str[:400]}"
+        pass
+    else:
+        return None, f"Неожиданный тип данных: {type(result)}"
 
-    # Если вернули объект (одна позиция) — оборачиваем в список
-    if isinstance(raw_list, dict):
-        raw_list = [raw_list]
+    # Regex fallback: первый [...] блок
+    m = re.search(r'\[[\s\S]+?\]', s)
+    if m:
+        try:
+            result = json.loads(m.group(0))
+            if isinstance(result, list):
+                return result, None
+        except Exception as e2:
+            pass
 
-    if not isinstance(raw_list, list):
-        raw_list = []
-        if not parse_error:
-            parse_error = f"Неожиданный формат ответа. Raw: {json_str[:400]}"
+    # Regex fallback: первый {...} блок → wrap
+    m2 = re.search(r'\{[\s\S]+?\}', s)
+    if m2:
+        try:
+            obj = json.loads(m2.group(0))
+            if isinstance(obj, dict):
+                return [obj], None
+        except Exception:
+            pass
 
-    # 6. Нормализуем каждую позицию и матчим справочники
+    return None, f"JSON-массив не найден в ответе модели. Фрагмент: {s[:500]}"
+
+
+def _normalize_items(cur, raw_list: list) -> list:
+    """Нормализует список позиций, матчит справочники. Возвращает norm_items."""
     def clean(v):
         s = str(v or "").strip()
         return None if s.lower() in ("null", "none", "") else s
 
     def safe_float(v):
-        try: return float(v) if v is not None and str(v).lower() not in ("null","none","") else None
+        if v is None: return None
+        sv = str(v).lower().strip()
+        if sv in ("null", "none", ""): return None
+        # Убираем пробелы и запятые как разделители тысяч
+        sv = sv.replace(" ", "").replace(",", ".")
+        try: return float(sv)
         except (ValueError, TypeError): return None
 
-    norm_items = []
+    norm = []
     for raw_item in raw_list:
         if not isinstance(raw_item, dict):
             continue
-        # Нормализуем ключи
-        item = _normalize_obj(raw_item)
-
+        item   = _normalize_obj(raw_item)
         s_name = clean(item.get("supplier_name")) or ""
         m_name = clean(item.get("material"))      or ""
         raw_u  = str(item.get("unit") or "шт").strip()
@@ -3515,9 +3515,8 @@ def recognize_invoice(cur, invoice_id: int):
         s_id, s_created = _match_or_create_supplier(cur, s_name)
         m_id, m_created, unit = _match_or_create_material(cur, m_name, raw_u)
 
-        complete = all(v for v in [s_name, m_name, up is not None, qty is not None])
-
-        norm_items.append({
+        complete = bool(s_name and m_name and up is not None and qty is not None)
+        norm.append({
             "supplier_name":    s_name or None,
             "supplier_id":      s_id,
             "supplier_created": s_created,
@@ -3531,14 +3530,163 @@ def recognize_invoice(cur, invoice_id: int):
             "invoice_number":   inum,
             "complete":         complete,
         })
-        items_debug.append(f"[{m_name or '?'}] s={s_name}({s_id}) m={m_id} up={up} qty={qty} ok={complete}")
+    return norm
 
-    # 7. Статус + обновляем исходный счёт
+
+def recognize_invoice(cur, invoice_id: int):
+    """Запускает AI-распознавание счёта.
+    Уровень 1: Excel → Markdown-таблица + спец. промпт.
+    Уровень 2: PDF fallback → первая страница → JPEG → мультимодальный запрос.
+    Возвращает {status, meta, items, parse_error, debug}.
+    """
+    import re
+    import requests as req_lib
+    import base64
+
+    raw_content   = ""
+    raw_content_2 = ""      # для fallback
+    parse_error   = None
+    fallback_used = False
+    items_debug   = []
+
+    # ── 1. Данные счёта ────────────────────────────────────────────────────────
+    cur.execute(
+        f"SELECT id, pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
+        (invoice_id,)
+    )
+    row = cur.fetchone()
+    if not row:
+        return None, "Счёт не найден"
+    _, file_url, file_name = row
+    if not file_url:
+        return None, "Файл не загружен. Сначала прикрепите файл счёта."
+
+    ext = (file_name or "").rsplit(".", 1)[-1].lower() if file_name else ""
+
+    # ── 2. Скачиваем файл ─────────────────────────────────────────────────────
+    try:
+        resp = req_lib.get(file_url, timeout=30)
+        resp.raise_for_status()
+        file_bytes = resp.content
+        file_b64   = base64.b64encode(file_bytes).decode("utf-8")
+    except Exception as e:
+        return None, f"Не удалось загрузить файл: {e}"
+
+    system_msg = {
+        "role": "system",
+        "content": "Ты — OCR-система для финансовых документов. Отвечай ТОЛЬКО JSON-массивом. Никаких пояснений, markdown или ``` блоков."
+    }
+
+    # ── 3. Формируем первичный запрос по типу файла ───────────────────────────
+    if ext in ("jpg", "jpeg", "png"):
+        mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+        user_msg = {"role": "user", "content": [
+            {"type": "text",      "text": INVOICE_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
+        ]}
+
+    elif ext in ("xls", "xlsx"):
+        # УРОВЕНЬ 1: Excel → Markdown-таблица
+        try:
+            md_table = _excel_to_markdown(file_bytes)
+        except Exception as xe:
+            md_table = f"[Ошибка чтения Excel: {xe}]"
+        user_msg = {"role": "user",
+                    "content": f"{INVOICE_PROMPT_EXCEL}\n\n```\n{md_table}\n```"}
+
+    elif ext == "pdf":
+        # Первичный запрос: PDF как data-uri (для PDF с текстовым слоем)
+        user_msg = {"role": "user", "content": [
+            {"type": "text",      "text": INVOICE_PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64}"}},
+        ]}
+
+    else:
+        # DOCX и прочие
+        try:
+            from docx import Document
+            import io as _io
+            doc = Document(_io.BytesIO(file_bytes))
+            text_content = "\n".join(p.text for p in doc.paragraphs if p.text.strip())[:3000]
+        except Exception:
+            text_content = f"[Файл типа {ext.upper()} не поддерживается]"
+        user_msg = {"role": "user",
+                    "content": f"{INVOICE_PROMPT}\n\nСодержимое документа:\n{text_content}"}
+
+    # ── 4. Первичный вызов Polza.ai ───────────────────────────────────────────
+    try:
+        raw_content = _call_polza(req_lib, [system_msg, user_msg])
+    except Exception as e:
+        return None, f"Ошибка Polza.ai: {e}"
+
+    raw_list, parse_error = _parse_items_response(raw_content)
+
+    # ── 5. УРОВЕНЬ 2: PDF fallback → первая страница → JPEG ──────────────────
+    if ext == "pdf" and (raw_list is None or len(raw_list) == 0):
+        fallback_used = True
+        try:
+            import fitz  # PyMuPDF
+            import io as _io
+            doc_pdf = fitz.open(stream=file_bytes, filetype="pdf")
+            page = doc_pdf[0]
+            # Рендерим с масштабом 1.5x (≈108dpi → 162dpi), достаточно для OCR
+            mat = fitz.Matrix(1.5, 1.5)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            # Сжимаем до 1200px по длинной стороне
+            img_bytes = pix.tobytes("jpeg")
+            # Простое сжатие через PIL если доступен, иначе используем как есть
+            try:
+                from PIL import Image
+                img_io  = _io.BytesIO(img_bytes)
+                img_pil = Image.open(img_io)
+                w, h    = img_pil.size
+                MAX     = 1200
+                if w > MAX or h > MAX:
+                    ratio   = MAX / max(w, h)
+                    img_pil = img_pil.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+                out_io = _io.BytesIO()
+                img_pil.save(out_io, "JPEG", quality=82)
+                img_bytes = out_io.getvalue()
+            except ImportError:
+                pass  # PIL недоступен, берём нативный рендер
+
+            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+            fb_user_msg = {"role": "user", "content": [
+                {"type": "text",      "text": INVOICE_PROMPT + "\n(Это скан PDF — извлеки данные из изображения)"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+            ]}
+            raw_content_2 = _call_polza(req_lib, [system_msg, fb_user_msg])
+            fb_list, fb_error = _parse_items_response(raw_content_2)
+            if fb_list and len(fb_list) > 0:
+                raw_list    = fb_list
+                parse_error = fb_error
+            elif not parse_error:
+                parse_error = fb_error or "Fallback также не дал результатов"
+        except ImportError:
+            # PyMuPDF не установлен — fallback недоступен
+            if not parse_error:
+                parse_error = "PDF без текстового слоя, fallback недоступен (нет PyMuPDF)"
+        except Exception as fe:
+            if not parse_error:
+                parse_error = f"PDF fallback ошибка: {fe}"
+
+    # ── 6. Нормализация и матчинг справочников ────────────────────────────────
+    if raw_list is None:
+        raw_list = []
+
+    norm_items = _normalize_items(cur, raw_list)
+
+    for it in norm_items:
+        items_debug.append(
+            f"[{it['material'] or '?'}] s={it['supplier_name']}({it['supplier_id']}) "
+            f"m={it['material_id']} up={it['unit_price']} qty={it['quantity']} ok={it['complete']}"
+        )
+
+    # ── 7. Статус + сохраняем в БД ────────────────────────────────────────────
     all_ok = bool(norm_items) and all(i["complete"] for i in norm_items)
     status = "обработан" if (all_ok and not parse_error) else "требуется_проверка"
 
-    # Вытаскиваем meta из первой позиции
-    meta_date = norm_items[0].get("invoice_date") if norm_items else None
+    meta_date = norm_items[0].get("invoice_date")  if norm_items else None
     meta_num  = norm_items[0].get("invoice_number") if norm_items else None
 
     cur.execute(
@@ -3547,11 +3695,18 @@ def recognize_invoice(cur, invoice_id: int):
     )
 
     return {
-        "status": status,
-        "meta": {"invoice_date": meta_date, "invoice_number": meta_num},
-        "items": norm_items,
-        "parse_error": parse_error,
-        "debug": {"raw_response": raw_content, "parse_error": parse_error, "items_debug": items_debug},
+        "status":       status,
+        "meta":         {"invoice_date": meta_date, "invoice_number": meta_num},
+        "items":        norm_items,
+        "parse_error":  parse_error,
+        "fallback_used": fallback_used,
+        "debug": {
+            "raw_response":   raw_content,
+            "raw_response_2": raw_content_2,
+            "parse_error":    parse_error,
+            "fallback_used":  fallback_used,
+            "items_debug":    items_debug,
+        },
     }, None
 
 
