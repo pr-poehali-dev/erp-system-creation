@@ -162,6 +162,7 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
                           <th className="px-2 py-1.5 w-7 text-center">
                             <input type="checkbox" checked={selected.every(Boolean)} onChange={toggleAll} className="cursor-pointer" />
                           </th>
+                          <th className="px-1 py-1.5 w-4" title="Качество: 🟢 ок / 🟡 цена скорректирована / 🔴 неполные данные"></th>
                           <th className="px-2 py-1.5 text-left font-medium">Поставщик</th>
                           <th className="px-2 py-1.5 text-left font-medium">Материал</th>
                           <th className="px-2 py-1.5 text-left font-medium">Ед.</th>
@@ -175,12 +176,18 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
                         {result.items.map((item, idx) => {
                           const total = item.unit_price != null && item.quantity != null
                             ? item.unit_price * item.quantity : null;
+                          const q = item.quality ?? (item.complete ? "ok" : "bad");
+                          const qDot = q === "ok" ? "bg-emerald-500" : q === "suspicious" ? "bg-amber-400" : "bg-red-400";
+                          const qTitle = q === "ok" ? "В порядке" : q === "suspicious" ? "Цена скорректирована автоматически" : "Нет цены или количества";
                           return (
                             <tr key={idx} className={`transition-opacity ${selected[idx] ? "" : "opacity-40"}`}>
                               <td className="px-2 py-2 text-center">
                                 <input type="checkbox" checked={selected[idx]}
                                   onChange={() => setSelected(s => s.map((v, i) => i === idx ? !v : v))}
                                   className="cursor-pointer" />
+                              </td>
+                              <td className="px-1 py-2 text-center">
+                                <span className={`inline-block w-2 h-2 rounded-full ${qDot}`} title={qTitle} />
                               </td>
                               <td className="px-2 py-2 max-w-[90px]">
                                 <div className="truncate" title={item.supplier_name || ""}>{item.supplier_name || <span className="text-hint italic">—</span>}</div>
@@ -191,7 +198,10 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
                                 {item.material_created && <div className="text-[9px] text-emerald-600">✚ создан</div>}
                               </td>
                               <td className="px-2 py-2 whitespace-nowrap">{item.unit}</td>
-                              <td className="px-2 py-2 text-right whitespace-nowrap">{fmtMoney(item.unit_price)}</td>
+                              <td className={`px-2 py-2 text-right whitespace-nowrap ${item.price_fixed ? "text-amber-600 font-medium" : ""}`}>
+                                {fmtMoney(item.unit_price)}
+                                {item.price_fixed && <div className="text-[8px] text-amber-500 leading-tight">авто ×1000</div>}
+                              </td>
                               <td className="px-2 py-2 text-right">{item.quantity ?? "—"}</td>
                               <td className="px-2 py-2 text-right whitespace-nowrap font-medium">{fmtMoney(total)}</td>
                               <td className="px-2 py-2 text-center">
@@ -206,6 +216,13 @@ export default function InvoiceAiPanel({ result, showDebug, applying, onApply, o
                       </tbody>
                     </table>
                   </div>
+                </div>
+
+                {/* Легенда цветов */}
+                <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-emerald-500"/> В порядке</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-amber-400"/> Цена скорректирована</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-red-400"/> Нет данных</span>
                 </div>
 
                 {!allComplete && (

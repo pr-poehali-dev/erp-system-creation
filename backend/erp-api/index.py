@@ -3251,24 +3251,30 @@ def add_gantt_substage(cur, project_id: int, body: dict):
 
 # ─── INVOICE AI RECOGNITION ──────────────────────────────────────────────────
 
-CHATGPT_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
-INVOICE_PROMPT = """Ты — ассистент для извлечения данных из счетов. Верни ВСЕ позиции из этого документа строго одним JSON-массивом.
-ВНИМАНИЕ: верни массив для ВСЕХ строк счёта, даже если их 20 или больше. Не сокращай и не обрезай список.
-Каждая позиция — отдельный объект в массиве:
-[{"supplier_name":"Название поставщика из шапки или null","material":"Наименование товара/материала","unit":"шт|м3|т|пог.м|м2|компл|null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер счёта или null"}]
-Правила:
-- Если дата и номер общие — продублируй в каждом объекте
-- unit_price и quantity — только числа (без единиц и символов валюты)
-- Игнорируй строки НДС, итогов, заголовков и пустые строки
-- Ответ начинается с [ и заканчивается ] — ТОЛЬКО JSON-массив, никакого другого текста"""
-
-INVOICE_PROMPT_EXCEL = """Это данные из Excel-файла (счёт или накладная). Найди строки с товарами/материалами.
-Игнорируй пустые строки, шапки таблицы, итоги, строки НДС и подписи.
-Верни JSON-массив позиций — один объект = одна строка товара:
-[{"supplier_name":"Название поставщика если есть или null","material":"Наименование товара","unit":"шт|м3|т|пог.м|м2|компл|null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер или null"}]
-Числа — только цифры без пробелов, символов валюты и единиц. Ответ: только JSON-массив от [ до ]."""
+CHATGPT_URL = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
 
 ALLOWED_EXTS = {'pdf','jpg','jpeg','png','xls','xlsx','docx'}
+
+# ── Промпты ──────────────────────────────────────────────────────────────────
+
+_PROMPT_HEADER = """Извлеки из текста шапки счёта следующие поля и верни ТОЛЬКО JSON-объект:
+{"supplier_name":"Название поставщика или null","invoice_date":"YYYY-MM-DD или null","invoice_number":"Номер счёта или null"}
+Текст шапки:
+{header}"""
+
+_PROMPT_TABLE_CHUNK = """Ты получаешь фрагмент таблицы товаров из счёта. Извлеки ВСЕ позиции.
+Для каждой строки товара верни объект. Игнорируй строки итогов, НДС, заголовков, пустые строки.
+Не придумывай данные — если поле неизвестно, ставь null.
+
+Ответ — ТОЛЬКО JSON-массив:
+[{{"material":"Полное наименование товара","unit":"шт|м3|т|пог.м|м2|компл","unit_price":число_или_null,"quantity":число_или_null}}]
+
+unit_price и quantity — только числа, без символов валюты и единиц.
+
+Фрагмент таблицы:
+{chunk}"""
+
+_PROMPT_OCR_IMAGE = """Извлеки весь текст с этого изображения документа. Не форматируй — просто текст, строка за строкой, как он написан."""
 
 _ITEM_KEY_ALIASES = {
     "supplier_name":  ["supplier", "vendor", "company", "поставщик", "организация", "from", "seller"],
@@ -3386,148 +3392,364 @@ def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
     return {"cdn_url": cdn_url, "file_name": file_name}, None
 
 
-def _excel_to_markdown(file_bytes: bytes) -> str:
-    """Конвертирует Excel в Markdown-таблицу для AI. Уровень 1 защиты."""
-    import openpyxl, io as _io
-    wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
-    ws = wb.worksheets[0]
+# ── Утилиты ──────────────────────────────────────────────────────────────────
 
-    rows_raw = []
-    for r in list(ws.rows)[:80]:
-        cells = []
-        for c in r:
-            v = c.value
-            if v is None:
-                cells.append("")
-            elif isinstance(v, float):
-                # Убираем .0 для целых чисел
-                cells.append(str(int(v)) if v == int(v) else str(round(v, 4)))
-            else:
-                cells.append(str(v).strip())
-        # Пропускаем полностью пустые строки
-        if any(cells):
-            rows_raw.append(cells)
-
-    if not rows_raw:
-        return "(Excel пустой)"
-
-    # Выравниваем колонки до одной ширины
-    max_cols = max(len(r) for r in rows_raw)
-    rows_padded = [r + [""] * (max_cols - len(r)) for r in rows_raw]
-
-    col_widths = [max(len(rows_padded[i][j]) for i in range(len(rows_padded))) for j in range(max_cols)]
-
-    def fmt_row(r):
-        return "| " + " | ".join(cell.ljust(col_widths[j]) for j, cell in enumerate(r)) + " |"
-
-    lines = [fmt_row(rows_padded[0])]
-    lines.append("| " + " | ".join("-" * w for w in col_widths) + " |")
-    for row in rows_padded[1:]:
-        lines.append(fmt_row(row))
-
-    return "\n".join(lines[:100])
-
-
-def _call_polza(req_lib, messages: list, max_tokens: int = 1024) -> str:
-    """Вызов Polza.ai. Возвращает строку-ответ модели."""
+def _call_polza(req_lib, messages: list, max_tokens: int = 4096) -> str:
+    """Вызов Polza.ai / GPT-4o. Возвращает строку-ответ модели."""
     resp = req_lib.post(
         f"{CHATGPT_URL}?action=generate",
         json={"messages": messages, "model": "openai/gpt-4o",
               "temperature": 0.0, "max_tokens": max_tokens},
-        timeout=90
+        timeout=120
     )
     resp.raise_for_status()
     return resp.json().get("content", "")
 
 
-def _parse_items_response(raw: str):
+def _parse_json_list(raw: str):
     """
-    Парсит ответ модели → (list[dict] | None, error_str | None).
-    Порядок попыток:
-      1. json.loads всей строки (после зачистки markdown)
-      2. Жадный regex на самый большой [...] блок (GREEDY, не lazy!)
-      3. Жадный regex на самый большой {...} блок → wrap в список
+    Надёжный парсинг ответа модели в список.
+    Возвращает (list | None, error_str | None).
+    Использует ЖАДНЫЙ regex — НЕ lazy — чтобы захватить весь массив.
     """
     import re
     s = raw.strip()
-    # Убираем markdown-обёртки ```json ... ``` и ``` ... ```
     s = re.sub(r'```(?:json)?\s*', '', s)
     s = re.sub(r'```', '', s).strip()
 
-    # ── 1. Прямой парсинг целой строки ───────────────────────────────────────
+    # 1. Прямой json.loads
     try:
-        result = json.loads(s)
-        if isinstance(result, dict):
-            result = [result]
-        if isinstance(result, list):
-            return result, None
-        return None, f"Неожиданный корневой тип: {type(result).__name__}"
+        r = json.loads(s)
+        if isinstance(r, dict): r = [r]
+        if isinstance(r, list): return r, None
     except json.JSONDecodeError:
         pass
 
-    # ── 2. Жадный regex: самый длинный [...] блок ────────────────────────────
-    # ВАЖНО: используем ЖАДНЫЙ квантификатор + (не ленивый +?)
-    # чтобы захватить весь массив целиком, а не первый закрывающий ]
-    bracket_matches = list(re.finditer(r'\[[\s\S]+\]', s))
-    if bracket_matches:
-        # Берём самый длинный match (на случай нескольких блоков)
-        longest = max(bracket_matches, key=lambda m: len(m.group(0)))
+    # 2. Жадный поиск [...] — самый длинный блок
+    for m in sorted(re.finditer(r'\[[\s\S]+\]', s), key=lambda x: -len(x.group(0))):
         try:
-            result = json.loads(longest.group(0))
-            if isinstance(result, list):
-                return result, None
-            if isinstance(result, dict):
-                return [result], None
-        except json.JSONDecodeError as e2:
-            pass
-
-    # ── 3. Жадный regex: самый длинный {...} блок → wrap ─────────────────────
-    brace_matches = list(re.finditer(r'\{[\s\S]+\}', s))
-    if brace_matches:
-        longest = max(brace_matches, key=lambda m: len(m.group(0)))
-        try:
-            obj = json.loads(longest.group(0))
-            if isinstance(obj, dict):
-                return [obj], None
+            r = json.loads(m.group(0))
+            if isinstance(r, list): return r, None
+            if isinstance(r, dict): return [r], None
         except json.JSONDecodeError:
-            pass
-
-    return None, f"JSON-массив не найден в ответе модели. Фрагмент: {s[:500]}"
-
-
-def _normalize_items(cur, raw_list: list) -> list:
-    """Нормализует список позиций, матчит справочники. Возвращает norm_items."""
-    def clean(v):
-        s = str(v or "").strip()
-        return None if s.lower() in ("null", "none", "") else s
-
-    def safe_float(v):
-        if v is None: return None
-        sv = str(v).lower().strip()
-        if sv in ("null", "none", ""): return None
-        # Убираем пробелы и запятые как разделители тысяч
-        sv = sv.replace(" ", "").replace(",", ".")
-        try: return float(sv)
-        except (ValueError, TypeError): return None
-
-    norm = []
-    for raw_item in raw_list:
-        if not isinstance(raw_item, dict):
             continue
-        item   = _normalize_obj(raw_item)
-        s_name = clean(item.get("supplier_name")) or ""
-        m_name = clean(item.get("material"))      or ""
-        raw_u  = str(item.get("unit") or "шт").strip()
-        up     = safe_float(item.get("unit_price"))
-        qty    = safe_float(item.get("quantity"))
-        idate  = clean(item.get("invoice_date"))
-        inum   = clean(item.get("invoice_number"))
+
+    # 3. Жадный поиск {...} → wrap
+    for m in sorted(re.finditer(r'\{[\s\S]+\}', s), key=lambda x: -len(x.group(0))):
+        try:
+            r = json.loads(m.group(0))
+            if isinstance(r, dict): return [r], None
+        except json.JSONDecodeError:
+            continue
+
+    return None, f"JSON не найден. Фрагмент: {s[:400]}"
+
+
+def _parse_json_obj(raw: str) -> dict:
+    """Парсит ответ как JSON-объект. При ошибке возвращает {}."""
+    import re
+    s = raw.strip()
+    s = re.sub(r'```(?:json)?\s*', '', s)
+    s = re.sub(r'```', '', s).strip()
+    try:
+        r = json.loads(s)
+        return r if isinstance(r, dict) else {}
+    except json.JSONDecodeError:
+        for m in sorted(re.finditer(r'\{[\s\S]+\}', s), key=lambda x: -len(x.group(0))):
+            try:
+                r = json.loads(m.group(0))
+                if isinstance(r, dict): return r
+            except json.JSONDecodeError:
+                continue
+    return {}
+
+
+def _safe_float(v) -> float | None:
+    """Конвертирует значение в float, убирает разделители тысяч."""
+    if v is None: return None
+    sv = str(v).lower().strip().replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    if sv in ("null", "none", "", "-", "—"): return None
+    try: return float(sv)
+    except (ValueError, TypeError): return None
+
+
+def _clean(v) -> str | None:
+    s = str(v or "").strip()
+    return None if s.lower() in ("null", "none", "") else s
+
+
+# ── Шаг 1: извлечение сырого текста из файла (без AI) ────────────────────────
+
+def _extract_text_pdf(file_bytes: bytes) -> tuple[str, bool]:
+    """
+    Извлекает текст из PDF без AI.
+    Возвращает (text, is_scan).
+    is_scan=True если текст слишком короткий (нет текстового слоя).
+    """
+    try:
+        import pdfplumber, io as _io
+        lines = []
+        with pdfplumber.open(_io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text()
+                if t:
+                    lines.append(t)
+        text = "\n".join(lines)
+        is_scan = len(text.strip()) < 100
+        return text, is_scan
+    except Exception as e:
+        return f"[pdfplumber error: {e}]", True
+
+
+def _extract_text_excel(file_bytes: bytes) -> str:
+    """Читает все ячейки Excel и возвращает текст строка за строкой."""
+    import openpyxl, io as _io
+    wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+    lines = []
+    for ws in wb.worksheets[:3]:
+        for r in list(ws.rows)[:200]:
+            cells = []
+            for c in r:
+                v = c.value
+                if v is None: continue
+                if isinstance(v, float):
+                    cells.append(str(int(v)) if v == int(v) else str(round(v, 4)))
+                else:
+                    cells.append(str(v).strip())
+            if cells:
+                lines.append("\t".join(cells))
+    return "\n".join(lines)
+
+
+def _ocr_image_polza(req_lib, file_b64: str, mime: str) -> str:
+    """OCR изображения через Polza.ai/GPT-4o."""
+    sys_msg  = {"role": "system", "content": "Ты — OCR. Верни полный текст документа, строка за строкой."}
+    user_msg = {"role": "user", "content": [
+        {"type": "text",      "text": _PROMPT_OCR_IMAGE},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
+    ]}
+    return _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
+
+
+def _pdf_to_jpeg_b64(file_bytes: bytes, page_idx: int = 0) -> str | None:
+    """Рендерит страницу PDF в JPEG base64 (для сканов без текстового слоя)."""
+    try:
+        import fitz, io as _io
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        if page_idx >= len(doc): page_idx = 0
+        pix = doc[page_idx].get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+        img_bytes = pix.tobytes("jpeg")
+        try:
+            from PIL import Image
+            img = Image.open(_io.BytesIO(img_bytes))
+            w, h = img.size
+            if max(w, h) > 1200:
+                ratio = 1200 / max(w, h)
+                img = img.resize((int(w*ratio), int(h*ratio)), Image.LANCZOS)
+            out = _io.BytesIO()
+            img.save(out, "JPEG", quality=82)
+            img_bytes = out.getvalue()
+        except ImportError:
+            pass
+        import base64
+        return base64.b64encode(img_bytes).decode("utf-8")
+    except Exception:
+        return None
+
+
+# ── Шаг 2: разбивка текста на header / table_lines / footer ──────────────────
+
+_TABLE_START_RE = r'(?i)(№\s*п?/?п?|наименование|товар|материал|услуга|позиция)'
+_TABLE_END_RE   = r'(?i)(итого|всего|в том числе|ндс|подпись|м\.?п\.?|директор|главный\s+бухгалтер|отпустил|принял)'
+
+def _split_document(text: str) -> dict:
+    """
+    Разбивает текст документа на зоны: header, table_lines, footer.
+    Возвращает dict с ключами header, table_lines (list[str]), footer, expected_count.
+    """
+    import re
+    lines = text.splitlines()
+
+    table_start = None
+    table_end   = None
+
+    for i, line in enumerate(lines):
+        if table_start is None and re.search(_TABLE_START_RE, line):
+            table_start = i
+        if table_start is not None and table_end is None:
+            if i > table_start + 2 and re.search(_TABLE_END_RE, line):
+                table_end = i
+                break
+
+    if table_start is None:
+        # Не нашли явную таблицу — пробуем эвристику: строки с числами
+        num_lines = []
+        for i, line in enumerate(lines):
+            if re.search(r'\d+[\.,]\d+', line) and len(line.strip()) > 10:
+                num_lines.append(i)
+        if num_lines:
+            table_start = max(0, num_lines[0] - 1)
+            table_end   = num_lines[-1] + 1
+
+    if table_start is None:
+        table_start = 0
+    if table_end is None or table_end <= table_start:
+        table_end = len(lines)
+
+    header_lines = lines[:table_start]
+    table_lines  = [l for l in lines[table_start:table_end] if l.strip()]
+    footer_lines = lines[table_end:]
+
+    # Ищем «Всего наименований N» в footer
+    import re as _re
+    expected_count = 0
+    footer_text = "\n".join(footer_lines)
+    m = _re.search(r'(?i)всего\s+наименований[:\s]+(\d+)', footer_text)
+    if not m:
+        m = _re.search(r'(?i)итого\s+позиций[:\s]+(\d+)', footer_text)
+    if m:
+        expected_count = int(m.group(1))
+
+    return {
+        "header":         "\n".join(header_lines[:40]),
+        "table_lines":    table_lines,
+        "footer":         footer_text[:500],
+        "expected_count": expected_count,
+    }
+
+
+def _make_chunks(table_lines: list, chunk_size: int = 15) -> list:
+    """Режет список строк на чанки по chunk_size строк."""
+    return [table_lines[i:i+chunk_size] for i in range(0, len(table_lines), chunk_size)]
+
+
+# ── Шаг 3: AI-запросы к чанкам ───────────────────────────────────────────────
+
+def _extract_header_meta(req_lib, header_text: str) -> dict:
+    """Один запрос: извлечь supplier_name, invoice_date, invoice_number из шапки."""
+    if not header_text.strip():
+        return {}
+    sys_msg  = {"role": "system", "content": "Ты — парсер финансовых документов. Отвечай ТОЛЬКО JSON-объектом."}
+    user_msg = {"role": "user", "content": _PROMPT_HEADER.format(header=header_text[:1500])}
+    try:
+        raw = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=256)
+        return _parse_json_obj(raw)
+    except Exception:
+        return {}
+
+
+def _extract_chunk_items(req_lib, chunk_lines: list, supplier_name: str = "") -> list:
+    """Один запрос: извлечь позиции из чанка строк таблицы."""
+    chunk_text = "\n".join(chunk_lines)
+    sys_msg  = {"role": "system", "content": "Ты — парсер таблиц счетов. Отвечай ТОЛЬКО JSON-массивом без комментариев."}
+    user_msg = {"role": "user", "content": _PROMPT_TABLE_CHUNK.format(chunk=chunk_text[:2000])}
+    try:
+        raw = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
+        items, _ = _parse_json_list(raw)
+        return items or []
+    except Exception:
+        return []
+
+
+# ── Шаг 4: постобработка и валидация ─────────────────────────────────────────
+
+# Ключевые слова для детектирования единицы "тонна"
+_TONNE_KEYWORDS = ['т', 'тон', 'тонн', 'тонна', 'тонны', '/т', 'mt', 'ton']
+# Ключевые слова для детектирования материалов с ценой за тонну
+_HEAVY_MATERIALS = ['арматур', 'металл', 'прокат', 'швеллер', 'балк', 'уголок',
+                    'труб', 'лист', 'профиль', 'сталь', 'жби', 'бетон', 'цемент']
+
+def _postprocess_items(raw_items: list, supplier_name: str, invoice_date: str | None,
+                       invoice_number: str | None) -> list:
+    """
+    Постобработка и валидация позиций:
+    - Заполняет supplier_name / invoice_date / invoice_number из мета если нет
+    - Исправляет unit_price × 1000 для тяжёлых материалов с ценой < 1000 (путаница руб/коп или т/кг)
+    - Проставляет quality: 'ok' | 'suspicious' | 'bad'
+    """
+    import re
+    result = []
+    for item in raw_items:
+        if not isinstance(item, dict): continue
+
+        m_name = _clean(item.get("material")) or ""
+        unit   = _clean(item.get("unit")) or "шт"
+        up     = _safe_float(item.get("unit_price"))
+        qty    = _safe_float(item.get("quantity"))
+        s_name = _clean(item.get("supplier_name")) or supplier_name or None
+        idate  = _clean(item.get("invoice_date"))  or invoice_date  or None
+        inum   = _clean(item.get("invoice_number")) or invoice_number or None
+
+        # unit нормализация: приводим к нашим допустимым значениям
+        unit_low = unit.lower().strip()
+        if unit_low in _TONNE_KEYWORDS:
+            unit = "т"
+        elif unit_low in ('м2', 'кв.м', 'кв м', 'квм', 'm2'):
+            unit = "м2"
+        elif unit_low in ('м3', 'куб.м', 'куб м', 'кубм', 'm3'):
+            unit = "м3"
+        elif unit_low in ('пог.м', 'пог м', 'погм', 'rm', 'п.м'):
+            unit = "пог.м"
+        elif unit_low in ('компл', 'комплект', 'компл.', 'set'):
+            unit = "компл"
+        elif unit_low in ('шт', 'шт.', 'piece', 'pc', 'pcs', 'ед', 'ед.'):
+            unit = "шт"
+
+        price_fixed = False
+
+        # Исправление цены: если unit=т и цена подозрительно маленькая
+        # (например, арматура по 55 руб/т вместо 55000 руб/т)
+        if up is not None and unit == "т":
+            m_low = m_name.lower()
+            is_heavy = any(kw in m_low for kw in _HEAVY_MATERIALS)
+            if is_heavy and 0 < up < 1000:
+                up *= 1000
+                price_fixed = True
+
+        # Флаг quality
+        if m_name and up is not None and qty is not None and qty > 0:
+            if price_fixed:
+                quality = "suspicious"
+            else:
+                quality = "ok"
+        elif m_name:
+            quality = "bad"
+        else:
+            continue  # совсем пустая строка — пропускаем
+
+        result.append({
+            "material":       m_name or None,
+            "supplier_name":  s_name,
+            "unit":           unit,
+            "unit_price":     up,
+            "quantity":       qty,
+            "invoice_date":   idate,
+            "invoice_number": inum,
+            "quality":        quality,
+            "price_fixed":    price_fixed,
+        })
+    return result
+
+
+# ── Нормализация: матчинг справочников ───────────────────────────────────────
+
+def _normalize_postprocessed(cur, items: list) -> list:
+    """Матчит supplier/material в справочниках, возвращает финальные items."""
+    result = []
+    for item in items:
+        s_name = item.get("supplier_name") or ""
+        m_name = item.get("material")      or ""
+        raw_u  = item.get("unit", "шт")
+        up     = item.get("unit_price")
+        qty    = item.get("quantity")
+        idate  = item.get("invoice_date")
+        inum   = item.get("invoice_number")
 
         s_id, s_created = _match_or_create_supplier(cur, s_name)
         m_id, m_created, unit = _match_or_create_material(cur, m_name, raw_u)
 
-        complete = bool(s_name and m_name and up is not None and qty is not None)
-        norm.append({
+        complete = bool(m_name and up is not None and qty is not None)
+        result.append({
             "supplier_name":    s_name or None,
             "supplier_id":      s_id,
             "supplier_created": s_created,
@@ -3540,27 +3762,30 @@ def _normalize_items(cur, raw_list: list) -> list:
             "invoice_date":     idate,
             "invoice_number":   inum,
             "complete":         complete,
+            "quality":          item.get("quality", "ok"),
+            "price_fixed":      item.get("price_fixed", False),
         })
-    return norm
+    return result
 
+
+# ── Главная функция ───────────────────────────────────────────────────────────
 
 def recognize_invoice(cur, invoice_id: int):
-    """Запускает AI-распознавание счёта.
-    Уровень 1: Excel → Markdown-таблица + спец. промпт.
-    Уровень 2: PDF fallback → первая страница → JPEG → мультимодальный запрос.
-    Возвращает {status, meta, items, parse_error, debug}.
     """
-    import re
+    Конвейер распознавания счёта:
+      Шаг 1. Извлечение сырого текста (PDF/Excel без AI, Image → OCR).
+      Шаг 2. Разбивка на header / table_chunks / footer.
+      Шаг 3. Параллельные AI-запросы: header → meta, каждый chunk → items[].
+      Шаг 4. Постобработка: нормализация единиц, исправление цен, флаг quality.
+      Возвращает {status, meta, items, parse_error, debug}.
+    """
     import requests as req_lib
-    import base64
+    import base64, io as _io
 
-    raw_content   = ""
-    raw_content_2 = ""      # для fallback
-    parse_error   = None
-    fallback_used = False
-    items_debug   = []
+    debug_log  = []
+    parse_error = None
 
-    # ── 1. Данные счёта ────────────────────────────────────────────────────────
+    # ── 0. Загружаем данные счёта из БД ──────────────────────────────────────
     cur.execute(
         f"SELECT id, pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
         (invoice_id,)
@@ -3574,197 +3799,171 @@ def recognize_invoice(cur, invoice_id: int):
 
     ext = (file_name or "").rsplit(".", 1)[-1].lower() if file_name else ""
 
-    # ── 2. Скачиваем файл ─────────────────────────────────────────────────────
+    # ── 1. Скачиваем файл ────────────────────────────────────────────────────
     try:
         resp = req_lib.get(file_url, timeout=30)
         resp.raise_for_status()
         file_bytes = resp.content
-        file_b64   = base64.b64encode(file_bytes).decode("utf-8")
     except Exception as e:
         return None, f"Не удалось загрузить файл: {e}"
 
-    system_msg = {
-        "role": "system",
-        "content": "Ты — OCR-система для финансовых документов. Отвечай ТОЛЬКО JSON-массивом. Никаких пояснений, markdown или ``` блоков."
-    }
+    file_b64 = base64.b64encode(file_bytes).decode("utf-8")
+    debug_log.append(f"file={file_name} ext={ext} size={len(file_bytes)}")
 
-    # ── 3. Формируем первичный запрос по типу файла ───────────────────────────
+    # ── 2. Извлечение сырого текста (ШАГ 1 конвейера) ────────────────────────
+    raw_text   = ""
+    is_scan    = False
+    text_source = "unknown"
+
     if ext in ("jpg", "jpeg", "png"):
         mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
-        user_msg = {"role": "user", "content": [
-            {"type": "text",      "text": INVOICE_PROMPT},
-            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
-        ]}
+        raw_text    = _ocr_image_polza(req_lib, file_b64, mime)
+        text_source = "ocr_image"
+        debug_log.append(f"OCR image: {len(raw_text)} chars")
 
     elif ext in ("xls", "xlsx"):
-        # УРОВЕНЬ 1: Excel → Markdown-таблица
         try:
-            md_table = _excel_to_markdown(file_bytes)
+            raw_text    = _extract_text_excel(file_bytes)
+            text_source = "excel"
+            debug_log.append(f"Excel text: {len(raw_text)} chars")
         except Exception as xe:
-            md_table = f"[Ошибка чтения Excel: {xe}]"
-        user_msg = {"role": "user",
-                    "content": f"{INVOICE_PROMPT_EXCEL}\n\n```\n{md_table}\n```"}
+            raw_text    = f"[Excel error: {xe}]"
+            text_source = "excel_error"
 
     elif ext == "pdf":
-        # Первичный запрос: PDF как data-uri (для PDF с текстовым слоем)
-        user_msg = {"role": "user", "content": [
-            {"type": "text",      "text": INVOICE_PROMPT},
-            {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64}"}},
-        ]}
+        raw_text, is_scan = _extract_text_pdf(file_bytes)
+        text_source = "pdfplumber"
+        debug_log.append(f"PDF text: {len(raw_text)} chars, is_scan={is_scan}")
+        if is_scan:
+            # Скан: рендерим страницы в JPEG и делаем OCR
+            debug_log.append("PDF is scan — rendering to JPEG for OCR")
+            ocr_parts = []
+            try:
+                import fitz
+                doc_fitz = fitz.open(stream=file_bytes, filetype="pdf")
+                for pi in range(min(len(doc_fitz), 4)):
+                    img_b64 = _pdf_to_jpeg_b64(file_bytes, pi)
+                    if img_b64:
+                        page_text = _ocr_image_polza(req_lib, img_b64, "image/jpeg")
+                        ocr_parts.append(page_text)
+                        debug_log.append(f"  page {pi}: ocr {len(page_text)} chars")
+                raw_text    = "\n\n".join(ocr_parts)
+                text_source = "ocr_pdf_scan"
+            except ImportError:
+                debug_log.append("PyMuPDF not available for scan OCR")
 
     else:
         # DOCX и прочие
         try:
             from docx import Document
-            import io as _io
             doc = Document(_io.BytesIO(file_bytes))
-            text_content = "\n".join(p.text for p in doc.paragraphs if p.text.strip())[:3000]
-        except Exception:
-            text_content = f"[Файл типа {ext.upper()} не поддерживается]"
-        user_msg = {"role": "user",
-                    "content": f"{INVOICE_PROMPT}\n\nСодержимое документа:\n{text_content}"}
+            raw_text    = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            text_source = "docx"
+        except Exception as de:
+            raw_text    = f"[DOCX error: {de}]"
+            text_source = "docx_error"
 
-    # ── 4. Первичный вызов Polza.ai ───────────────────────────────────────────
-    try:
-        raw_content = _call_polza(req_lib, [system_msg, user_msg])
-    except Exception as e:
-        return None, f"Ошибка Polza.ai: {e}"
+    if not raw_text.strip():
+        return None, "Не удалось извлечь текст из файла."
 
-    raw_list, parse_error = _parse_items_response(raw_content)
+    # ── 3. Разбивка на зоны (ШАГ 2) ─────────────────────────────────────────
+    zones = _split_document(raw_text)
+    debug_log.append(
+        f"zones: header={len(zones['header'])}c "
+        f"table_lines={len(zones['table_lines'])} "
+        f"expected_count={zones['expected_count']}"
+    )
 
-    # ── 4b. Count-check + Continuation ───────────────────────────────────────
-    # Спрашиваем модель: сколько всего позиций в документе?
-    # Если получили меньше — автоматически дозапрашиваем продолжение.
-    continuation_log = []
-    if raw_list and len(raw_list) > 0:
+    # ── 4. AI-запросы (ШАГ 3) ────────────────────────────────────────────────
+    # 4a. Шапка → meta
+    meta = _extract_header_meta(req_lib, zones["header"])
+    supplier_name  = _clean(meta.get("supplier_name"))  or ""
+    invoice_date   = _clean(meta.get("invoice_date"))
+    invoice_number = _clean(meta.get("invoice_number"))
+    debug_log.append(f"meta: supplier={supplier_name!r} date={invoice_date} num={invoice_number}")
+
+    # 4b. Чанки таблицы → items
+    table_lines = zones["table_lines"]
+    all_raw_items: list = []
+
+    if table_lines:
+        chunks = _make_chunks(table_lines, chunk_size=15)
+        debug_log.append(f"chunks: {len(chunks)} × ≤15 строк")
+        for ci, chunk in enumerate(chunks):
+            chunk_items = _extract_chunk_items(req_lib, chunk, supplier_name)
+            debug_log.append(f"  chunk[{ci}]: {len(chunk_items)} items")
+            all_raw_items.extend(chunk_items)
+    else:
+        # Нет явной таблицы — пробуем единый запрос по всему тексту
+        debug_log.append("No table lines found — fallback to full-text single request")
+        sys_msg  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
+        user_msg = {"role": "user", "content": (
+            "Из следующего текста счёта извлеки ВСЕ позиции товаров.\n"
+            "Верни ТОЛЬКО JSON-массив: [{\"material\":\"...\",\"unit\":\"...\","
+            "\"unit_price\":число,\"quantity\":число}]\n\nТекст:\n" + raw_text[:4000]
+        )}
         try:
-            count_msg = {"role": "user",
-                         "content": "Сколько всего строк-позиций товаров/материалов в этом документе? "
-                                    "Ответь ТОЛЬКО одним целым числом, без пояснений."}
-            count_raw = _call_polza(req_lib, [system_msg, user_msg, count_msg], max_tokens=16)
-            import re as _re
-            count_match = _re.search(r'\d+', count_raw.strip())
-            expected_count = int(count_match.group(0)) if count_match else 0
-            continuation_log.append(f"count_raw='{count_raw.strip()}' expected={expected_count} got={len(raw_list)}")
-        except Exception as ce:
-            expected_count = 0
-            continuation_log.append(f"count-check error: {ce}")
-
-        # Если ожидаемых позиций больше чем получено — запрашиваем продолжение
-        MAX_CONTINUATION_ROUNDS = 3
-        for _round in range(MAX_CONTINUATION_ROUNDS):
-            if expected_count <= 0 or len(raw_list) >= expected_count:
-                break
-            got_so_far = len(raw_list)
-            continuation_log.append(f"round {_round+1}: requesting continuation from pos {got_so_far+1}")
-            try:
-                cont_prompt = (
-                    f"Предыдущий ответ содержал {got_so_far} позиций, но в документе их {expected_count}. "
-                    f"Продолжи извлечение с позиции {got_so_far+1}. "
-                    f"Верни ТОЛЬКО JSON-массив недостающих позиций, начиная с позиции {got_so_far+1}. "
-                    f"Формат: [{{\"supplier_name\":\"...\",\"material\":\"...\",\"unit\":\"...\","
-                    f"\"unit_price\":число,\"quantity\":число,\"invoice_date\":\"...\",\"invoice_number\":\"...\"}}]"
-                )
-                cont_user_msg = {"role": "user", "content": cont_prompt}
-                cont_raw = _call_polza(req_lib, [system_msg, user_msg, cont_user_msg], max_tokens=2048)
-                cont_list, cont_err = _parse_items_response(cont_raw)
-                if cont_list and len(cont_list) > 0:
-                    raw_list = raw_list + cont_list
-                    continuation_log.append(f"  → got {len(cont_list)} more, total now {len(raw_list)}")
-                else:
-                    continuation_log.append(f"  → continuation returned 0 items, stopping. err={cont_err}")
-                    break
-            except Exception as cont_e:
-                continuation_log.append(f"  → continuation error: {cont_e}")
-                break
-
-    # ── 5. УРОВЕНЬ 2: PDF fallback → первая страница → JPEG ──────────────────
-    if ext == "pdf" and (raw_list is None or len(raw_list) == 0):
-        fallback_used = True
-        try:
-            import fitz  # PyMuPDF
-            import io as _io
-            doc_pdf = fitz.open(stream=file_bytes, filetype="pdf")
-            page = doc_pdf[0]
-            # Рендерим с масштабом 1.5x (≈108dpi → 162dpi), достаточно для OCR
-            mat = fitz.Matrix(1.5, 1.5)
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            # Сжимаем до 1200px по длинной стороне
-            img_bytes = pix.tobytes("jpeg")
-            # Простое сжатие через PIL если доступен, иначе используем как есть
-            try:
-                from PIL import Image
-                img_io  = _io.BytesIO(img_bytes)
-                img_pil = Image.open(img_io)
-                w, h    = img_pil.size
-                MAX     = 1200
-                if w > MAX or h > MAX:
-                    ratio   = MAX / max(w, h)
-                    img_pil = img_pil.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-                out_io = _io.BytesIO()
-                img_pil.save(out_io, "JPEG", quality=82)
-                img_bytes = out_io.getvalue()
-            except ImportError:
-                pass  # PIL недоступен, берём нативный рендер
-
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            fb_user_msg = {"role": "user", "content": [
-                {"type": "text",      "text": INVOICE_PROMPT + "\n(Это скан PDF — извлеки данные из изображения)"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-            ]}
-            raw_content_2 = _call_polza(req_lib, [system_msg, fb_user_msg])
-            fb_list, fb_error = _parse_items_response(raw_content_2)
-            if fb_list and len(fb_list) > 0:
-                raw_list    = fb_list
-                parse_error = fb_error
-            elif not parse_error:
-                parse_error = fb_error or "Fallback также не дал результатов"
-        except ImportError:
-            # PyMuPDF не установлен — fallback недоступен
-            if not parse_error:
-                parse_error = "PDF без текстового слоя, fallback недоступен (нет PyMuPDF)"
+            fb_raw = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
+            fb_items, fb_err = _parse_json_list(fb_raw)
+            all_raw_items = fb_items or []
+            if fb_err: debug_log.append(f"  fallback parse error: {fb_err}")
         except Exception as fe:
-            if not parse_error:
-                parse_error = f"PDF fallback ошибка: {fe}"
+            debug_log.append(f"  fallback error: {fe}")
 
-    # ── 6. Нормализация и матчинг справочников ────────────────────────────────
-    if raw_list is None:
-        raw_list = []
+    debug_log.append(f"total raw items before postprocess: {len(all_raw_items)}")
 
-    norm_items = _normalize_items(cur, raw_list)
+    # ── 5. Постобработка (ШАГ 4) ─────────────────────────────────────────────
+    processed = _postprocess_items(
+        all_raw_items,
+        supplier_name=supplier_name,
+        invoice_date=invoice_date,
+        invoice_number=invoice_number,
+    )
+    debug_log.append(f"after postprocess: {len(processed)} items")
 
-    for it in norm_items:
-        items_debug.append(
-            f"[{it['material'] or '?'}] s={it['supplier_name']}({it['supplier_id']}) "
-            f"m={it['material_id']} up={it['unit_price']} qty={it['quantity']} ok={it['complete']}"
+    # Проверка по expected_count из footer
+    expected = zones.get("expected_count", 0)
+    if expected > 0 and len(processed) < expected * 0.5:
+        parse_error = (
+            f"Предупреждение: распознано {len(processed)} позиций, "
+            f"но в документе заявлено {expected}. Проверьте вручную."
         )
+        debug_log.append(f"LOW COVERAGE: got {len(processed)}/{expected}")
 
-    # ── 7. Статус + сохраняем в БД ────────────────────────────────────────────
+    # ── 6. Матчинг справочников ───────────────────────────────────────────────
+    norm_items = _normalize_postprocessed(cur, processed)
+
+    # ── 7. Сохраняем в БД ────────────────────────────────────────────────────
     all_ok = bool(norm_items) and all(i["complete"] for i in norm_items)
     status = "обработан" if (all_ok and not parse_error) else "требуется_проверка"
 
-    meta_date = norm_items[0].get("invoice_date")  if norm_items else None
-    meta_num  = norm_items[0].get("invoice_number") if norm_items else None
+    meta_date = invoice_date
+    meta_num  = invoice_number
 
     cur.execute(
         f"UPDATE {SCHEMA}.invoices SET recognition_status=%s, recognized_data=%s, updated_at=now() WHERE id=%s",
-        (status, json.dumps(raw_list, ensure_ascii=False), invoice_id)
+        (status, json.dumps(all_raw_items, ensure_ascii=False), invoice_id)
     )
 
     return {
-        "status":        status,
-        "meta":          {"invoice_date": meta_date, "invoice_number": meta_num},
-        "items":         norm_items,
-        "items_count":   len(norm_items),
-        "parse_error":   parse_error,
-        "fallback_used": fallback_used,
+        "status":      status,
+        "meta":        {"invoice_date": meta_date, "invoice_number": meta_num},
+        "items":       norm_items,
+        "items_count": len(norm_items),
+        "parse_error": parse_error,
+        "fallback_used": is_scan,
         "debug": {
-            "raw_response":     raw_content,
-            "raw_response_2":   raw_content_2,
+            "raw_response":     raw_text[:2000],
+            "raw_response_2":   "",
             "parse_error":      parse_error,
-            "fallback_used":    fallback_used,
-            "items_debug":      items_debug,
-            "continuation_log": continuation_log,
+            "fallback_used":    is_scan,
+            "text_source":      text_source,
+            "items_debug":      [
+                f"[{it['material'] or '?'}] up={it['unit_price']} qty={it['quantity']} "
+                f"quality={it['quality']} fix={it['price_fixed']}"
+                for it in norm_items
+            ],
+            "continuation_log": debug_log,
         },
     }, None
 

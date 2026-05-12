@@ -113,6 +113,9 @@ export interface AiItem {
   invoice_date: string | null;
   invoice_number: string | null;
   complete: boolean;
+  /** 'ok' | 'suspicious' (цена скорректирована) | 'bad' (нет цены/кол-ва) */
+  quality?: "ok" | "suspicious" | "bad";
+  price_fixed?: boolean;
 }
 
 // Пустая позиция для ручного ввода
@@ -121,6 +124,7 @@ export const EMPTY_AI_ITEM: AiItem = {
   material: null,      material_id: null, material_created: false,
   unit: "шт", unit_price: null, quantity: null,
   invoice_date: null, invoice_number: null, complete: false,
+  quality: "ok", price_fixed: false,
 };
 
 // Полный ответ от бэкенда после AI-распознавания
