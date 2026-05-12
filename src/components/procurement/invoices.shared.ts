@@ -3,8 +3,8 @@ import { Role } from "@/App";
 
 export const AI_ROLES: Role[] = ["director", "supply_director", "supplier"];
 
-export const ACCEPT_TYPES = ".pdf,.jpg,.jpeg,.png,.xls,.xlsx,.docx";
-export const ACCEPT_HINT  = "PDF, JPG/PNG, Excel, Word";
+export const ACCEPT_TYPES = ".jpg,.jpeg,.png";
+export const ACCEPT_HINT  = "JPG, PNG (фото или скан счёта)";
 
 export const EXT_ICON: Record<string, string> = {
   pdf: "FileText", jpg: "Image", jpeg: "Image", png: "Image",
@@ -40,45 +40,40 @@ export async function fileToBase64(file: File): Promise<string> {
 const UPLOAD_LIMIT_BYTES = 700 * 1024; // 700KB base64 ≈ ~950KB тело
 
 export async function prepareFileForUpload(file: File): Promise<{ b64: string; name: string }> {
-  const isImage = file.type.startsWith("image/");
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const isImage = file.type.startsWith("image/") || ["jpg", "jpeg", "png"].includes(ext);
 
-  if (isImage) {
-    // Сжимаем через Canvas до максимум 1200px по длинной стороне, quality 0.82
-    const b64 = await new Promise<string>((resolve, reject) => {
-      const img = new Image();
-      const url = URL.createObjectURL(file);
-      img.onload = () => {
-        URL.revokeObjectURL(url);
-        const MAX = 1200;
-        let { width, height } = img;
-        if (width > MAX || height > MAX) {
-          if (width > height) { height = Math.round((height * MAX) / width); width = MAX; }
-          else                { width  = Math.round((width  * MAX) / height); height = MAX; }
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = width; canvas.height = height;
-        canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-        resolve(dataUrl.split(",")[1]);
-      };
-      img.onerror = reject;
-      img.src = url;
-    });
-    // Переименовываем в .jpg если был png
-    const name = file.name.replace(/\.(png|webp)$/i, ".jpg");
-    return { b64, name };
-  }
-
-  // Не-изображения: просто проверяем размер
-  const raw = await fileToBase64(file);
-  const estimatedBodySize = Math.ceil(raw.length * 1.1); // JSON overhead
-  if (estimatedBodySize > UPLOAD_LIMIT_BYTES * 1.5) {
+  // Только изображения поддерживаются сейчас
+  if (!isImage) {
     throw new Error(
-      `Файл слишком большой (${Math.round(file.size / 1024)} KB). ` +
-      `Максимум для PDF/Excel — 500 KB. Попробуйте уменьшить файл или отправьте скан страницы.`
+      "Формат временно не поддерживается. Пожалуйста, загрузите фото или скан счёта в JPG/PNG."
     );
   }
-  return { b64: raw, name: file.name };
+
+  // Сжимаем через Canvas до максимум 1200px по длинной стороне, quality 0.82
+  const b64 = await new Promise<string>((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const MAX = 1200;
+      let { width, height } = img;
+      if (width > MAX || height > MAX) {
+        if (width > height) { height = Math.round((height * MAX) / width); width = MAX; }
+        else                { width  = Math.round((width  * MAX) / height); height = MAX; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+      resolve(dataUrl.split(",")[1]);
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+  // Переименовываем в .jpg
+  const name = file.name.replace(/\.(png|webp)$/i, ".jpg");
+  return { b64, name };
 }
 
 export interface InvoiceForm {

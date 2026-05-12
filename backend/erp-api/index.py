@@ -4016,265 +4016,57 @@ def recognize_invoice(cur, invoice_id: int):
     file_b64 = base64.b64encode(file_bytes).decode("utf-8")
     debug_log.append(f"file={file_name} ext={ext} size={len(file_bytes)}")
 
-    # ── 2. Извлечение сырого текста через polza.ai (ШАГ 1 конвейера) ─────────
-    # Все форматы кроме изображений передаём в GPT-4o как base64 document.
-    # Для изображений (jpg/png) — мультимодальный запрос уже работал раньше.
-    raw_text    = ""
-    is_scan     = False
-    text_source = "unknown"
-
-    # ── Стратегия по типу файла ───────────────────────────────────────────────
-    # JPG/PNG  → мультимодальный запрос в GPT-4o (image_url)
-    # XLS/XLSX → openpyxl (нативно), fallback xlrd (.xls)
-    # PDF      → GPT-4o с PDF как image_url (поддерживается через Polza.ai)
-    # DOCX     → GPT-4o с PDF как image_url (поддерживается через Polza.ai)
-    # Если всё провалилось → пользователю предлагается JPG или ручной ввод
-
-    sys_extract = {"role": "system", "content": "Ты — OCR-система. Верни только текст документа без пояснений."}
-    _EXTRACT_TEXT_PROMPT = (
-        "Извлеки ВЕСЬ текст из этого документа, сохраняя табличную структуру. "
-        "Строки таблицы разделяй переводом строки, столбцы — несколькими пробелами или табуляцией. "
-        "Включи все страницы."
-    )
-
-    if ext in ("jpg", "jpeg", "png"):
-        # Изображение — мультимодальный запрос (всегда работает)
-        mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
-        try:
-            raw_text    = _ocr_image_polza(req_lib, file_b64, mime)
-            text_source = "ocr_image"
-            debug_log.append(f"OCR image: {len(raw_text)} chars")
-        except Exception as ie:
-            debug_log.append(f"image OCR error: {ie}")
-        # Флаг: для JPG после text-extract будем использовать усиленный промпт
-        is_scan = True
-
-    elif ext in ("xls", "xlsx"):
-        # Шаг 1: openpyxl (есть в requirements.txt, поддерживает .xlsx)
-        try:
-            raw_text    = _extract_text_excel(file_bytes)
-            text_source = "excel_openpyxl"
-            debug_log.append(f"Excel via openpyxl: {len(raw_text)} chars")
-        except Exception as xe:
-            debug_log.append(f"openpyxl failed: {xe}")
-            raw_text = ""
-
-        # Шаг 2: xlrd (поддерживает старый .xls)
-        if not raw_text.strip() and ext == "xls":
-            try:
-                import xlrd, io as _xlrd_io
-                wb_xls = xlrd.open_workbook(file_contents=file_bytes)
-                lines_xls = []
-                for sh in wb_xls.sheets()[:3]:
-                    for ri in range(sh.nrows):
-                        row_vals = []
-                        for ci in range(sh.ncols):
-                            cell = sh.cell(ri, ci)
-                            v = cell.value
-                            if v == "" or v is None: continue
-                            if isinstance(v, float):
-                                row_vals.append(str(int(v)) if v == int(v) else str(round(v, 4)))
-                            else:
-                                row_vals.append(str(v).strip())
-                        if row_vals:
-                            lines_xls.append("\t".join(row_vals))
-                raw_text    = "\n".join(lines_xls)
-                text_source = "excel_xlrd"
-                debug_log.append(f"Excel via xlrd: {len(raw_text)} chars")
-            except Exception as xle:
-                debug_log.append(f"xlrd failed: {xle}")
-
-        # Шаг 3: если оба упали — GPT-4o с image_url (xlsx читается как PDF)
-        if not raw_text.strip():
-            try:
-                doc_mime = ("application/vnd.ms-excel" if ext == "xls"
-                            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                usr_msg = {"role": "user", "content": [
-                    {"type": "text", "text": _EXTRACT_TEXT_PROMPT},
-                    {"type": "image_url", "image_url": {"url": f"data:{doc_mime};base64,{file_b64}"}},
-                ]}
-                raw_text    = _call_polza(req_lib, [sys_extract, usr_msg], max_tokens=4096)
-                text_source = "excel_polza_fallback"
-                debug_log.append(f"Excel via polza fallback: {len(raw_text)} chars")
-            except Exception as epf:
-                debug_log.append(f"Excel polza fallback error: {epf}")
-
-    elif ext == "pdf":
-        # GPT-4o поддерживает PDF через image_url с mime application/pdf
-        try:
-            usr_pdf = {"role": "user", "content": [
-                {"type": "text", "text": _EXTRACT_TEXT_PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64}"}},
-            ]}
-            raw_text    = _call_polza(req_lib, [sys_extract, usr_pdf], max_tokens=4096)
-            text_source = "pdf_polza"
-            is_scan     = True
-            debug_log.append(f"PDF via polza: {len(raw_text)} chars")
-        except Exception as pe:
-            debug_log.append(f"PDF polza error: {pe}")
-
-    elif ext == "docx":
-        # DOCX: пробуем python-docx, затем polza
-        try:
-            from docx import Document as _DocxDoc
-            import io as _docx_io
-            _doc = _DocxDoc(_docx_io.BytesIO(file_bytes))
-            raw_text    = "\n".join(p.text for p in _doc.paragraphs if p.text.strip())
-            text_source = "docx_native"
-            debug_log.append(f"DOCX native: {len(raw_text)} chars")
-        except Exception as dxe:
-            debug_log.append(f"DOCX native failed: {dxe}")
-            try:
-                usr_docx = {"role": "user", "content": [
-                    {"type": "text", "text": _EXTRACT_TEXT_PROMPT},
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{file_b64}"
-                    }},
-                ]}
-                raw_text    = _call_polza(req_lib, [sys_extract, usr_docx], max_tokens=4096)
-                text_source = "docx_polza"
-                debug_log.append(f"DOCX via polza: {len(raw_text)} chars")
-            except Exception as dpe:
-                debug_log.append(f"DOCX polza error: {dpe}")
-    else:
-        debug_log.append(f"Unsupported ext: {ext}")
-
-    if not raw_text.strip():
+    # ── 2. Только изображения поддерживаются ─────────────────────────────────
+    if ext not in ("jpg", "jpeg", "png"):
         return None, (
-            "Не удалось прочитать документ.\n"
-            "Попробуйте:\n"
-            "1) Сохранить таблицу как изображение (JPG/PNG) и загрузить его\n"
-            "2) Загрузить CSV-файл\n"
-            "3) Ввести позиции вручную"
+            f"Формат «{ext.upper()}» временно не поддерживается. "
+            "Пожалуйста, загрузите фото или скан счёта в формате JPG или PNG."
         )
 
-    # ── 3. Разбивка на зоны ───────────────────────────────────────────────────
-    zones = _split_document(raw_text)
-    table_lines = zones["table_lines"]
-    debug_log.append(
-        f"zones: header={len(zones['header'])}c "
-        f"table_lines={len(table_lines)} "
-        f"expected_count={zones['expected_count']}"
-    )
+    mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
 
-    # ── 4. Шапка → meta (всегда через AI) ────────────────────────────────────
-    meta = _extract_header_meta(req_lib, zones["header"])
-    supplier_name  = _clean(meta.get("supplier_name"))  or ""
-    invoice_date   = _clean(meta.get("invoice_date"))
-    invoice_number = _clean(meta.get("invoice_number"))
-    debug_log.append(f"meta: supplier={supplier_name!r} date={invoice_date} num={invoice_number}")
-
-    # ── 5. Поиск шаблона таблицы ─────────────────────────────────────────────
-    table_headers, header_row_idx = _find_table_header_row(table_lines)
-    matched_template   = None
-    template_used      = False
-    need_template_setup = False   # фронт получит этот флаг → покажет Мастер
-    ai_col_suggestion  = {}
-    all_raw_items: list = []
-
-    if table_headers:
-        debug_log.append(f"table_headers detected: {table_headers}")
-        matched_template = _find_matching_template(cur, table_headers)
-        if matched_template:
-            debug_log.append(
-                f"template matched: id={matched_template['id']} "
-                f"name={matched_template['name']!r} score={matched_template['score']}"
-            )
-    else:
-        debug_log.append("no table header row detected")
-
-    template_fallback_info = None  # заполняется при автооткате
-
-    if matched_template:
-        # ── 5a. Шаблон найден — парсим без AI ────────────────────────────────
-        raw_from_template = _apply_template(
-            table_lines, matched_template["column_map"], header_row_idx,
-            supplier_name, invoice_date, invoice_number
+    # ── 3. Прямой запрос к GPT-4o: изображение → JSON позиций ───────────────
+    # Единственный запрос — изображение + промпт → структурированный JSON.
+    # Без OCR-текста, без шаблонов, без чанков.
+    sys_msg = {
+        "role": "system",
+        "content": (
+            "Ты — система извлечения данных из счетов и накладных. "
+            "Отвечай ТОЛЬКО JSON-массивом без пояснений, markdown и комментариев."
         )
-        debug_log.append(f"template parse: {len(raw_from_template)} raw items")
+    }
+    usr_msg = {"role": "user", "content": [
+        {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
+    ]}
 
-        # Автоматический откат на AI если < 50% позиций полные
-        processed_preview = _postprocess_items(
-            raw_from_template, supplier_name, invoice_date, invoice_number
+    try:
+        raw_response = _call_polza(req_lib, [sys_msg, usr_msg], max_tokens=4096)
+        debug_log.append(f"polza response: {len(raw_response)} chars")
+    except Exception as pe:
+        return None, f"Ошибка обращения к сервису распознавания: {pe}"
+
+    # ── 4. Парсинг ответа ────────────────────────────────────────────────────
+    all_raw_items, parse_err = _parse_json_list(raw_response)
+    if parse_err or not all_raw_items:
+        debug_log.append(f"parse error: {parse_err}")
+        return None, (
+            f"AI не смог распознать позиции из изображения. "
+            f"Попробуйте загрузить более чёткий скан или введите позиции вручную. "
+            f"Детали: {parse_err or 'пустой ответ'}"
         )
-        complete_ratio = (
-            sum(1 for p in processed_preview if p.get("unit_price") and p.get("quantity"))
-            / max(len(processed_preview), 1)
-        )
-        debug_log.append(f"template complete_ratio={complete_ratio:.2f}")
 
-        if complete_ratio >= 0.5:
-            all_raw_items  = raw_from_template
-            template_used  = True
-            _increment_template_use(cur, matched_template["id"])
-        else:
-            debug_log.append(
-                f"template quality too low ({complete_ratio:.0%}) — falling back to AI"
-            )
-            # Сохраняем информацию для плашки автоотката на фронте
-            template_fallback_info = {
-                "id":             matched_template["id"],
-                "name":           matched_template["name"],
-                "complete_ratio": round(complete_ratio, 2),
-            }
-            matched_template = None  # сбрасываем, идём в AI ветку
+    debug_log.append(f"parsed {len(all_raw_items)} raw items")
 
-    if not matched_template:
-        # ── 5b. Шаблон не найден / не подошёл — AI-конвейер ─────────────────
-        if table_headers:
-            # Получаем AI-предложение по маппингу колонок (для Мастера)
-            try:
-                ai_col_suggestion = _ai_suggest_column_map(req_lib, table_headers)
-                debug_log.append(f"ai_col_suggestion: {ai_col_suggestion}")
-            except Exception as ace:
-                debug_log.append(f"ai_col_suggestion error: {ace}")
-            need_template_setup = True  # фронт откроет Мастер
+    # ── 5. Извлечь meta из ответа AI (поставщик, дата, номер) ───────────────
+    # GPT-4o иногда включает их в ответ — берём из первого объекта
+    first = all_raw_items[0] if all_raw_items else {}
+    supplier_name  = _clean(first.get("supplier_name")) or ""
+    invoice_date   = _clean(first.get("invoice_date"))
+    invoice_number = _clean(first.get("invoice_number"))
+    debug_log.append(f"meta from items: supplier={supplier_name!r} date={invoice_date} num={invoice_number}")
 
-        if table_lines:
-            chunks = _make_chunks(table_lines, chunk_size=15)
-            debug_log.append(f"AI chunks: {len(chunks)} × ≤15 строк")
-            for ci, chunk in enumerate(chunks):
-                chunk_items = _extract_chunk_items(req_lib, chunk, supplier_name)
-                debug_log.append(f"  chunk[{ci}]: {len(chunk_items)} items")
-                all_raw_items.extend(chunk_items)
-        else:
-            # Нет таблицы в тексте — пробуем полнотекстовый или мультимодальный запрос
-            if is_scan and ext in ("jpg", "jpeg", "png"):
-                # Для изображений — прямой структурированный запрос (минует OCR-текст)
-                debug_log.append("Image: no table in OCR text — direct structured request")
-                try:
-                    mime_direct = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
-                    sys_direct  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
-                    usr_direct  = {"role": "user", "content": [
-                        {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime_direct};base64,{file_b64}"}},
-                    ]}
-                    direct_raw = _call_polza(req_lib, [sys_direct, usr_direct], max_tokens=4096)
-                    direct_items, direct_err = _parse_json_list(direct_raw)
-                    all_raw_items = direct_items or []
-                    debug_log.append(f"  direct image parse: {len(all_raw_items)} items, err={direct_err}")
-                except Exception as de:
-                    debug_log.append(f"  direct image error: {de}")
-
-            if not all_raw_items:
-                debug_log.append("No table lines — full-text fallback")
-                sys_msg  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
-                user_msg = {"role": "user", "content": (
-                    "Из следующего текста счёта извлеки ВСЕ позиции товаров.\n"
-                    "Верни ТОЛЬКО JSON-массив: [{\"material\":\"...\",\"unit\":\"...\","
-                    "\"unit_price\":число,\"quantity\":число}]\n\nТекст:\n" + raw_text[:4000]
-                )}
-                try:
-                    fb_raw   = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
-                    fb_items, fb_err = _parse_json_list(fb_raw)
-                    all_raw_items = fb_items or []
-                    if fb_err: debug_log.append(f"  fallback parse error: {fb_err}")
-                except Exception as fe:
-                    debug_log.append(f"  fallback error: {fe}")
-
-    debug_log.append(f"total raw items before postprocess: {len(all_raw_items)}")
-
-    # ── 6. Постобработка ─────────────────────────────────────────────────────
+    # ── 6. Постобработка: нормализация единиц, исправление цен ──────────────
     processed = _postprocess_items(
         all_raw_items,
         supplier_name=supplier_name,
@@ -4283,20 +4075,12 @@ def recognize_invoice(cur, invoice_id: int):
     )
     debug_log.append(f"after postprocess: {len(processed)} items")
 
-    expected = zones.get("expected_count", 0)
-    if expected > 0 and len(processed) < expected * 0.5:
-        parse_error = (
-            f"Предупреждение: распознано {len(processed)} позиций, "
-            f"но в документе заявлено {expected}. Проверьте вручную."
-        )
-        debug_log.append(f"LOW COVERAGE: got {len(processed)}/{expected}")
-
     # ── 7. Матчинг справочников ───────────────────────────────────────────────
     norm_items = _normalize_postprocessed(cur, processed)
 
     # ── 8. Сохраняем в БД ────────────────────────────────────────────────────
     all_ok = bool(norm_items) and all(i["complete"] for i in norm_items)
-    status = "обработан" if (all_ok and not parse_error) else "требуется_проверка"
+    status = "обработан" if all_ok else "требуется_проверка"
 
     cur.execute(
         f"UPDATE {SCHEMA}.invoices SET recognition_status=%s, recognized_data=%s, updated_at=now() WHERE id=%s",
@@ -4304,29 +4088,25 @@ def recognize_invoice(cur, invoice_id: int):
     )
 
     return {
-        "status":             status,
-        "meta":               {"invoice_date": invoice_date, "invoice_number": invoice_number},
-        "items":              norm_items,
-        "items_count":        len(norm_items),
-        "parse_error":        parse_error,
-        "fallback_used":      is_scan,
-        # ── шаблонная информация ──
-        "template_used":      template_used,
-        "template":           {
-            "id":    matched_template["id"]   if matched_template else None,
-            "name":  matched_template["name"] if matched_template else None,
-            "score": matched_template["score"] if matched_template else None,
-        },
-        "need_template_setup":   need_template_setup,
-        "table_headers":         table_headers,
-        "ai_col_suggestion":     ai_col_suggestion,
-        "template_fallback_info": template_fallback_info,  # при автооткате: {id, name, complete_ratio}
+        "status":      status,
+        "meta":        {"invoice_date": invoice_date, "invoice_number": invoice_number},
+        "items":       norm_items,
+        "items_count": len(norm_items),
+        "parse_error": None,
+        "fallback_used": False,
+        # шаблоны отключены
+        "template_used":         False,
+        "template":              {"id": None, "name": None, "score": None},
+        "need_template_setup":   False,
+        "table_headers":         [],
+        "ai_col_suggestion":     {},
+        "template_fallback_info": None,
         "debug": {
-            "raw_response":     raw_text[:2000],
+            "raw_response":     raw_response[:2000],
             "raw_response_2":   "",
-            "parse_error":      parse_error,
-            "fallback_used":    is_scan,
-            "text_source":      text_source,
+            "parse_error":      parse_err,
+            "fallback_used":    False,
+            "text_source":      "image_direct",
             "items_debug":      [
                 f"[{it['material'] or '?'}] up={it['unit_price']} qty={it['quantity']} "
                 f"quality={it['quality']} fix={it['price_fixed']}"
@@ -4346,7 +4126,8 @@ def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, 
         up   = item.get("unit_price")
         qty  = item.get("quantity")
 
-        key_ok = not any(_is_null(f) for f in [item.get("supplier_name"), item.get("material"), up, qty])
+        # supplier_name необязателен — статус определяется только по material, цене и кол-ву
+        key_ok = not any(_is_null(f) for f in [item.get("material"), up, qty])
         item_status = "обработан" if key_ok else "требуется_проверка"
 
         cur.execute(f"""
