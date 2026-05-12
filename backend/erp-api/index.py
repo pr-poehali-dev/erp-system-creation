@@ -3278,25 +3278,45 @@ _PROMPT_OCR_IMAGE = """Извлеки ВЕСЬ текст с этого изоб
 Не пропускай ни одной строки. Сохраняй структуру таблицы: строки разделяй переводом строки, столбцы — двумя пробелами или табуляцией.
 Если значение нечёткое — всё равно попытайся его прочитать. Верни только текст без пояснений."""
 
-_PROMPT_IMAGE_DIRECT = """Извлеки данные из этого счёта-фактуры или накладной.
+_PROMPT_IMAGE_DIRECT = """Ты получаешь изображение счёта. Твоя задача — извлечь данные абсолютно точно.
 
-ПРАВИЛА (обязательны):
-1. Каждая строка таблицы на изображении — это РОВНО ОДНА позиция. Не объединяй соседние строки.
-2. Не пропускай строки без причины. Количество позиций в ответе должно совпадать с количеством строк в таблице.
-3. Копируй названия материалов ТОЧНО как написано, включая размеры и артикулы.
-4. Если значение неразборчиво — ставь null, не придумывай данные.
-5. Числа (цена, количество) — только цифры, без символов валюты и единиц.
-6. Также извлеки итоговую сумму счёта (если указана) в поле footer_total.
+ИЗВЛЕКИ:
+- supplier_name: название поставщика
+- invoice_date: дата в формате YYYY-MM-DD
+- invoice_number: номер счёта
+- footer_total: итоговая сумма счёта (общая сумма внизу документа)
+- items: КАЖДАЯ строка таблицы — ровно одна позиция, ни одной не пропускай
 
-Верни JSON-объект:
-{
-  "items": [{"material":"точное название","unit":"шт|м3|т|пог.м|м2|компл","unit_price":число_или_null,"quantity":число_или_null}],
-  "supplier_name": "поставщик или null",
-  "invoice_date": "YYYY-MM-DD или null",
-  "invoice_number": "номер или null",
-  "footer_total": число_или_null
-}
-Только JSON-объект, без пояснений и markdown."""
+ДЛЯ КАЖДОЙ ПОЗИЦИИ:
+- material: ПОЛНОЕ название включая размеры (например "Доска 50*200*6000 мм"). Копируй цифры точно, цифра за цифрой.
+- quantity: число (может быть дробным, например 3.37)
+- unit: единица (м3, шт, м, пог.м, м2, компл и т.д.)
+- unit_price: цена за единицу
+- amount: сумма строки (unit_price × quantity)
+
+ПРАВИЛА:
+1. Каждая строка таблицы = РОВНО ОДНА позиция. Никогда не объединяй строки.
+2. Копируй названия и размеры дословно, не перефразируй.
+3. Числа — только цифры (без символов валюты, единиц, пробелов-разделителей).
+4. Если значение неразборчиво — ставь null, не придумывай.
+5. Для каждой позиции проверь: unit_price * quantity ≈ amount (допуск 1%).
+   Если не совпадает — всё равно включи строку, но добавь поле "sum_check": false.
+
+Верни строго JSON без комментариев:
+{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число,"sum_check":true}]}"""
+
+_PROMPT_IMAGE_CORRECTION = """Итоговая сумма позиций не совпала с общей суммой счёта.
+
+Общая сумма счёта (из документа): {footer_total}
+Сумма всех позиций в твоём ответе: {items_total}
+
+Перепроверь каждую строку счёта на изображении:
+- Убедись, что quantity и unit_price считаны правильно (особенно дробные числа).
+- Убедись, что ты не пропустил ни одной строки и не продублировал строки.
+- Уточни названия материалов, если они отличаются от оригинала.
+
+Верни полностью исправленный JSON в том же формате:
+{"supplier_name":"...","invoice_date":"...","invoice_number":"...","footer_total":число,"items":[...]}"""
 
 _ITEM_KEY_ALIASES = {
     "supplier_name":  ["supplier", "vendor", "company", "поставщик", "организация", "from", "seller"],
@@ -4037,78 +4057,93 @@ def recognize_invoice(cur, invoice_id: int):
 
     mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
 
-    # ── 3. Прямой запрос к GPT-4o: изображение → JSON позиций ───────────────
-    # Единственный запрос — изображение + промпт → структурированный JSON.
-    # Без OCR-текста, без шаблонов, без чанков.
+    # ── Вспомогательная функция парсинга ответа polza.ai ─────────────────────
+    import re as _re
+
+    def _parse_ai_invoice_response(raw: str):
+        """Парсит JSON-ответ polza.ai. Возвращает (ai_obj, items, error)."""
+        s = raw.strip()
+        s = _re.sub(r'```(?:json)?\s*', '', s)
+        s = _re.sub(r'```', '', s).strip()
+        # Прямой парсинг
+        try:
+            p = json.loads(s)
+            if isinstance(p, dict) and "items" in p:
+                return p, p.get("items") or [], None
+            if isinstance(p, list):
+                return {}, p, None
+        except json.JSONDecodeError as je:
+            pass
+        # Fallback: ищем JSON-объект с items
+        for m in sorted(_re.finditer(r'\{[\s\S]+\}', s), key=lambda x: -len(x.group(0))):
+            try:
+                p = json.loads(m.group(0))
+                if isinstance(p, dict) and "items" in p:
+                    return p, p.get("items") or [], None
+            except Exception:
+                continue
+        # Fallback: ищем массив
+        for m in sorted(_re.finditer(r'\[[\s\S]+\]', s), key=lambda x: -len(x.group(0))):
+            try:
+                arr = json.loads(m.group(0))
+                if isinstance(arr, list):
+                    return {}, arr, None
+            except Exception:
+                continue
+        return {}, [], f"JSON не найден. Начало ответа: {s[:300]}"
+
+    def _calc_items_total(items: list) -> float:
+        """Считает сумму позиций из сырого списка AI."""
+        total = 0.0
+        for it in items:
+            if not isinstance(it, dict): continue
+            # Берём amount если есть, иначе unit_price * quantity
+            amt = _safe_float(it.get("amount"))
+            if amt:
+                total += amt
+            else:
+                up  = _safe_float(it.get("unit_price"))
+                qty = _safe_float(it.get("quantity"))
+                if up and qty:
+                    total += up * qty
+        return total
+
+    # ── 3. Первый запрос к GPT-4o ────────────────────────────────────────────
     sys_msg = {
         "role": "system",
-        "content": (
-            "Ты — система извлечения данных из счетов и накладных. "
-            "Отвечай ТОЛЬКО JSON-массивом без пояснений, markdown и комментариев."
-        )
+        "content": "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО JSON без пояснений и markdown."
     }
+    img_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
+
     usr_msg = {"role": "user", "content": [
         {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
-        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
+        img_content,
     ]}
 
     try:
         raw_response = _call_polza(req_lib, [sys_msg, usr_msg], max_tokens=4096)
-        debug_log.append(f"polza response: {len(raw_response)} chars")
+        debug_log.append(f"attempt 1: {len(raw_response)} chars")
     except Exception as pe:
         return None, f"Ошибка обращения к сервису распознавания: {pe}"
 
-    # ── 4. Парсинг ответа ────────────────────────────────────────────────────
-    # Новый промпт возвращает JSON-объект с полями items, supplier_name, invoice_date,
-    # invoice_number, footer_total. Поддерживаем оба формата (объект и массив).
-    import re as _re
-    _raw = raw_response.strip()
-    _raw = _re.sub(r'```(?:json)?\s*', '', _raw)
-    _raw = _re.sub(r'```', '', _raw).strip()
-
-    ai_obj = {}
-    all_raw_items = []
-    parse_err = None
-
-    try:
-        parsed = json.loads(_raw)
-        if isinstance(parsed, dict) and "items" in parsed:
-            # Новый формат: {items: [...], supplier_name, invoice_date, ...}
-            ai_obj        = parsed
-            all_raw_items = parsed.get("items") or []
-        elif isinstance(parsed, list):
-            # Старый формат: просто массив позиций
-            all_raw_items = parsed
-        else:
-            parse_err = f"Неожиданный тип ответа: {type(parsed).__name__}"
-    except json.JSONDecodeError as je:
-        # Fallback: ищем массив внутри строки
-        for m in sorted(_re.finditer(r'\[[\s\S]+\]', _raw), key=lambda x: -len(x.group(0))):
-            try:
-                all_raw_items = json.loads(m.group(0))
-                if isinstance(all_raw_items, list): break
-            except Exception:
-                continue
-        if not all_raw_items:
-            parse_err = str(je)
+    ai_obj, all_raw_items, parse_err = _parse_ai_invoice_response(raw_response)
 
     if not all_raw_items:
-        debug_log.append(f"parse error: {parse_err}")
+        debug_log.append(f"attempt 1 parse error: {parse_err}")
         return None, (
             f"AI не смог распознать позиции из изображения. "
             f"Попробуйте загрузить более чёткий скан или введите позиции вручную. "
             f"Детали: {parse_err or 'пустой ответ'}"
         )
 
-    debug_log.append(f"parsed {len(all_raw_items)} raw items")
+    debug_log.append(f"attempt 1: parsed {len(all_raw_items)} items")
 
-    # ── 5. Извлечь meta из ответа AI ─────────────────────────────────────────
+    # ── 4. Извлечь meta из первого ответа ────────────────────────────────────
     supplier_name  = _clean(ai_obj.get("supplier_name")) or ""
     invoice_date   = _clean(ai_obj.get("invoice_date"))
     invoice_number = _clean(ai_obj.get("invoice_number"))
     footer_total   = _safe_float(ai_obj.get("footer_total"))
 
-    # Если meta не в объекте — берём из первой позиции (старый формат)
     if not supplier_name and not invoice_date and not invoice_number and all_raw_items:
         first = all_raw_items[0]
         supplier_name  = _clean(first.get("supplier_name")) or ""
@@ -4119,6 +4154,56 @@ def recognize_invoice(cur, invoice_id: int):
         f"meta: supplier={supplier_name!r} date={invoice_date} "
         f"num={invoice_number} footer_total={footer_total}"
     )
+
+    # ── 5. Самокорректирующийся цикл (до 2 повторных запросов) ───────────────
+    raw_response_2 = ""
+    correction_attempts = 0
+    MAX_CORRECTIONS = 2
+
+    if footer_total and footer_total > 0:
+        for attempt in range(MAX_CORRECTIONS):
+            items_total = _calc_items_total(all_raw_items)
+            if items_total <= 0:
+                break
+            diff_pct = abs(items_total - footer_total) / footer_total
+            debug_log.append(
+                f"sum check attempt {attempt + 1}: "
+                f"items={items_total:.2f} footer={footer_total:.2f} diff={diff_pct:.1%}"
+            )
+            if diff_pct <= 0.01:
+                break  # сумма сошлась — выходим
+
+            # Запрашиваем исправление
+            correction_attempts += 1
+            corr_prompt = _PROMPT_IMAGE_CORRECTION.format(
+                footer_total=footer_total,
+                items_total=round(items_total, 2),
+            )
+            corr_usr = {"role": "user", "content": [
+                {"type": "text", "text": corr_prompt},
+                img_content,
+            ]}
+            try:
+                raw_corr = _call_polza(req_lib, [sys_msg, corr_usr], max_tokens=4096)
+                debug_log.append(f"correction {attempt + 1}: {len(raw_corr)} chars")
+                raw_response_2 = raw_corr
+                corr_obj, corr_items, corr_err = _parse_ai_invoice_response(raw_corr)
+                if corr_items:
+                    all_raw_items = corr_items
+                    # Обновляем meta если пришла
+                    if corr_obj.get("supplier_name"):
+                        supplier_name = _clean(corr_obj["supplier_name"]) or supplier_name
+                    if corr_obj.get("invoice_date"):
+                        invoice_date = _clean(corr_obj["invoice_date"]) or invoice_date
+                    if corr_obj.get("invoice_number"):
+                        invoice_number = _clean(corr_obj["invoice_number"]) or invoice_number
+                    debug_log.append(f"correction {attempt + 1}: {len(corr_items)} items")
+                else:
+                    debug_log.append(f"correction {attempt + 1} parse failed: {corr_err}")
+                    break
+            except Exception as ce:
+                debug_log.append(f"correction {attempt + 1} error: {ce}")
+                break
 
     # ── 6. Постобработка: нормализация единиц, исправление цен ──────────────
     processed = _postprocess_items(
@@ -4132,25 +4217,28 @@ def recognize_invoice(cur, invoice_id: int):
     # ── 7. Матчинг справочников ───────────────────────────────────────────────
     norm_items = _normalize_postprocessed(cur, processed)
 
-    # ── 8. Проверка итоговой суммы ────────────────────────────────────────────
+    # ── 8. Финальная проверка суммы ───────────────────────────────────────────
     total_warning = None
     if footer_total and footer_total > 0:
-        items_total = sum(
+        final_total = sum(
             (it["unit_price"] or 0) * (it["quantity"] or 0)
             for it in norm_items
             if it.get("unit_price") and it.get("quantity")
         )
-        if items_total > 0:
-            diff_pct = abs(items_total - footer_total) / footer_total
-            if diff_pct > 0.01:  # расхождение > 1%
+        if final_total > 0:
+            final_diff = abs(final_total - footer_total) / footer_total
+            if final_diff > 0.01:
                 total_warning = (
-                    f"Итоговая сумма не сходится: по позициям {items_total:,.2f} ₽, "
-                    f"в счёте {footer_total:,.2f} ₽. Проверьте позиции."
+                    f"Итоговая сумма не сходится: по позициям {final_total:,.2f} ₽, "
+                    f"в счёте {footer_total:,.2f} ₽ "
+                    f"(расхождение {final_diff:.1%}). Проверьте позиции."
                 )
                 debug_log.append(
-                    f"SUM MISMATCH: items={items_total:.2f} footer={footer_total:.2f} "
-                    f"diff={diff_pct:.1%}"
+                    f"FINAL MISMATCH after {correction_attempts} corrections: "
+                    f"items={final_total:.2f} footer={footer_total:.2f} diff={final_diff:.1%}"
                 )
+            else:
+                debug_log.append(f"sum OK after {correction_attempts} corrections: {final_total:.2f}")
 
     # ── 9. Сохраняем в БД ────────────────────────────────────────────────────
     all_ok = bool(norm_items) and all(i["complete"] for i in norm_items)
@@ -4162,32 +4250,33 @@ def recognize_invoice(cur, invoice_id: int):
     )
 
     return {
-        "status":      status,
-        "meta":        {"invoice_date": invoice_date, "invoice_number": invoice_number},
-        "items":       norm_items,
-        "items_count": len(norm_items),
-        "parse_error": total_warning,   # предупреждение о сумме (не блокирует)
+        "status":       status,
+        "meta":         {"invoice_date": invoice_date, "invoice_number": invoice_number},
+        "items":        norm_items,
+        "items_count":  len(norm_items),
+        "parse_error":  total_warning,   # предупреждение о сумме (не блокирует)
         "footer_total": footer_total,
         "fallback_used": False,
         # шаблоны отключены
-        "template_used":         False,
-        "template":              {"id": None, "name": None, "score": None},
-        "need_template_setup":   False,
-        "table_headers":         [],
-        "ai_col_suggestion":     {},
+        "template_used":          False,
+        "template":               {"id": None, "name": None, "score": None},
+        "need_template_setup":    False,
+        "table_headers":          [],
+        "ai_col_suggestion":      {},
         "template_fallback_info": None,
         "debug": {
-            "raw_response":     raw_response[:2000],
-            "raw_response_2":   "",
-            "parse_error":      parse_err,
-            "fallback_used":    False,
-            "text_source":      "image_direct",
-            "items_debug":      [
+            "raw_response":      raw_response[:2000],
+            "raw_response_2":    raw_response_2[:2000] if raw_response_2 else "",
+            "parse_error":       parse_err,
+            "fallback_used":     False,
+            "text_source":       "image_direct",
+            "correction_rounds": correction_attempts,
+            "items_debug":       [
                 f"[{it['material'] or '?'}] up={it['unit_price']} qty={it['quantity']} "
                 f"quality={it['quality']} fix={it['price_fixed']}"
                 for it in norm_items
             ],
-            "continuation_log": debug_log,
+            "continuation_log":  debug_log,
         },
     }, None
 
