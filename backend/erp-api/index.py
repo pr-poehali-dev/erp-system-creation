@@ -3278,10 +3278,15 @@ _PROMPT_OCR_IMAGE = """Извлеки ВЕСЬ текст с этого изоб
 Не пропускай ни одной строки. Сохраняй структуру таблицы: строки разделяй переводом строки, столбцы — двумя пробелами или табуляцией.
 Если значение нечёткое — всё равно попытайся его прочитать. Верни только текст без пояснений."""
 
-_PROMPT_IMAGE_DIRECT = """Ты получаешь изображение счёта. Твоя задача — извлечь данные абсолютно точно.
+_PROMPT_IMAGE_DIRECT = """Ты получаешь изображение или файл счёта. Твоя задача — извлечь данные абсолютно точно.
+
+ВАЖНО ПРО ОФОРМЛЕНИЕ:
+- Если видишь QR-код, штрих-код или логотип компании — полностью игнорируй их. Они не являются частью данных счёта.
+- В начале документа (шапке) обычно указаны: поставщик, дата, номер счёта — ищи их там.
+- Таблица с позициями содержит: №, наименование, количество, единицу, цену, сумму.
 
 ИЗВЛЕКИ:
-- supplier_name: название поставщика
+- supplier_name: название поставщика (из шапки, над таблицей или в первых строках)
 - invoice_date: дата в формате YYYY-MM-DD
 - invoice_number: номер счёта
 - footer_total: итоговая сумма счёта (общая сумма внизу документа)
@@ -3301,6 +3306,7 @@ _PROMPT_IMAGE_DIRECT = """Ты получаешь изображение счё�
 4. Если значение неразборчиво — ставь null, не придумывай.
 5. Для каждой позиции проверь: unit_price * quantity ≈ amount (допуск 1%).
    Если не совпадает — всё равно включи строку, но добавь поле "sum_check": false.
+6. QR-коды, печати и логотипы — игнорируй полностью.
 
 Верни строго JSON без комментариев:
 {"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число,"sum_check":true}]}"""
@@ -3466,56 +3472,74 @@ def _excel_to_jpg_b64(file_bytes: bytes, ext: str) -> str:
         for ri in range(min(ws.nrows, 100)):
             rows_raw.append([str(ws.cell_value(ri, ci)) for ci in range(min(ws.ncols, 15))])
 
-    # Убираем пустые строки, ограничиваем 12 колонок
+    # Убираем полностью пустые строки, ограничиваем 12 колонок
     rows = [r[:12] for r in rows_raw if any(str(c).strip() for c in r)]
     if not rows:
         rows = [["(пустой файл)"]]
 
     ncols = max(len(r) for r in rows)
-    rows  = [r + [""] * (ncols - len(r)) for r in rows]  # выравниваем ширину
+    rows  = [r + [""] * (ncols - len(r)) for r in rows]
 
-    # ── Параметры рендера ─────────────────────────────────────────────────────
-    FONT_SZ = 12
-    PAD     = 5
-    ROW_H   = FONT_SZ + PAD * 2
-    # Первые две колонки шире (номер + наименование), остальные по 100px
-    col_widths = [40, 260] + [100] * max(0, ncols - 2)
-    col_widths = col_widths[:ncols]
-    IMG_W  = sum(col_widths) + 2
-    IMG_H  = len(rows) * ROW_H + 2
+    # ── Шрифт ─────────────────────────────────────────────────────────────────
+    FONT_SZ = 14
+    PAD     = 6
+    font    = None
+    for font_path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/DejaVuSans.ttf",
+    ):
+        try:
+            font = _Font.truetype(font_path, FONT_SZ)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = _Font.load_default()
+
+    # ── Автоподбор ширины колонок по содержимому ──────────────────────────────
+    CHAR_W = 8.5     # пикс. на символ для 14px моноширинного
+    MIN_W  = ([50, 300] + [90]  * max(0, ncols - 2))[:ncols]
+    MAX_W  = ([80, 520] + [200] * max(0, ncols - 2))[:ncols]
+
+    col_widths = []
+    for ci in range(ncols):
+        max_chars = max((len(str(row[ci])) for row in rows), default=0)
+        cw = int(max_chars * CHAR_W) + PAD * 2
+        col_widths.append(max(MIN_W[ci], min(MAX_W[ci], cw)))
+
+    ROW_H = FONT_SZ + PAD * 2 + 2
+    IMG_W = sum(col_widths) + 2
+    IMG_H = len(rows) * ROW_H + 2
 
     img  = _PIL.new("RGB", (IMG_W, IMG_H), "#ffffff")
     draw = _Draw.Draw(img)
 
-    # Шрифт — пробуем DejaVu, иначе встроенный
-    try:
-        font = _Font.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", FONT_SZ)
-    except Exception:
-        font = _Font.load_default()
-
     for ri, row in enumerate(rows):
-        y = ri * ROW_H
-        bg = "#eef2f7" if ri % 2 == 0 else "#ffffff"
+        y  = ri * ROW_H
+        bg = "#e8eef5" if ri % 2 == 0 else "#ffffff"
         draw.rectangle([0, y, IMG_W, y + ROW_H], fill=bg)
         x = 1
         for ci, cell in enumerate(row):
-            cw = col_widths[ci] if ci < len(col_widths) else 100
-            # Обрезаем слишком длинный текст
-            text = str(cell)[:32]
-            draw.text((x + PAD, y + PAD), text, fill="#1a202c", font=font)
-            draw.line([(x + cw - 1, y), (x + cw - 1, y + ROW_H)], fill="#d1d9e0")
+            cw       = col_widths[ci]
+            text     = str(cell)
+            max_chars = max(1, int((cw - PAD * 2) / CHAR_W))
+            if len(text) > max_chars:
+                text = text[:max_chars - 1] + "…"
+            draw.text((x + PAD, y + PAD), text, fill="#111827", font=font)
+            draw.line([(x + cw - 1, y), (x + cw - 1, y + ROW_H)], fill="#c7d2da")
             x += cw
-        draw.line([(0, y + ROW_H - 1), (IMG_W, y + ROW_H - 1)], fill="#d1d9e0")
+        draw.line([(0, y + ROW_H - 1), (IMG_W, y + ROW_H - 1)], fill="#c7d2da")
 
-    # Масштабируем если > 1400px по большей стороне
-    MAX = 1400
-    w, h = img.size
-    if w > MAX or h > MAX:
-        scale = MAX / max(w, h)
-        img = img.resize((int(w * scale), int(h * scale)), _PIL.LANCZOS)
+    # Масштабируем только если шире 2400px (Gemini хорошо читает крупные изображения)
+    MAX_PX = 2400
+    w, h   = img.size
+    if w > MAX_PX or h > MAX_PX:
+        scale = MAX_PX / max(w, h)
+        img   = img.resize((int(w * scale), int(h * scale)), _PIL.LANCZOS)
 
     buf = _io.BytesIO()
-    img.save(buf, format="JPEG", quality=88)
+    img.save(buf, format="JPEG", quality=90)
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
@@ -4332,10 +4356,35 @@ def recognize_invoice(cur, invoice_id: int):
 
     ai_obj, all_raw_items, parse_err = _parse_ai_invoice_response(raw_response)
 
+    # ── Попытка 2: PDF с пустым ответом — повторяем с усиленным промптом ──────
+    if not all_raw_items and ext == "pdf":
+        debug_log.append(f"attempt 1 empty, retrying PDF with QR-ignore prompt")
+        _qr_hint = (
+            "\n\nВАЖНО: Этот PDF содержит QR-код или сложную графику. "
+            "Полностью игнорируй QR-коды, штрих-коды, логотипы и любую графику. "
+            "Сосредоточься ТОЛЬКО на текстовой таблице с позициями и реквизитах в шапке. "
+            "Верни JSON как описано выше."
+        )
+        usr_msg2 = {"role": "user", "content": [
+            {"type": "text", "text": _PROMPT_IMAGE_DIRECT + _qr_hint},
+            img_content,
+        ]}
+        try:
+            raw_response2 = _call_polza(req_lib, [sys_msg, usr_msg2], max_tokens=4096)
+            debug_log.append(f"attempt 2: {len(raw_response2)} chars")
+            ai_obj2, items2, err2 = _parse_ai_invoice_response(raw_response2)
+            if items2:
+                ai_obj, all_raw_items, parse_err = ai_obj2, items2, err2
+                debug_log.append(f"attempt 2 success: {len(items2)} items")
+            else:
+                debug_log.append(f"attempt 2 also empty: {err2}")
+        except Exception as pe2:
+            debug_log.append(f"attempt 2 error: {pe2}")
+
     if not all_raw_items:
-        debug_log.append(f"attempt 1 parse error: {parse_err}")
+        debug_log.append(f"all attempts empty: {parse_err}")
         return None, (
-            f"AI не смог распознать позиции из изображения. "
+            f"AI не смог распознать позиции из документа. "
             f"Попробуйте загрузить более чёткий скан или введите позиции вручную. "
             f"Детали: {parse_err or 'пустой ответ'}"
         )
