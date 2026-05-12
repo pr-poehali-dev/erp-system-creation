@@ -62,16 +62,25 @@ async function compressImageToJpeg(
 
 // ── PDF первая страница → JPG через pdf.js ────────────────────────────────────
 export async function pdfToJpeg(file: File): Promise<string> {
-  const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist");
+  const pdfjsLib = await import("pdfjs-dist");
 
-  // Используем встроенный воркер (fake worker без Web Worker)
-  GlobalWorkerOptions.workerSrc = "";
+  // Vite: указываем путь к воркеру через URL-импорт (корректно для v5 .mjs)
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/build/pdf.worker.min.mjs",
+      import.meta.url,
+    ).toString();
+  }
 
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await getDocument({ data: arrayBuffer, useWorkerFetch: false, isEvalSupported: false, useSystemFonts: true }).promise;
+  const pdf = await pdfjsLib.getDocument({
+    data: new Uint8Array(arrayBuffer),
+    useSystemFonts: true,
+  }).promise;
+
   const page = await pdf.getPage(1);
 
-  // 150 dpi: viewport scale = 150/72 ≈ 2.08
+  // 150 dpi: scale = 150 / 72 ≈ 2.08
   const viewport = page.getViewport({ scale: 150 / 72 });
   const canvas   = document.createElement("canvas");
   canvas.width   = Math.round(viewport.width);
@@ -80,7 +89,7 @@ export async function pdfToJpeg(file: File): Promise<string> {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  await page.render({ canvasContext: ctx, viewport }).promise;
+  await page.render({ canvasContext: ctx as unknown as CanvasRenderingContext2D, viewport }).promise;
   pdf.destroy();
 
   return compressImageToJpeg(canvas, 1400, 0.80);
@@ -91,7 +100,7 @@ export async function excelToJpeg(file: File): Promise<string> {
   const XLSX = await import("xlsx");
 
   const arrayBuffer = await file.arrayBuffer();
-  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const wb = XLSX.read(new Uint8Array(arrayBuffer), { type: "array" });
   const ws = wb.Sheets[wb.SheetNames[0]];
   const rows: string[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][];
 
