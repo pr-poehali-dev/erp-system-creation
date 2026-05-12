@@ -4047,20 +4047,17 @@ def save_user_template(cur, req_lib, name: str, headers: list, column_map: dict)
 
 def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
     """
-    Подготавливает файл для отправки в Gemini.
+    Подготавливает изображение для отправки в Gemini.
+    Фронт уже конвертировал PDF/Excel в JPG — здесь принимаем только изображения.
     Возвращает (b64_str, mime) или (None, error_message).
-    - jpg/jpeg/png → сжимаем через Pillow, mime=image/jpeg
-    - pdf          → передаём as-is, mime=application/pdf (Gemini читает PDF напрямую)
-    - xls/xlsx     → конвертируем в текстовую таблицу, mime=text/plain
     """
     import base64, io as _io
 
-    # ── Изображения — сжимаем через Pillow ───────────────────────────────────
+    # Принимаем jpg/jpeg/png — сжимаем через Pillow если доступна
     if ext in ("jpg", "jpeg", "png"):
         try:
             from PIL import Image as _PILImage
             img = _PILImage.open(_io.BytesIO(file_bytes)).convert("RGB")
-            # Ограничиваем до 1400px по длинной стороне
             MAX = 1400
             w, h = img.size
             if w > MAX or h > MAX:
@@ -4069,235 +4066,16 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
             buf = _io.BytesIO()
             img.save(buf, format="JPEG", quality=88)
             b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-            debug_log.append(f"image→jpg: {ext} size={len(buf.getvalue())}")
+            debug_log.append(f"image: {ext} → jpg size={len(buf.getvalue())}")
             return b64, "image/jpeg"
         except Exception:
-            # Если Pillow недоступна — отдаём as-is
             mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
             return base64.b64encode(file_bytes).decode("utf-8"), mime
 
-    # ── PDF → рендерим первую страницу в JPG через pypdfium2 (150 dpi) ────────
-    if ext == "pdf":
-        debug_log.append(f"pdf: size={len(file_bytes)}, converting to jpg")
-        try:
-            import pypdfium2 as _pdfium
-            from PIL import Image as _PILImage
-
-            doc  = _pdfium.PdfDocument(file_bytes)
-            page = doc[0]
-            # 150 dpi: scale = dpi / 72
-            scale  = 150 / 72
-            bitmap = page.render(scale=scale, rotation=0)
-            pil_img = bitmap.to_pil()
-            doc.close()
-
-            # Конвертируем в RGB JPEG
-            if pil_img.mode != "RGB":
-                pil_img = pil_img.convert("RGB")
-            buf = _io.BytesIO()
-            pil_img.save(buf, format="JPEG", quality=88)
-            jpg_bytes = buf.getvalue()
-            b64 = base64.b64encode(jpg_bytes).decode("utf-8")
-            debug_log.append(f"pdf→jpg: size={len(jpg_bytes)}, dims={pil_img.size}")
-            return b64, "image/jpeg"
-
-        except ImportError:
-            debug_log.append("pypdfium2 not available, fallback to direct pdf")
-            b64 = base64.b64encode(file_bytes).decode("utf-8")
-            return b64, "application/pdf"
-        except Exception as e:
-            debug_log.append(f"pdf render error: {e}")
-            return None, f"Не удалось обработать PDF: {e}"
-
-    # ── Excel → текстовая таблица (Gemini хорошо читает структурированный текст)
-    if ext in ("xls", "xlsx"):
-        try:
-            if ext == "xlsx":
-                import openpyxl as _openpyxl
-                wb = _openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
-                ws = wb.active or wb.worksheets[0]
-                rows_raw = []
-                for row in ws.iter_rows(max_row=80, values_only=True):
-                    rows_raw.append([str(c) if c is not None else "" for c in row])
-                wb.close()
-            else:
-                import xlrd as _xlrd
-                wb = _xlrd.open_workbook(file_contents=file_bytes)
-                ws = wb.sheet_by_index(0)
-                rows_raw = []
-                for ri in range(min(ws.nrows, 80)):
-                    rows_raw.append([str(ws.cell_value(ri, ci)) for ci in range(min(ws.ncols, 15))])
-
-            # Убираем полностью пустые строки
-            rows = [r for r in rows_raw if any(str(c).strip() for c in r)]
-            # Собираем TSV-текст
-            tsv = "\n".join("\t".join(str(c) for c in r) for r in rows)
-            b64 = base64.b64encode(tsv.encode("utf-8")).decode("utf-8")
-            debug_log.append(f"excel→tsv: {len(rows)} rows, size={len(tsv)}")
-            return b64, "text/plain"
-
-        except Exception as e:
-            debug_log.append(f"excel error: {e}")
-            return None, f"Не удалось прочитать Excel: {e}. Попробуйте сохранить как JPG и загрузить повторно."
-
-    return None, f"Формат «{ext.upper()}» не поддерживается. Загрузите JPG, PNG, PDF или Excel."
-
-
-def _read_excel_rows(file_bytes: bytes, ext: str) -> list:
-    """Читает Excel и возвращает список непустых строк (каждая строка — список строк)."""
-    import io as _io
-    if ext == "xlsx":
-        import openpyxl as _openpyxl
-        wb = _openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
-        ws = wb.active or wb.worksheets[0]
-        rows_raw = []
-        for row in ws.iter_rows(max_row=500, values_only=True):
-            rows_raw.append([str(c) if c is not None else "" for c in row])
-        wb.close()
-    else:
-        import xlrd as _xlrd
-        wb = _xlrd.open_workbook(file_contents=file_bytes)
-        ws = wb.sheet_by_index(0)
-        rows_raw = []
-        for ri in range(min(ws.nrows, 500)):
-            rows_raw.append([str(ws.cell_value(ri, ci)) for ci in range(min(ws.ncols, 15))])
-
-    return [r for r in rows_raw if any(str(c).strip() for c in r)]
-
-
-# Модель для Excel-чанков — DeepSeek точнее работает с табличными данными
-_EXCEL_MODEL = "deepseek/deepseek-v4-flash"
-
-# Промпт для мета-информации из начала Excel
-_PROMPT_EXCEL_META = """Ты получаешь первые строки таблицы счёта в формате TSV (табуляция как разделитель).
-Найди и верни JSON-объект с реквизитами:
-{"supplier_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD или null"}
-
-Правила:
-- supplier_name — название поставщика/компании если указано, иначе null
-- invoice_number — номер счёта или накладной если указан, иначе null
-- invoice_date — дата в формате YYYY-MM-DD если указана, иначе null
-- Отвечай ТОЛЬКО JSON-объектом без пояснений и markdown
-"""
-
-# Промпт для позиций чанка Excel
-_PROMPT_EXCEL_CHUNK = """Ты получаешь фрагмент таблицы счёта в формате TSV (табуляция как разделитель).
-Извлеки каждую строку как позицию товара/материала.
-Для каждой позиции верни: material (полное название), quantity (число), unit (единица измерения), unit_price (число), amount (число или null).
-Если какое-то поле не указано или неразборчиво — ставь null.
-Не пропускай товарные строки. Пропускай только заголовки столбцов, итоговые строки и пустые строки.
-Ответь строго JSON-массивом объектов без пояснений и markdown:
-[{"material":"...", "quantity":..., "unit":"...", "unit_price":..., "amount":...}, ...]
-"""
-
-
-def _call_deepseek(req_lib, messages: list, max_tokens: int = 2048) -> str:
-    """Вызов DeepSeek через Polza.ai. Возвращает строку-ответ."""
-    payload = {
-        "messages": messages,
-        "model": _EXCEL_MODEL,
-        "temperature": 0.0,
-        "max_tokens": max_tokens,
-    }
-    resp = req_lib.post(f"{CHATGPT_URL}?action=generate", json=payload, timeout=120)
-    resp.raise_for_status()
-    return resp.json().get("content", "")
-
-
-def _parse_json_array(raw: str) -> list:
-    """Парсит JSON-массив из сырого ответа модели, с очисткой markdown."""
-    import re as _re, json as _json
-    raw = raw.strip()
-    raw = _re.sub(r'```(?:json)?\s*', '', raw)
-    raw = _re.sub(r'```', '', raw).strip()
-    for m in sorted(_re.finditer(r'\[[\s\S]+\]', raw), key=lambda x: -len(x.group(0))):
-        try:
-            arr = _json.loads(m.group(0))
-            if isinstance(arr, list):
-                return arr
-        except Exception:
-            continue
-    return []
-
-
-def _parse_json_object(raw: str) -> dict:
-    """Парсит JSON-объект из сырого ответа модели."""
-    import re as _re, json as _json
-    raw = raw.strip()
-    raw = _re.sub(r'```(?:json)?\s*', '', raw)
-    raw = _re.sub(r'```', '', raw).strip()
-    for m in sorted(_re.finditer(r'\{[\s\S]+\}', raw), key=lambda x: -len(x.group(0))):
-        try:
-            obj = _json.loads(m.group(0))
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            continue
-    return {}
-
-
-def recognize_excel_chunk(cur, invoice_id: int, chunk_index: int, chunk_size: int = 20):
-    """
-    Распознаёт один чанк строк Excel через DeepSeek V4 Flash.
-    chunk_index=0 дополнительно извлекает мета (поставщик, дата, номер).
-    Возвращает ({items, meta?, total_chunks, chunk_index}, error).
-    """
-    import requests as req_lib
-
-    cur.execute(
-        f"SELECT pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
-        (invoice_id,)
+    return None, (
+        f"Формат «{ext.upper()}» не поддерживается на стороне сервера. "
+        "Фронт должен конвертировать PDF/Excel в JPG перед загрузкой."
     )
-    row = cur.fetchone()
-    if not row: return None, "Счёт не найден"
-    file_url, file_name = row
-    if not file_url: return None, "Файл не прикреплён"
-
-    ext = (file_name or "").rsplit(".", 1)[-1].lower()
-    if ext not in ("xls", "xlsx"): return None, "Файл не является Excel"
-
-    resp = req_lib.get(file_url, timeout=30)
-    resp.raise_for_status()
-    file_bytes = resp.content
-
-    all_rows = _read_excel_rows(file_bytes, ext)
-    start = chunk_index * chunk_size
-    end   = start + chunk_size
-    chunk_rows = all_rows[start:end]
-    total_chunks = max(1, (len(all_rows) + chunk_size - 1) // chunk_size)
-
-    if not chunk_rows:
-        return {"items": [], "total_chunks": total_chunks, "chunk_index": chunk_index}, None
-
-    tsv = "\n".join("\t".join(str(c) for c in r) for r in chunk_rows)
-
-    # ── Запрос позиций ───────────────────────────────────────────────────────
-    chunk_prompt = (
-        _PROMPT_EXCEL_CHUNK
-        + f"\n\nФрагмент таблицы (строки {start+1}–{min(end, len(all_rows))} из {len(all_rows)}):\n{tsv}"
-    )
-    sys_items = {"role": "system", "content": "Отвечай ТОЛЬКО JSON-массивом без пояснений."}
-    usr_items = {"role": "user", "content": [{"type": "text", "text": chunk_prompt}]}
-    raw_items = _call_deepseek(req_lib, [sys_items, usr_items])
-    items_raw = _parse_json_array(raw_items)
-
-    result = {"items": items_raw, "total_chunks": total_chunks, "chunk_index": chunk_index}
-
-    # ── Мета только для первого чанка ───────────────────────────────────────
-    if chunk_index == 0:
-        # Берём первые 10 строк для поиска реквизитов
-        meta_rows = all_rows[:10]
-        meta_tsv  = "\n".join("\t".join(str(c) for c in r) for r in meta_rows)
-        meta_prompt = _PROMPT_EXCEL_META + f"\n\nПервые строки файла:\n{meta_tsv}"
-        sys_meta = {"role": "system", "content": "Отвечай ТОЛЬКО JSON-объектом без пояснений."}
-        usr_meta = {"role": "user", "content": [{"type": "text", "text": meta_prompt}]}
-        try:
-            raw_meta = _call_deepseek(req_lib, [sys_meta, usr_meta], max_tokens=256)
-            result["meta"] = _parse_json_object(raw_meta)
-        except Exception:
-            result["meta"] = {}
-
-    return result, None
 
 
 def recognize_invoice(cur, invoice_id: int):
@@ -5341,37 +5119,6 @@ def handler(event: dict, context) -> dict:
                     result, error = recognize_invoice(cur, iid)
                     if error: return err(error)
                     conn.commit()
-                    return ok(result)
-                elif action == "excel_chunk_info":
-                    # Возвращает инфо о файле: кол-во строк, кол-во чанков
-                    if user_role not in ("director", "supply_director", "supplier"):
-                        return err("Нет прав", 403)
-                    iid        = int(body["invoice_id"])
-                    chunk_size = int(body.get("chunk_size") or 20)
-                    cur.execute(
-                        f"SELECT pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
-                        (iid,)
-                    )
-                    row = cur.fetchone()
-                    if not row: return err("Счёт не найден")
-                    file_url, file_name = row
-                    if not file_url: return err("Файл не прикреплён")
-                    ext = (file_name or "").rsplit(".", 1)[-1].lower()
-                    if ext not in ("xls", "xlsx"): return err("Файл не является Excel")
-                    import requests as _rq
-                    resp = _rq.get(file_url, timeout=30)
-                    resp.raise_for_status()
-                    all_rows = _read_excel_rows(resp.content, ext)
-                    total_chunks = (len(all_rows) + chunk_size - 1) // chunk_size
-                    return ok({"total_rows": len(all_rows), "total_chunks": total_chunks, "chunk_size": chunk_size})
-                elif action == "recognize_excel_chunk":
-                    if user_role not in ("director", "supply_director", "supplier"):
-                        return err("Нет прав", 403)
-                    iid         = int(body["invoice_id"])
-                    chunk_index = int(body.get("chunk_index") or 0)
-                    chunk_size  = int(body.get("chunk_size") or 20)
-                    result, error = recognize_excel_chunk(cur, iid, chunk_index, chunk_size)
-                    if error: return err(error)
                     return ok(result)
                 elif action == "apply_items":
                     if user_role not in ("director", "supply_director", "supplier"):
