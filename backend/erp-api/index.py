@@ -3253,7 +3253,7 @@ def add_gantt_substage(cur, project_id: int, body: dict):
 
 CHATGPT_URL = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
 
-ALLOWED_EXTS = {'jpg','jpeg','png'}  # PDF/Excel временно отключены — нужна конвертация в изображение
+ALLOWED_EXTS = {'jpg','jpeg','png','pdf','xls','xlsx'}
 
 # ── Промпты ──────────────────────────────────────────────────────────────────
 
@@ -4045,13 +4045,83 @@ def save_user_template(cur, req_lib, name: str, headers: list, column_map: dict)
 
 # ── Главная функция ───────────────────────────────────────────────────────────
 
+def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
+    """
+    Подготавливает файл для отправки в Gemini.
+    Возвращает (b64_str, mime) или (None, error_message).
+    - jpg/jpeg/png → сжимаем через Pillow, mime=image/jpeg
+    - pdf          → передаём as-is, mime=application/pdf (Gemini читает PDF напрямую)
+    - xls/xlsx     → конвертируем в текстовую таблицу, mime=text/plain
+    """
+    import base64, io as _io
+
+    # ── Изображения — сжимаем через Pillow ───────────────────────────────────
+    if ext in ("jpg", "jpeg", "png"):
+        try:
+            from PIL import Image as _PILImage
+            img = _PILImage.open(_io.BytesIO(file_bytes)).convert("RGB")
+            # Ограничиваем до 1400px по длинной стороне
+            MAX = 1400
+            w, h = img.size
+            if w > MAX or h > MAX:
+                scale = MAX / max(w, h)
+                img = img.resize((int(w * scale), int(h * scale)), _PILImage.LANCZOS)
+            buf = _io.BytesIO()
+            img.save(buf, format="JPEG", quality=88)
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+            debug_log.append(f"image→jpg: {ext} size={len(buf.getvalue())}")
+            return b64, "image/jpeg"
+        except Exception:
+            # Если Pillow недоступна — отдаём as-is
+            mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+            return base64.b64encode(file_bytes).decode("utf-8"), mime
+
+    # ── PDF → передаём напрямую в Gemini (поддерживает PDF через data URL) ───
+    if ext == "pdf":
+        b64 = base64.b64encode(file_bytes).decode("utf-8")
+        debug_log.append(f"pdf: size={len(file_bytes)}, sending as application/pdf")
+        return b64, "application/pdf"
+
+    # ── Excel → текстовая таблица (Gemini хорошо читает структурированный текст)
+    if ext in ("xls", "xlsx"):
+        try:
+            if ext == "xlsx":
+                import openpyxl as _openpyxl
+                wb = _openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
+                ws = wb.active or wb.worksheets[0]
+                rows_raw = []
+                for row in ws.iter_rows(max_row=80, values_only=True):
+                    rows_raw.append([str(c) if c is not None else "" for c in row])
+                wb.close()
+            else:
+                import xlrd as _xlrd
+                wb = _xlrd.open_workbook(file_contents=file_bytes)
+                ws = wb.sheet_by_index(0)
+                rows_raw = []
+                for ri in range(min(ws.nrows, 80)):
+                    rows_raw.append([str(ws.cell_value(ri, ci)) for ci in range(min(ws.ncols, 15))])
+
+            # Убираем полностью пустые строки
+            rows = [r for r in rows_raw if any(str(c).strip() for c in r)]
+            # Собираем TSV-текст
+            tsv = "\n".join("\t".join(str(c) for c in r) for r in rows)
+            b64 = base64.b64encode(tsv.encode("utf-8")).decode("utf-8")
+            debug_log.append(f"excel→tsv: {len(rows)} rows, size={len(tsv)}")
+            return b64, "text/plain"
+
+        except Exception as e:
+            debug_log.append(f"excel error: {e}")
+            return None, f"Не удалось прочитать Excel: {e}. Попробуйте сохранить как JPG и загрузить повторно."
+
+    return None, f"Формат «{ext.upper()}» не поддерживается. Загрузите JPG, PNG, PDF или Excel."
+
+
 def recognize_invoice(cur, invoice_id: int):
     """
     Конвейер распознавания счёта:
-      Шаг 1. Извлечение сырого текста (PDF/Excel без AI, Image → OCR).
-      Шаг 2. Разбивка на header / table_chunks / footer.
-      Шаг 3. Параллельные AI-запросы: header → meta, каждый chunk → items[].
-      Шаг 4. Постобработка: нормализация единиц, исправление цен, флаг quality.
+      Шаг 1. Конвертация файла в JPG (PDF→PyMuPDF, Excel→Pillow, Image→as is).
+      Шаг 2. AI-запрос к Gemini с изображением.
+      Шаг 3. Постобработка: нормализация единиц, матчинг справочников.
       Возвращает {status, meta, items, parse_error, debug}.
     """
     import requests as req_lib
@@ -4082,17 +4152,12 @@ def recognize_invoice(cur, invoice_id: int):
     except Exception as e:
         return None, f"Не удалось загрузить файл: {e}"
 
-    file_b64 = base64.b64encode(file_bytes).decode("utf-8")
     debug_log.append(f"file={file_name} ext={ext} size={len(file_bytes)}")
 
-    # ── 2. Только изображения поддерживаются ─────────────────────────────────
-    if ext not in ("jpg", "jpeg", "png"):
-        return None, (
-            f"Формат «{ext.upper()}» временно не поддерживается. "
-            "Пожалуйста, загрузите фото или скан счёта в формате JPG или PNG."
-        )
-
-    mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+    # ── 2. Конвертация в JPG если нужно ──────────────────────────────────────
+    file_b64, mime = _convert_to_jpg_b64(file_bytes, ext, debug_log)
+    if file_b64 is None:
+        return None, mime  # mime содержит сообщение об ошибке
 
     # ── Вспомогательная функция парсинга ответа polza.ai ─────────────────────
     import re as _re
@@ -4145,17 +4210,26 @@ def recognize_invoice(cur, invoice_id: int):
                     total += up * qty
         return total
 
-    # ── 3. Первый запрос к GPT-4o ────────────────────────────────────────────
+    # ── 3. Формируем запрос к AI в зависимости от типа файла ─────────────────
     sys_msg = {
         "role": "system",
         "content": "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО JSON без пояснений и markdown."
     }
-    img_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
 
-    usr_msg = {"role": "user", "content": [
-        {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
-        img_content,
-    ]}
+    if mime == "text/plain":
+        # Excel → текстовый промпт (без изображения)
+        import base64 as _b64
+        tsv_text = _b64.b64decode(file_b64).decode("utf-8")
+        usr_msg = {"role": "user", "content": [
+            {"type": "text", "text": _PROMPT_IMAGE_DIRECT + f"\n\nТаблица из Excel (TSV-формат):\n{tsv_text[:8000]}"},
+        ]}
+    else:
+        # JPG/PNG/PDF → отправляем как data URL
+        img_content = {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
+        usr_msg = {"role": "user", "content": [
+            {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
+            img_content,
+        ]}
 
     try:
         raw_response = _call_polza(req_lib, [sys_msg, usr_msg], max_tokens=4096)

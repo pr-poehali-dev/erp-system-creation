@@ -24,6 +24,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const [uploadedFile, setUploadedFile] = useState<UploadedFile | null>(null);
 
   const [saving,      setSaving]      = useState(false);
+  const [converting,  setConverting]  = useState(false);  // индикатор конвертации PDF/Excel
   const [error,       setError]       = useState("");
   const [recognizing, setRecognizing] = useState(false);
   const [applying,    setApplying]    = useState(false);
@@ -77,6 +78,15 @@ export default function InvoicesTab({ role }: { role?: Role }) {
     if (!file) return;
     setLocalFile(file);
     setUploadedFile(null);
+    setAiResult(null);
+    setAiError("");
+  };
+
+  // Определяем, нужна ли конвертация (PDF/XLS)
+  const needsConversion = (f: File | null) => {
+    if (!f) return false;
+    const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
+    return ["pdf", "xls", "xlsx"].includes(ext);
   };
 
   const removeFile = () => {
@@ -84,11 +94,12 @@ export default function InvoicesTab({ role }: { role?: Role }) {
     setUploadedFile(editItem?.pdf_file_url ? { url: editItem.pdf_file_url, name: editItem.pdf_file_name || "файл" } : null);
   };
 
-  // Сохранение: 1) создать/обновить счёт → 2) загрузить файл если выбран → 3) закрыть
+  // Сохранение: 1) создать/обновить счёт → 2) загрузить файл → 3) авто-распознать PDF/XLS
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
     setError("");
+    const autoRecognize = localFile && needsConversion(localFile) && canUseAI;
     try {
       const body = {
         supplier_id:        form.supplier_id ? Number(form.supplier_id) : 0,
@@ -100,7 +111,6 @@ export default function InvoicesTab({ role }: { role?: Role }) {
         recognition_status: form.recognition_status || "новый",
         recognized_data:    form.recognized_data || null,
       };
-      console.log("[Invoice] saving payload:", body);
 
       let invoiceId: number;
       if (editItem) {
@@ -112,8 +122,31 @@ export default function InvoicesTab({ role }: { role?: Role }) {
       }
 
       if (localFile) {
+        if (autoRecognize) setConverting(true);
         const { b64, name } = await prepareFileForUpload(localFile);
-        await api.invoices.uploadFile(invoiceId, b64, name);
+        const uploaded = await api.invoices.uploadFile(invoiceId, b64, name);
+        setUploadedFile({ url: uploaded.cdn_url, name: uploaded.file_name });
+        setLocalFile(null);
+
+        // Авто-запуск распознавания для PDF/Excel
+        if (autoRecognize) {
+          setConverting(false);
+          setSaving(false);
+          // Обновляем editItem чтобы handleRecognize знал ID
+          setEditItem((prev) => ({ ...prev, id: invoiceId, recognition_status: "новый" } as Invoice));
+          setRecognizing(true);
+          setAiError("");
+          try {
+            const res = await api.invoices.recognize(invoiceId);
+            setAiResult(res);
+            load();
+          } catch (err: unknown) {
+            setAiError(err instanceof Error ? err.message : "Ошибка распознавания");
+          } finally {
+            setRecognizing(false);
+          }
+          return;
+        }
       }
 
       closeModal();
@@ -122,6 +155,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
       setError(err instanceof Error ? err.message : "Ошибка сохранения");
     } finally {
       setSaving(false);
+      setConverting(false);
     }
   };
 
@@ -269,6 +303,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
           localFile={localFile}
           uploadedFile={uploadedFile}
           saving={saving}
+          converting={converting}
+          autoRecognize={!!(localFile && needsConversion(localFile) && canUseAI)}
           error={error}
           recognizing={recognizing}
           applying={applying}

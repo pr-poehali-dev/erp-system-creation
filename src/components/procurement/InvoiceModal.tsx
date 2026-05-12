@@ -14,6 +14,8 @@ interface Props {
   localFile: File | null;
   uploadedFile: UploadedFile | null;
   saving: boolean;
+  converting: boolean;
+  autoRecognize: boolean;
   error: string;
   recognizing: boolean;
   applying: boolean;
@@ -35,7 +37,7 @@ interface Props {
 export default function InvoiceModal({
   editItem, form, setForm,
   localFile, uploadedFile,
-  saving, error,
+  saving, converting, autoRecognize, error,
   recognizing, applying, aiResult, aiError, canRecognize, canSeeRawData,
   suppliers, materials,
   onClose, onSave, onFileSelect, onRemoveFile,
@@ -156,12 +158,21 @@ export default function InvoiceModal({
             </div>
           )}
 
+          {converting && (
+            <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+              <Icon name="Loader" size={13} className="animate-spin shrink-0" />
+              Преобразование файла в изображение...
+            </div>
+          )}
+
           <div className="flex gap-2 pt-1">
-            <button type="submit" disabled={saving}
+            <button type="submit" disabled={saving || converting}
               className="flex-1 py-2.5 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 disabled:opacity-50 flex items-center justify-center gap-1.5 transition-colors">
               {saving
                 ? <><Icon name="Loader" size={13} className="animate-spin" />Сохраняем...</>
-                : <><Icon name="Save" size={13} />{editItem ? "Сохранить" : "Создать счёт"}</>
+                : autoRecognize
+                  ? <><Icon name="Sparkles" size={13} />Загрузить и распознать</>
+                  : <><Icon name="Save" size={13} />{editItem ? "Сохранить" : "Создать счёт"}</>
               }
             </button>
             <button type="button" onClick={onClose}
