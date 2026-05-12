@@ -3,7 +3,7 @@ import { Invoice, Supplier, Material } from "@/lib/api"; // Supplier, Material Ð
 import Icon from "@/components/ui/icon";
 import InvoiceAiPanel from "./InvoiceAiPanel";
 import {
-  InvoiceForm, ApplyData, UploadedFile, AiRecognizeResult,
+  InvoiceForm, UploadedFile, AiRecognizeResult, AiItem,
   STATUS_CFG, EXT_ICON, ACCEPT_TYPES, ACCEPT_HINT, fmtMoney,
 } from "./invoices.shared";
 
@@ -16,6 +16,7 @@ interface Props {
   saving: boolean;
   error: string;
   recognizing: boolean;
+  applying: boolean;
   aiResult: AiRecognizeResult | null;
   aiError: string;
   canRecognize: boolean;
@@ -27,7 +28,7 @@ interface Props {
   onFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onRemoveFile: () => void;
   onRecognize: () => void;
-  onApplyAI: (d: ApplyData) => void;
+  onApplyAI: (items: AiItem[], invoiceDate: string, invoiceNumber: string) => void;
   onDismissAI: () => void;
 }
 
@@ -35,7 +36,7 @@ export default function InvoiceModal({
   editItem, form, setForm,
   localFile, uploadedFile,
   saving, error,
-  recognizing, aiResult, aiError, canRecognize, canSeeRawData,
+  recognizing, applying, aiResult, aiError, canRecognize, canSeeRawData,
   suppliers, materials,
   onClose, onSave, onFileSelect, onRemoveFile,
   onRecognize, onApplyAI, onDismissAI,
@@ -125,6 +126,7 @@ export default function InvoiceModal({
                 <InvoiceAiPanel
                   result={aiResult}
                   showDebug={canSeeRawData}
+                  applying={applying}
                   onApply={onApplyAI}
                   onDismiss={onDismissAI}
                 />

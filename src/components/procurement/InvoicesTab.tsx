@@ -5,7 +5,7 @@ import Icon from "@/components/ui/icon";
 import InvoiceModal from "./InvoiceModal";
 import {
   AI_ROLES, EXT_ICON, STATUS_CFG, fmtMoney, fmtDate,
-  fileToBase64, InvoiceForm, ApplyData, UploadedFile, EMPTY_FORM, AiRecognizeResult,
+  fileToBase64, InvoiceForm, UploadedFile, EMPTY_FORM, AiRecognizeResult, AiItem,
 } from "./invoices.shared";
 
 export default function InvoicesTab({ role }: { role?: Role }) {
@@ -26,6 +26,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const [saving,      setSaving]      = useState(false);
   const [error,       setError]       = useState("");
   const [recognizing, setRecognizing] = useState(false);
+  const [applying,    setApplying]    = useState(false);
   const [aiResult,    setAiResult]    = useState<AiRecognizeResult | null>(null);
   const [aiError,     setAiError]     = useState("");
 
@@ -137,19 +138,27 @@ export default function InvoicesTab({ role }: { role?: Role }) {
     } finally { setRecognizing(false); }
   };
 
-  const handleApplyAI = (data: ApplyData) => {
-    setForm(p => ({
-      ...p,
-      supplier_id:        data.supplier_id    || p.supplier_id,
-      material_id:        data.material_id    || p.material_id,
-      unit_price:         data.unit_price     || p.unit_price,
-      quantity:           data.quantity       || p.quantity,
-      invoice_date:       data.invoice_date   || p.invoice_date,
-      invoice_number:     data.invoice_number || p.invoice_number,
-      recognized_data:    data.recognized_data,
-      recognition_status: data.recognition_status,
-    }));
-    setAiResult(null);
+  const handleApplyAI = async (selectedItems: AiItem[], invoiceDate: string, invoiceNumber: string) => {
+    if (!editItem) return;
+    setApplying(true);
+    setAiError("");
+    try {
+      await api.invoices.applyItems({
+        invoice_id:    editItem.id,
+        items:         selectedItems,
+        invoice_date:  invoiceDate  || null,
+        invoice_number: invoiceNumber || null,
+        file_url:  uploadedFile?.url  || null,
+        file_name: uploadedFile?.name || null,
+      });
+      setAiResult(null);
+      closeModal();
+      load();
+    } catch (err: unknown) {
+      setAiError(err instanceof Error ? err.message : "Ошибка создания счетов");
+    } finally {
+      setApplying(false);
+    }
   };
 
   const totalSum    = invoices.reduce((s, i) => s + (i.total_amount || 0), 0);
@@ -261,6 +270,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
           saving={saving}
           error={error}
           recognizing={recognizing}
+          applying={applying}
           aiResult={aiResult}
           aiError={aiError}
           canRecognize={canRecognize}

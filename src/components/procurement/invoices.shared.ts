@@ -20,7 +20,7 @@ export const STATUS_CFG: Record<
   требуется_проверка: { label: "Требует проверки", cls: "bg-red-100 text-red-700",         icon: "AlertCircle" },
 };
 
-export const fmtMoney = (n: number | null) =>
+export const fmtMoney = (n: number | null | undefined) =>
   n == null ? "—" : new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(n) + " ₽";
 
 export const fmtDate = (s: string | null) =>
@@ -53,34 +53,34 @@ export const EMPTY_FORM: InvoiceForm = {
   recognized_data: "",
 };
 
-export interface ApplyData {
-  supplier_id: string;
-  material_id: string;
-  unit_price: string;
-  quantity: string;
-  invoice_date: string;
-  invoice_number: string;
-  recognized_data: string;
-  recognition_status: Invoice["recognition_status"];
+// Одна распознанная позиция из счёта
+export interface AiItem {
+  supplier_name: string | null;
+  supplier_id: number | null;
+  supplier_created: boolean;
+  material: string | null;
+  material_id: number | null;
+  material_created: boolean;
+  unit: string;
+  unit_price: number | null;
+  quantity: number | null;
+  complete: boolean;
+}
+
+// Полный ответ от бэкенда после AI-распознавания (новый формат с items[])
+export interface AiRecognizeResult {
+  status: string;
+  meta: { invoice_date: string | null; invoice_number: string | null };
+  items: AiItem[];
+  parse_error: string | null;
+  debug: {
+    raw_response: string | null;
+    parse_error: string | null;
+    items_debug: string[];
+  };
 }
 
 export interface UploadedFile {
   url: string;
   name: string;
-}
-
-// Полный ответ от бэкенда после AI-распознавания
-export interface AiRecognizeResult {
-  status: string;
-  parsed: Record<string, unknown>;
-  supplier_id: number | null;
-  supplier_created: boolean;
-  material_id: number | null;
-  material_created: boolean;
-  debug: {
-    raw_response: string | null;
-    parse_error: string | null;
-    supplier_action: string | null;
-    material_action: string | null;
-  };
 }
