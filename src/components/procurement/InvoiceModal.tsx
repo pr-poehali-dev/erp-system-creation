@@ -1,10 +1,10 @@
 import { useRef } from "react";
-import { Invoice, Supplier, Material } from "@/lib/api"; // Supplier, Material нужны для props
+import { Invoice, Supplier, Material } from "@/lib/api";
 import Icon from "@/components/ui/icon";
 import InvoiceAiPanel from "./InvoiceAiPanel";
 import {
   InvoiceForm, UploadedFile, AiRecognizeResult, AiItem,
-  STATUS_CFG, EXT_ICON, ACCEPT_TYPES, ACCEPT_HINT, fmtMoney,
+  EXT_ICON, ACCEPT_TYPES, ACCEPT_HINT,
 } from "./invoices.shared";
 
 interface Props {
@@ -146,66 +146,6 @@ export default function InvoiceModal({
                   {aiError}
                 </div>
               )}
-            </div>
-          )}
-
-          {/* ── Поля формы ── */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[13px] font-medium mb-1">Дата счёта</label>
-              <input type="date" value={form.invoice_date}
-                onChange={e => setForm(p => ({ ...p, invoice_date: e.target.value }))}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
-            </div>
-            <div>
-              <label className="block text-[13px] font-medium mb-1">Номер счёта</label>
-              <input value={form.invoice_number}
-                onChange={e => setForm(p => ({ ...p, invoice_number: e.target.value }))}
-                placeholder="СФ-0001"
-                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[13px] font-medium mb-1">Цена за единицу</label>
-              <input type="number" step="0.01" min="0" value={form.unit_price}
-                onChange={e => setForm(p => ({ ...p, unit_price: e.target.value }))}
-                placeholder="0.00"
-                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
-            </div>
-            <div>
-              <label className="block text-[13px] font-medium mb-1">Количество</label>
-              <input type="number" step="0.001" min="0" value={form.quantity}
-                onChange={e => setForm(p => ({ ...p, quantity: e.target.value }))}
-                placeholder="0"
-                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] outline-none focus:ring-1 focus:ring-primary" />
-            </div>
-          </div>
-
-          {form.unit_price && form.quantity && Number(form.unit_price) > 0 && Number(form.quantity) > 0 && (
-            <div className="text-[13px] font-semibold text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2 flex items-center gap-1.5">
-              <Icon name="Calculator" size={13} />
-              Сумма: {fmtMoney(Number(form.unit_price) * Number(form.quantity))}
-            </div>
-          )}
-
-          <div>
-            <label className="block text-[13px] font-medium mb-1">Статус распознавания</label>
-            <select value={form.recognition_status}
-              onChange={e => setForm(p => ({ ...p, recognition_status: e.target.value as Invoice["recognition_status"] }))}
-              className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
-              {Object.entries(STATUS_CFG).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-            </select>
-          </div>
-
-          {canSeeRawData && (
-            <div>
-              <label className="block text-[13px] font-medium mb-1">Распознанные данные (JSON)</label>
-              <textarea value={form.recognized_data}
-                onChange={e => setForm(p => ({ ...p, recognized_data: e.target.value }))}
-                rows={3}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[12px] font-mono outline-none focus:ring-1 focus:ring-primary resize-none" />
             </div>
           )}
 

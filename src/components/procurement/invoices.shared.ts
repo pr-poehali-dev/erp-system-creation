@@ -154,6 +154,7 @@ export interface AiRecognizeResult {
   parse_error: string | null;
   fallback_used?: boolean;
   items_count?: number;
+  footer_total?: number | null;
   // ── шаблонная информация ──
   template_used?: boolean;
   template?: { id: number | null; name: string | null; score: number | null };

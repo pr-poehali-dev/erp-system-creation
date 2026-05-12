@@ -40,7 +40,9 @@ export default function InvoiceAiPanel({
   result, showDebug, applying, invoiceId, onApply, onDismiss,
 }: Props) {
   const hasItems      = result.items.length > 0;
-  const hasParseError = !!result.parse_error;
+  // parse_error теперь используется для предупреждения о сумме (не ошибка парсинга),
+  // поэтому шапка красная только когда нет позиций совсем
+  const hasParseError = !!result.parse_error && !hasItems;
   const needWizard    = !!result.need_template_setup && (result.table_headers?.length ?? 0) > 0;
   const templateUsed  = !!result.template_used;
   const templateInfo  = result.template;
@@ -241,6 +243,14 @@ export default function InvoiceAiPanel({
             <div className="flex items-center gap-1.5 text-[11px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-1.5">
               <Icon name="CheckCircle" size={11} />
               Шаблон «{tplSaved.name}» сохранён — следующие счета с таким форматом распознаются автоматически
+            </div>
+          )}
+
+          {/* Плашка расхождения итоговой суммы */}
+          {result.parse_error && hasItems && (
+            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <Icon name="AlertTriangle" size={13} className="text-amber-600 shrink-0 mt-0.5" />
+              <span className="text-[11px] text-amber-800">{result.parse_error}</span>
             </div>
           )}
 
