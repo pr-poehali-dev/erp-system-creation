@@ -24,7 +24,7 @@ import requests
 # Provider: Polza.ai (OpenAI-compatible API)
 PROVIDER_BASE_URL = "https://api.polza.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
-DEFAULT_TIMEOUT = 60
+DEFAULT_TIMEOUT = 120
 
 
 

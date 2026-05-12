@@ -4694,23 +4694,36 @@ def recognize_invoice(cur, invoice_id: int):
 
 def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, invoice_number, file_url: str, file_name: str):
     """Создаёт отдельные записи счетов для каждой выбранной позиции.
-    Все поля необязательны — supplier_name/supplier_id могут отсутствовать."""
+    Если supplier_id/material_id = 0 — матчит или создаёт по имени."""
     created_ids = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        # Используем .get() для всех полей — ничего не обязательно
-        s_id = item.get("supplier_id") or 0
-        m_id = item.get("material_id") or 0
-        up   = _safe_float(item.get("unit_price"))
-        qty  = _safe_float(item.get("quantity"))
 
-        # Статус: обработан только если есть material + цена + кол-во
-        material = item.get("material") or item.get("material_name") or None
+        up  = _safe_float(item.get("unit_price"))
+        qty = _safe_float(item.get("quantity"))
+
+        # ── Поставщик: матчим по имени если id не передан ─────────────────────
+        s_id = item.get("supplier_id") or 0
+        if not s_id:
+            s_name = _clean(item.get("supplier_name") or item.get("supplier") or "")
+            if s_name:
+                matched_id, _ = _match_or_create_supplier(cur, s_name)
+                s_id = matched_id or 0
+
+        # ── Материал: матчим по имени если id не передан ──────────────────────
+        m_id = item.get("material_id") or 0
+        raw_unit = _clean(item.get("unit") or "шт") or "шт"
+        if not m_id:
+            m_name = _clean(item.get("material") or item.get("material_name") or "")
+            if m_name:
+                matched_id, _, raw_unit = _match_or_create_material(cur, m_name, raw_unit)
+                m_id = matched_id or 0
+
+        material = _clean(item.get("material") or item.get("material_name")) or None
         key_ok   = bool(material and up is not None and qty is not None)
         item_status = "обработан" if key_ok else "требуется_проверка"
 
-        # Безопасная сериализация для recognized_data
         try:
             rec_data = json.dumps(item, ensure_ascii=False)
         except Exception:

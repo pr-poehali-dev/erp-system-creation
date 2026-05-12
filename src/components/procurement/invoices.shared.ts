@@ -323,36 +323,70 @@ async function _excelToPngB64(file_b64: string): Promise<string> {
 }
 
 // ── Отправить один запрос в Polza.ai ─────────────────────────────────────────
-async function _callPolza(imagePngB64: string, prompt: string): Promise<string> {
-  const resp = await fetch(`${POLZA_URL}?action=generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "google/gemini-3.1-flash-lite",
-      temperature: 0,
-      max_tokens: 8192,
-      messages: [
-        {
-          role: "system",
-          content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown-обёрток.",
-        },
-        {
-          role: "user",
-          content: [
-            { type: "text",      text: prompt },
-            { type: "image_url", image_url: { url: `data:image/png;base64,${imagePngB64}` } },
-          ],
-        },
-      ],
-    }),
+// Сжимаем PNG до maxW px и конвертируем в JPEG quality=0.85 для ускорения передачи
+async function _resizeToJpeg(pngB64: string, maxW = 1600): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (w > maxW) { h = Math.round(h * maxW / w); w = maxW; }
+      const c = document.createElement("canvas");
+      c.width = w; c.height = h;
+      const ctx = c.getContext("2d")!;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(c.toDataURL("image/jpeg", 0.85).split(",")[1]);
+    };
+    img.src = `data:image/png;base64,${pngB64}`;
   });
+}
 
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`Polza ${resp.status}: ${t.slice(0, 200)}`);
+async function _callPolza(imagePngB64: string, prompt: string): Promise<string> {
+  // Сжимаем изображение до 1600px JPEG — ускоряет ответ и снижает риск таймаута
+  const jpegB64 = await _resizeToJpeg(imagePngB64, 1600);
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000); // 120 сек
+
+  try {
+    const resp = await fetch(`${POLZA_URL}?action=generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: "google/gemini-3.1-flash-lite",
+        temperature: 0,
+        max_tokens: 8192,
+        messages: [
+          {
+            role: "system",
+            content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown-обёрток.",
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text",      text: prompt },
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpegB64}` } },
+            ],
+          },
+        ],
+      }),
+    });
+
+    if (!resp.ok) {
+      const t = await resp.text();
+      // 504 = таймаут Cloud Function — понятное сообщение
+      if (resp.status === 504) {
+        throw new Error("Счёт содержит сложные элементы. Попробуйте преобразовать его в JPG и загрузить снова.");
+      }
+      throw new Error(`Polza ${resp.status}: ${t.slice(0, 200)}`);
+    }
+    const data = await resp.json();
+    return data.content ?? "";
+  } finally {
+    clearTimeout(timer);
   }
-  const data = await resp.json();
-  return data.content ?? "";
 }
 
 /**
