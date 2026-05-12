@@ -3252,22 +3252,10 @@ def add_gantt_substage(cur, project_id: int, body: dict):
 # ─── INVOICE AI RECOGNITION ──────────────────────────────────────────────────
 
 CHATGPT_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
-INVOICE_PROMPT  = """Ты — OCR-система извлечения данных из финансовых документов (счета, накладные, инвойсы).
-
-ОБЯЗАТЕЛЬНО верни ТОЛЬКО валидный JSON, ничего кроме него — никаких пояснений, никакого markdown, никаких ``` блоков.
-
-Если в документе ОДНА позиция — верни объект:
-{"meta":{"invoice_date":"YYYY-MM-DD или null","invoice_number":"строка или null"},"items":[{"supplier_name":"строка или null","material":"строка или null","unit":"шт/м3/т/пог.м/м2/компл или null","unit_price":число_или_null,"quantity":число_или_null}]}
-
-Если позиций НЕСКОЛЬКО — верни тот же формат, но items содержит все позиции.
-
-Правила:
-- Ответ начинается с { и заканчивается } — никаких других символов
-- unit_price, quantity — только числа, не строки
-- invoice_date — только YYYY-MM-DD
-- supplier_name — одинаковый для всех позиций из одного счёта (шапка документа)
-- Если поле не найдено — null без кавычек
-- Собери ВСЕ позиции из таблицы товаров/услуг, не только первую"""
+INVOICE_PROMPT  = """Извлеки все позиции из счёта. Ответь СТРОГО JSON-массивом объектов, каждый объект — одна позиция:
+[{"supplier_name":"название поставщика или null","material":"наименование или null","unit":"ед.изм.(шт/м3/т/пог.м/м2/компл) или null","unit_price":число_или_null,"quantity":число_или_null,"invoice_date":"YYYY-MM-DD или null","invoice_number":"номер или null"}]
+Если дата и номер общие для всего счёта — продублируй их в каждом объекте.
+Ответ начинается с [ и заканчивается ]. Без комментариев, без markdown."""
 
 ALLOWED_EXTS = {'pdf','jpg','jpeg','png','xls','xlsx','docx'}
 
@@ -3389,13 +3377,17 @@ def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
 
 def recognize_invoice(cur, invoice_id: int):
     """Запускает AI-распознавание счёта через Polza.ai.
-    Поддерживает мультипозиционные счета (items[]).
+    Возвращает массив позиций items[]. Минимальная устойчивая версия.
     """
+    import re
     import requests as req_lib
     import base64
 
-    debug = {"raw_response": None, "parse_error": None, "items_debug": []}
+    raw_content  = ""
+    parse_error  = None
+    items_debug  = []
 
+    # 1. Данные счёта
     cur.execute(
         f"SELECT id, pdf_file_url, pdf_file_name FROM {SCHEMA}.invoices WHERE id=%s",
         (invoice_id,)
@@ -3409,6 +3401,7 @@ def recognize_invoice(cur, invoice_id: int):
 
     ext = (file_name or '').rsplit('.', 1)[-1].lower() if file_name else ''
 
+    # 2. Скачиваем файл
     try:
         resp = req_lib.get(file_url, timeout=30)
         resp.raise_for_status()
@@ -3417,10 +3410,8 @@ def recognize_invoice(cur, invoice_id: int):
     except Exception as e:
         return None, f"Не удалось загрузить файл: {e}"
 
-    system_msg = {
-        "role": "system",
-        "content": "Ты — OCR-система. Отвечай ТОЛЬКО валидным JSON без пояснений, markdown, ``` блоков."
-    }
+    # 3. Сообщения для модели
+    system_msg = {"role": "system", "content": "Ты — OCR. Отвечай ТОЛЬКО JSON-массивом, без пояснений и markdown."}
 
     if ext in ('jpg', 'jpeg', 'png'):
         mime = "image/jpeg" if ext in ('jpg','jpeg') else "image/png"
@@ -3428,7 +3419,6 @@ def recognize_invoice(cur, invoice_id: int):
             {"type": "text", "text": INVOICE_PROMPT},
             {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}}
         ]}
-        model = "openai/gpt-4o"
     elif ext in ('xls', 'xlsx'):
         try:
             import openpyxl, io as _io
@@ -3442,13 +3432,11 @@ def recognize_invoice(cur, invoice_id: int):
         except Exception as xe:
             text_content = f"[Ошибка чтения Excel: {xe}]"
         user_msg = {"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое Excel:\n{text_content}"}
-        model = "openai/gpt-4o"
     elif ext == 'pdf':
         user_msg = {"role": "user", "content": [
             {"type": "text", "text": INVOICE_PROMPT},
             {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64}"}}
         ]}
-        model = "openai/gpt-4o"
     else:
         try:
             from docx import Document
@@ -3456,68 +3444,78 @@ def recognize_invoice(cur, invoice_id: int):
             doc = Document(_io.BytesIO(file_bytes))
             text_content = "\n".join(p.text for p in doc.paragraphs if p.text.strip())[:3000]
         except Exception:
-            text_content = f"[Файл типа {ext.upper()} не может быть прочитан]"
+            text_content = f"[Файл типа {ext.upper()} не поддерживается]"
         user_msg = {"role": "user", "content": f"{INVOICE_PROMPT}\n\nСодержимое документа:\n{text_content}"}
-        model = "openai/gpt-4o"
 
+    # 4. Вызов Polza.ai
     try:
         polza_resp = req_lib.post(
             f"{CHATGPT_URL}?action=generate",
-            json={"messages": [system_msg, user_msg], "model": model, "temperature": 0.0, "max_tokens": 1024},
+            json={"messages": [system_msg, user_msg], "model": "openai/gpt-4o",
+                  "temperature": 0.0, "max_tokens": 1024},
             timeout=90
         )
         polza_resp.raise_for_status()
         raw_content = polza_resp.json().get("content", "")
-        debug["raw_response"] = raw_content
     except Exception as e:
         return None, f"Ошибка Polza.ai: {e}"
 
-    parsed, parse_error = _parse_ai_response(raw_content)
-    debug["parse_error"] = parse_error
+    # 5. Парсинг ответа — ожидаем JSON-массив
+    json_str = raw_content.strip()
+    json_str = re.sub(r'```(?:json)?\s*', '', json_str)
+    json_str = re.sub(r'\s*```', '', json_str).strip()
 
-    if isinstance(parsed, list):
-        meta  = {}
-        items = parsed
-    elif isinstance(parsed, dict):
-        if "items" in parsed:
-            meta  = parsed.get("meta") or {}
-            items = parsed.get("items") or []
+    raw_list = None
+    try:
+        raw_list = json.loads(json_str)
+    except json.JSONDecodeError as e1:
+        # fallback: ищем [...] в строке
+        m = re.search(r'\[[\s\S]+\]', json_str)
+        if m:
+            try:
+                raw_list = json.loads(m.group(0))
+            except Exception as e2:
+                parse_error = f"Не удалось распарсить ответ: {e1}; {e2}"
         else:
-            meta  = {k: parsed.get(k) for k in ("invoice_date", "invoice_number")}
-            items = [parsed]
-    else:
-        meta, items = {}, []
+            parse_error = f"Массив позиций не найден в ответе. Raw: {json_str[:400]}"
 
-    meta = _normalize_obj(meta) if meta else {}
+    # Если вернули объект (одна позиция) — оборачиваем в список
+    if isinstance(raw_list, dict):
+        raw_list = [raw_list]
 
-    def clean_str(v):
+    if not isinstance(raw_list, list):
+        raw_list = []
+        if not parse_error:
+            parse_error = f"Неожиданный формат ответа. Raw: {json_str[:400]}"
+
+    # 6. Нормализуем каждую позицию и матчим справочники
+    def clean(v):
         s = str(v or "").strip()
-        return None if s.lower() in ("null","none","") else s
+        return None if s.lower() in ("null", "none", "") else s
 
-    invoice_date   = clean_str(meta.get("invoice_date"))
-    invoice_number = clean_str(meta.get("invoice_number"))
+    def safe_float(v):
+        try: return float(v) if v is not None and str(v).lower() not in ("null","none","") else None
+        except (ValueError, TypeError): return None
 
     norm_items = []
-    for raw_item in (items if isinstance(items, list) else []):
+    for raw_item in raw_list:
         if not isinstance(raw_item, dict):
             continue
+        # Нормализуем ключи
         item = _normalize_obj(raw_item)
 
-        s_name = clean_str(item.get("supplier_name")) or ""
-        m_name = clean_str(item.get("material"))      or ""
+        s_name = clean(item.get("supplier_name")) or ""
+        m_name = clean(item.get("material"))      or ""
         raw_u  = str(item.get("unit") or "шт").strip()
+        up     = safe_float(item.get("unit_price"))
+        qty    = safe_float(item.get("quantity"))
+        idate  = clean(item.get("invoice_date"))
+        inum   = clean(item.get("invoice_number"))
 
         s_id, s_created = _match_or_create_supplier(cur, s_name)
         m_id, m_created, unit = _match_or_create_material(cur, m_name, raw_u)
 
-        def safe_float(v):
-            try: return float(v) if not _is_null(v) else None
-            except (ValueError, TypeError): return None
-
-        up  = safe_float(item.get("unit_price"))
-        qty = safe_float(item.get("quantity"))
-
-        complete = not any(_is_null(f) for f in [s_name, m_name, up, qty])
+        complete = all(v for v in [s_name, m_name, up is not None, qty is not None])
 
         norm_items.append({
             "supplier_name":    s_name or None,
@@ -3529,26 +3527,31 @@ def recognize_invoice(cur, invoice_id: int):
             "unit":             unit,
             "unit_price":       up,
             "quantity":         qty,
+            "invoice_date":     idate,
+            "invoice_number":   inum,
             "complete":         complete,
         })
-        debug["items_debug"].append(
-            f"[{m_name or '?'}] sup={s_name}({s_id}) mat={m_id} up={up} qty={qty} ok={complete}"
-        )
+        items_debug.append(f"[{m_name or '?'}] s={s_name}({s_id}) m={m_id} up={up} qty={qty} ok={complete}")
 
-    all_complete = bool(norm_items) and all(i["complete"] for i in norm_items)
-    status = "обработан" if (all_complete and not parse_error) else "требуется_проверка"
+    # 7. Статус + обновляем исходный счёт
+    all_ok = bool(norm_items) and all(i["complete"] for i in norm_items)
+    status = "обработан" if (all_ok and not parse_error) else "требуется_проверка"
+
+    # Вытаскиваем meta из первой позиции
+    meta_date = norm_items[0].get("invoice_date") if norm_items else None
+    meta_num  = norm_items[0].get("invoice_number") if norm_items else None
 
     cur.execute(
         f"UPDATE {SCHEMA}.invoices SET recognition_status=%s, recognized_data=%s, updated_at=now() WHERE id=%s",
-        (status, json.dumps({"meta": meta, "items": items}, ensure_ascii=False), invoice_id)
+        (status, json.dumps(raw_list, ensure_ascii=False), invoice_id)
     )
 
     return {
         "status": status,
-        "meta": {"invoice_date": invoice_date, "invoice_number": invoice_number},
+        "meta": {"invoice_date": meta_date, "invoice_number": meta_num},
         "items": norm_items,
         "parse_error": parse_error,
-        "debug": debug,
+        "debug": {"raw_response": raw_content, "parse_error": parse_error, "items_debug": items_debug},
     }, None
 
 

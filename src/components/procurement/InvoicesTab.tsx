@@ -5,7 +5,7 @@ import Icon from "@/components/ui/icon";
 import InvoiceModal from "./InvoiceModal";
 import {
   AI_ROLES, EXT_ICON, STATUS_CFG, fmtMoney, fmtDate,
-  fileToBase64, InvoiceForm, UploadedFile, EMPTY_FORM, AiRecognizeResult, AiItem,
+  prepareFileForUpload, InvoiceForm, UploadedFile, EMPTY_FORM, AiRecognizeResult, AiItem,
 } from "./invoices.shared";
 
 export default function InvoicesTab({ role }: { role?: Role }) {
@@ -111,8 +111,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
       }
 
       if (localFile) {
-        const b64 = await fileToBase64(localFile);
-        await api.invoices.uploadFile(invoiceId, b64, localFile.name);
+        const { b64, name } = await prepareFileForUpload(localFile);
+        await api.invoices.uploadFile(invoiceId, b64, name);
       }
 
       closeModal();

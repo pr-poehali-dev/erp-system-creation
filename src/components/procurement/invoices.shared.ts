@@ -35,6 +35,52 @@ export async function fileToBase64(file: File): Promise<string> {
   });
 }
 
+// Лимит тела запроса cloud function ~1MB, base64 даёт +33%.
+// Изображения сжимаем через Canvas; PDF/Excel проверяем по размеру.
+const UPLOAD_LIMIT_BYTES = 700 * 1024; // 700KB base64 ≈ ~950KB тело
+
+export async function prepareFileForUpload(file: File): Promise<{ b64: string; name: string }> {
+  const isImage = file.type.startsWith("image/");
+
+  if (isImage) {
+    // Сжимаем через Canvas до максимум 1200px по длинной стороне, quality 0.82
+    const b64 = await new Promise<string>((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const MAX = 1200;
+        let { width, height } = img;
+        if (width > MAX || height > MAX) {
+          if (width > height) { height = Math.round((height * MAX) / width); width = MAX; }
+          else                { width  = Math.round((width  * MAX) / height); height = MAX; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width; canvas.height = height;
+        canvas.getContext("2d")!.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+        resolve(dataUrl.split(",")[1]);
+      };
+      img.onerror = reject;
+      img.src = url;
+    });
+    // Переименовываем в .jpg если был png
+    const name = file.name.replace(/\.(png|webp)$/i, ".jpg");
+    return { b64, name };
+  }
+
+  // Не-изображения: просто проверяем размер
+  const raw = await fileToBase64(file);
+  const estimatedBodySize = Math.ceil(raw.length * 1.1); // JSON overhead
+  if (estimatedBodySize > UPLOAD_LIMIT_BYTES * 1.5) {
+    throw new Error(
+      `Файл слишком большой (${Math.round(file.size / 1024)} KB). ` +
+      `Максимум для PDF/Excel — 500 KB. Попробуйте уменьшить файл или отправьте скан страницы.`
+    );
+  }
+  return { b64: raw, name: file.name };
+}
+
 export interface InvoiceForm {
   supplier_id: string;
   material_id: string;
