@@ -4238,14 +4238,12 @@ def _convert_to_jpg_b64(file_bytes: bytes, ext: str, debug_log: list):
 
 def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
     """
-    Пайплайн распознавания Excel через TSV + DeepSeek V4 Pro.
-    Разбивает строки на чанки по 15, отправляет каждый отдельным запросом.
-    Возвращает (ai_obj, all_items, error) — совместимо с _parse_ai_invoice_response.
-    Для индикации прогресса складывает статусы в debug_log как 'excel_chunk N/M'.
+    Excel → Markdown-таблица → один запрос в Gemini Flash Lite.
+    Возвращает (ai_obj, all_items, error).
     """
-    import io as _io, json as _json
+    import io as _io, json as _json, re as _re2
 
-    # ── Читаем строки ──────────────────────────────────────────────────────────
+    # ── 1. Читаем строки ───────────────────────────────────────────────────────
     if ext == "xlsx":
         import openpyxl
         wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
@@ -4262,26 +4260,30 @@ def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
         for ri in range(min(ws_xls.nrows, 200)):
             raw_rows.append([str(ws_xls.cell_value(ri, ci)) for ci in range(ws_xls.ncols)])
 
-    # Убираем полностью пустые строки
     rows = [r for r in raw_rows if any(str(c).strip() for c in r)]
     if not rows:
         return {}, [], "Excel пустой"
 
-    # Конвертируем в TSV
-    def _to_tsv(chunk):
-        return "\n".join("\t".join(str(c) for c in r) for r in chunk)
+    debug_log.append(f"excel_markdown: {len(rows)} rows")
 
-    CHUNK = 15
-    chunks = [rows[i:i+CHUNK] for i in range(0, len(rows), CHUNK)]
-    total  = len(chunks)
-    debug_log.append(f"excel_tsv: {len(rows)} rows → {total} chunks")
+    # ── 2. Конвертируем в Markdown-таблицу ────────────────────────────────────
+    ncols = max(len(r) for r in rows)
+    rows  = [r + [""] * (ncols - len(r)) for r in rows]
 
-    _SYS_EXCEL = "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown."
+    def _md_row(r):
+        return "| " + " | ".join(str(c).replace("|", "\\|") for c in r) + " |"
 
-    _EXCEL_PROMPT = (
-        "Ты получаешь фрагмент счёта в формате TSV (столбцы разделены табуляцией).\n"
-        "Извлеки ВСЕ позиции товаров/материалов из таблицы.\n"
-        "Поставщика, дату и номер счёта ищи в первых строках (шапке).\n\n"
+    md_lines = [_md_row(rows[0])]
+    md_lines.append("|" + "---|" * ncols)          # разделитель заголовка
+    for r in rows[1:]:
+        md_lines.append(_md_row(r))
+    markdown_table = "\n".join(md_lines)
+
+    # ── 3. Один запрос в Gemini Flash Lite ────────────────────────────────────
+    _PROMPT = (
+        "Ты получаешь счёт в формате Markdown-таблицы.\n"
+        "Извлеки все позиции товаров/материалов.\n"
+        "Поставщика, дату и номер счёта ищи в первых строках (шапке) над таблицей.\n\n"
         "Для каждой позиции верни:\n"
         "- material: полное название (не сокращай)\n"
         "- quantity: число (может быть дробным)\n"
@@ -4289,98 +4291,63 @@ def _recognize_excel_tsv(req_lib, file_bytes: bytes, ext: str, debug_log: list):
         "- unit_price: цена за единицу\n"
         "- amount: сумма строки\n\n"
         "ПРАВИЛА:\n"
-        "1. Строки-заголовки таблицы (№, Наименование, Кол-во...) — пропускай.\n"
+        "1. Строки-заголовки (№, Наименование, Кол-во...) — пропускай.\n"
         "2. Если значение отсутствует — ставь null.\n"
         "3. Числа — только цифры без пробелов и символов валюты.\n"
         "4. Не добавляй комментариев.\n\n"
-        "Отвечай строгим JSON:\n"
-        '{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...",\n'
-        '"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}'
+        "Верни строго JSON без markdown-обёрток:\n"
+        '{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,'
+        '"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}\n\n'
+        f"Счёт (Markdown):\n{markdown_table}"
     )
 
-    all_items = []
-    meta_obj  = {}
-    import re as _re2
+    messages = [
+        {"role": "system", "content": "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown-обёрток."},
+        {"role": "user",   "content": _PROMPT},
+    ]
 
-    def _parse_chunk(raw: str):
-        s = raw.strip()
-        s = _re2.sub(r'```(?:json)?\s*', '', s)
-        s = _re2.sub(r'```', '', s).strip()
-        try:
-            p = _json.loads(s)
-            if isinstance(p, dict) and "items" in p:
-                return p, p.get("items") or []
-        except Exception:
-            pass
+    logger.info("Отправка Excel в Gemini (Markdown), строк=%d", len(rows))
+    debug_log.append(f"excel_markdown: sending to gemini, rows={len(rows)}")
+
+    try:
+        raw = _call_polza_model(req_lib, messages=messages,
+                                model="google/gemini-3.1-flash-lite", max_tokens=8192)
+    except Exception as e:
+        debug_log.append(f"excel_markdown gemini error: {e}")
+        return {}, [], f"Gemini вернул ошибку: {e}"
+
+    debug_log.append(f"excel_markdown: response len={len(raw)} first200={raw[:200]!r}")
+
+    # ── 4. Парсим ответ ────────────────────────────────────────────────────────
+    if not raw.strip():
+        return {}, [], f"Gemini вернул пустой ответ. Первые 200 символов raw: {raw[:200]!r}"
+
+    s = raw.strip()
+    s = _re2.sub(r'```(?:json)?\s*', '', s)
+    s = _re2.sub(r'```', '', s).strip()
+
+    ai_obj, items = {}, []
+    try:
+        p = _json.loads(s)
+        if isinstance(p, dict) and "items" in p:
+            ai_obj, items = p, p.get("items") or []
+    except Exception:
         for m in sorted(_re2.finditer(r'\{[\s\S]+\}', s), key=lambda x: -len(x.group(0))):
             try:
                 p = _json.loads(m.group(0))
                 if isinstance(p, dict) and "items" in p:
-                    return p, p.get("items") or []
+                    ai_obj, items = p, p.get("items") or []
+                    break
             except Exception:
                 continue
-        return {}, []
 
-    # Флаг: если DeepSeek недоступен — переключаемся на Gemini для оставшихся чанков
-    use_fallback = False
+    logger.info("Excel Gemini: извлечено %d позиций", len(items))
+    debug_log.append(f"excel_markdown: parsed {len(items)} items")
 
-    for idx, chunk in enumerate(chunks):
-        tsv_text = _to_tsv(chunk)
-        model_used = "google/gemini-3.1-flash-lite" if use_fallback else "deepseek/deepseek-v4-pro"
+    if not items:
+        return {}, [], f"Gemini не смог извлечь позиции. Ответ: {raw[:400]!r}"
 
-        logger.warning(
-            "Отправка чанка Excel в %s, часть %d из %d",
-            "DeepSeek V4 Pro" if not use_fallback else "Gemini (fallback)",
-            idx + 1, total,
-        )
-        debug_log.append(f"excel_chunk {idx+1}/{total} model={model_used}")
-
-        # Формируем сообщения как plain-text (DeepSeek не поддерживает vision-формат)
-        user_text = _EXCEL_PROMPT + f"\n\nСчёт в формате TSV (фрагмент {idx+1} из {total}):\n{tsv_text}"
-        messages  = [
-            {"role": "system", "content": _SYS_EXCEL},
-            {"role": "user",   "content": user_text},
-        ]
-
-        try:
-            raw = _call_polza_model(req_lib, messages=messages, model=model_used, max_tokens=4096)
-            obj, items = _parse_chunk(raw)
-            logger.warning(
-                "Чанк %d/%d: извлечено %d позиций (model=%s)",
-                idx + 1, total, len(items), model_used,
-            )
-            debug_log.append(f"excel_chunk {idx+1}: got {len(items)} items")
-            if not meta_obj and obj:
-                meta_obj = obj
-            all_items.extend(items)
-        except RuntimeError as ce:
-            err_str = str(ce)
-            debug_log.append(f"excel_chunk {idx+1} error: {err_str}")
-            logger.warning("Чанк %d/%d ошибка (%s): %s", idx + 1, total, model_used, err_str)
-            # 400/404 от DeepSeek → переключаемся на fallback и повторяем этот чанк
-            if not use_fallback and ("400" in err_str or "404" in err_str or "model" in err_str.lower()):
-                use_fallback = True
-                logger.warning("DeepSeek недоступен, переключаемся на Gemini для оставшихся чанков")
-                debug_log.append("excel: switching to gemini fallback")
-                try:
-                    fallback_msgs = [
-                        {"role": "system", "content": _SYS_EXCEL},
-                        {"role": "user",   "content": user_text},
-                    ]
-                    raw2 = _call_polza_model(req_lib, messages=fallback_msgs,
-                                             model="google/gemini-3.1-flash-lite", max_tokens=4096)
-                    obj2, items2 = _parse_chunk(raw2)
-                    debug_log.append(f"excel_chunk {idx+1} fallback: got {len(items2)} items")
-                    if not meta_obj and obj2:
-                        meta_obj = obj2
-                    all_items.extend(items2)
-                except Exception as fe:
-                    debug_log.append(f"excel_chunk {idx+1} fallback also failed: {fe}")
-
-    if not all_items:
-        return {}, [], f"Не удалось извлечь позиции из Excel (chunks={total})"
-
-    return meta_obj, all_items, None
+    return ai_obj, items, None
 
 
 def _call_polza_model(req_lib, messages: list, model: str, max_tokens: int = 4096) -> str:

@@ -176,7 +176,7 @@ export default function InvoiceModal({
           {procStage === "excel_chunking" && (
             <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
               <Icon name="Loader" size={13} className="animate-spin shrink-0" />
-              Обработка Excel... анализируем строки таблицы
+              Обработка Excel через Gemini... обычно 5–8 секунд
             </div>
           )}
 
