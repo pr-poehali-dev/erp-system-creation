@@ -3566,13 +3566,8 @@ def upload_invoice_file(cur, invoice_id: int, file_b64: str, file_name: str):
         except Exception as e:
             return None, f"Не удалось обработать PDF: {e}"
 
-    # ── Конвертируем Excel → JPG ──────────────────────────────────────────────
-    elif ext in ("xls", "xlsx"):
-        try:
-            file_b64 = _excel_to_jpg_b64(file_bytes, ext)
-            file_name = file_name.rsplit(".", 1)[0] + ".jpg"
-        except Exception as e:
-            return None, f"Не удалось обработать Excel: {e}"
+    # Excel — сохраняем as-is, recognize_invoice обработает через DeepSeek V4 Pro
+    # (конвертация в JPG убрана — она мешала работе TSV-пайплайна)
 
     # Уникальное имя: inv_{id}_{name}, папка invoices/
     safe_name = f"inv_{invoice_id}_{file_name}"

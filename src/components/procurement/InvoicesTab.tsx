@@ -132,12 +132,13 @@ export default function InvoicesTab({ role }: { role?: Role }) {
         setUploadedFile({ url: uploaded.cdn_url, name: uploaded.file_name });
         setLocalFile(null);
 
-        // Авто-запуск распознавания для PDF/Excel (файл уже JPG)
+        // Авто-запуск распознавания для PDF/Excel
         if (autoRecognize) {
           setSaving(false);
           setEditItem((prev) => ({ ...prev, id: invoiceId, recognition_status: "новый" } as Invoice));
           setRecognizing(true);
-          const isExcel = /\.(xls|xlsx)$/i.test(name);
+          // isExcel по исходному имени файла (name после upload уже может быть .jpg для PDF)
+          const isExcel = /\.(xls|xlsx)$/i.test(localFile?.name ?? name);
           setProcStage(isExcel ? "excel_chunking" : "recognizing");
           setAiError("");
           try {
