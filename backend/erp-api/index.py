@@ -3478,31 +3478,12 @@ def _clean(v) -> str | None:
     return None if s.lower() in ("null", "none", "") else s
 
 
-# ── Шаг 1: извлечение сырого текста из файла (без AI) ────────────────────────
-
-def _extract_text_pdf(file_bytes: bytes) -> tuple[str, bool]:
-    """
-    Извлекает текст из PDF без AI.
-    Возвращает (text, is_scan).
-    is_scan=True если текст слишком короткий (нет текстового слоя).
-    """
-    try:
-        import pdfplumber, io as _io
-        lines = []
-        with pdfplumber.open(_io.BytesIO(file_bytes)) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    lines.append(t)
-        text = "\n".join(lines)
-        is_scan = len(text.strip()) < 100
-        return text, is_scan
-    except Exception as e:
-        return f"[pdfplumber error: {e}]", True
-
+# ── Шаг 1: извлечение текста (openpyxl для Excel, polza.ai для остального) ────
 
 def _extract_text_excel(file_bytes: bytes) -> str:
-    """Читает все ячейки Excel и возвращает текст строка за строкой."""
+    """Читает все ячейки Excel через openpyxl и возвращает текст строка за строкой.
+    openpyxl есть в requirements.txt — единственная нативная библиотека для документов.
+    """
     import openpyxl, io as _io
     wb = openpyxl.load_workbook(_io.BytesIO(file_bytes), read_only=True, data_only=True)
     lines = []
@@ -3529,32 +3510,6 @@ def _ocr_image_polza(req_lib, file_b64: str, mime: str) -> str:
         {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{file_b64}"}},
     ]}
     return _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
-
-
-def _pdf_to_jpeg_b64(file_bytes: bytes, page_idx: int = 0) -> str | None:
-    """Рендерит страницу PDF в JPEG base64 (для сканов без текстового слоя)."""
-    try:
-        import fitz, io as _io
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        if page_idx >= len(doc): page_idx = 0
-        pix = doc[page_idx].get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-        img_bytes = pix.tobytes("jpeg")
-        try:
-            from PIL import Image
-            img = Image.open(_io.BytesIO(img_bytes))
-            w, h = img.size
-            if max(w, h) > 1200:
-                ratio = 1200 / max(w, h)
-                img = img.resize((int(w*ratio), int(h*ratio)), Image.LANCZOS)
-            out = _io.BytesIO()
-            img.save(out, "JPEG", quality=82)
-            img_bytes = out.getvalue()
-        except ImportError:
-            pass
-        import base64
-        return base64.b64encode(img_bytes).decode("utf-8")
-    except Exception:
-        return None
 
 
 # ── Шаг 2: разбивка текста на header / table_lines / footer ──────────────────
@@ -4051,61 +4006,72 @@ def recognize_invoice(cur, invoice_id: int):
     file_b64 = base64.b64encode(file_bytes).decode("utf-8")
     debug_log.append(f"file={file_name} ext={ext} size={len(file_bytes)}")
 
-    # ── 2. Извлечение сырого текста (ШАГ 1 конвейера) ────────────────────────
-    raw_text   = ""
-    is_scan    = False
+    # ── 2. Извлечение сырого текста через polza.ai (ШАГ 1 конвейера) ─────────
+    # Все форматы кроме изображений передаём в GPT-4o как base64 document.
+    # Для изображений (jpg/png) — мультимодальный запрос уже работал раньше.
+    raw_text    = ""
+    is_scan     = False
     text_source = "unknown"
 
+    # Промпт для извлечения текста из документа
+    _EXTRACT_TEXT_PROMPT = (
+        "Извлеки ВЕСЬ текст из этого документа, сохраняя табличную структуру. "
+        "Не форматируй специально — просто текст строка за строкой. "
+        "Если есть таблица — сохрани столбцы разделёнными несколькими пробелами или табуляцией. "
+        "Включи все страницы, все листы, все ячейки."
+    )
+
+    sys_extract = {"role": "system", "content": "Ты — OCR-система. Верни только текст документа, без пояснений."}
+
     if ext in ("jpg", "jpeg", "png"):
+        # Изображение — мультимодальный запрос
         mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
         raw_text    = _ocr_image_polza(req_lib, file_b64, mime)
         text_source = "ocr_image"
         debug_log.append(f"OCR image: {len(raw_text)} chars")
 
-    elif ext in ("xls", "xlsx"):
-        try:
-            raw_text    = _extract_text_excel(file_bytes)
-            text_source = "excel"
-            debug_log.append(f"Excel text: {len(raw_text)} chars")
-        except Exception as xe:
-            raw_text    = f"[Excel error: {xe}]"
-            text_source = "excel_error"
+    elif ext in ("pdf", "xls", "xlsx", "docx"):
+        # Определяем MIME-тип для base64-документа
+        mime_map = {
+            "pdf":  "application/pdf",
+            "xls":  "application/vnd.ms-excel",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+        doc_mime = mime_map.get(ext, "application/octet-stream")
 
-    elif ext == "pdf":
-        raw_text, is_scan = _extract_text_pdf(file_bytes)
-        text_source = "pdfplumber"
-        debug_log.append(f"PDF text: {len(raw_text)} chars, is_scan={is_scan}")
-        if is_scan:
-            # Скан: рендерим страницы в JPEG и делаем OCR
-            debug_log.append("PDF is scan — rendering to JPEG for OCR")
-            ocr_parts = []
+        # Если Excel — дополнительно пробуем openpyxl (есть в requirements.txt)
+        if ext in ("xls", "xlsx"):
             try:
-                import fitz
-                doc_fitz = fitz.open(stream=file_bytes, filetype="pdf")
-                for pi in range(min(len(doc_fitz), 4)):
-                    img_b64 = _pdf_to_jpeg_b64(file_bytes, pi)
-                    if img_b64:
-                        page_text = _ocr_image_polza(req_lib, img_b64, "image/jpeg")
-                        ocr_parts.append(page_text)
-                        debug_log.append(f"  page {pi}: ocr {len(page_text)} chars")
-                raw_text    = "\n\n".join(ocr_parts)
-                text_source = "ocr_pdf_scan"
-            except ImportError:
-                debug_log.append("PyMuPDF not available for scan OCR")
+                raw_text    = _extract_text_excel(file_bytes)
+                text_source = "excel_openpyxl"
+                debug_log.append(f"Excel via openpyxl: {len(raw_text)} chars")
+            except Exception as xe:
+                debug_log.append(f"openpyxl failed: {xe} — falling back to polza.ai")
+                raw_text = ""
 
+        # Если текст не получен — отправляем документ в GPT-4o как base64
+        if not raw_text.strip():
+            try:
+                user_doc_msg = {"role": "user", "content": [
+                    {"type": "text", "text": _EXTRACT_TEXT_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{doc_mime};base64,{file_b64}"}},
+                ]}
+                raw_text    = _call_polza(req_lib, [sys_extract, user_doc_msg], max_tokens=4096)
+                text_source = f"polza_doc_{ext}"
+                is_scan     = ext == "pdf"
+                debug_log.append(f"polza.ai doc extraction ({ext}): {len(raw_text)} chars")
+            except Exception as pe:
+                debug_log.append(f"polza.ai doc extraction error: {pe}")
+                raw_text = ""
     else:
-        # DOCX и прочие
-        try:
-            from docx import Document
-            doc = Document(_io.BytesIO(file_bytes))
-            raw_text    = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-            text_source = "docx"
-        except Exception as de:
-            raw_text    = f"[DOCX error: {de}]"
-            text_source = "docx_error"
+        debug_log.append(f"Unsupported ext: {ext}")
 
     if not raw_text.strip():
-        return None, "Не удалось извлечь текст из файла."
+        return None, (
+            "Не удалось прочитать документ. "
+            "Попробуйте загрузить скан в формате JPG или ввести позиции вручную."
+        )
 
     # ── 3. Разбивка на зоны ───────────────────────────────────────────────────
     zones = _split_document(raw_text)
@@ -5095,13 +5061,44 @@ def handler(event: dict, context) -> dict:
                     except Exception as fe:
                         return err(f"Не удалось загрузить файл: {fe}")
 
-                    # Извлекаем текст (те же функции что в recognize_invoice)
+                    # Извлекаем текст — openpyxl для Excel, polza.ai для остального
+                    import base64 as _b64al
+                    file_b64_al = _b64al.b64encode(file_bytes_al).decode("utf-8")
+                    raw_text_al = ""
+
                     if ext_al in ("xls", "xlsx"):
-                        raw_text_al = _extract_text_excel(file_bytes_al)
+                        try:
+                            raw_text_al = _extract_text_excel(file_bytes_al)
+                        except Exception:
+                            raw_text_al = ""
+                        if not raw_text_al.strip():
+                            # Fallback: polza.ai
+                            try:
+                                mime_al = ("application/vnd.ms-excel" if ext_al == "xls"
+                                           else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                                _sys_al = {"role": "system", "content": "Ты — OCR. Верни текст документа."}
+                                _usr_al = {"role": "user", "content": [
+                                    {"type": "text", "text": "Извлеки ВЕСЬ текст из этого документа, сохраняя табличную структуру строка за строкой."},
+                                    {"type": "image_url", "image_url": {"url": f"data:{mime_al};base64,{file_b64_al}"}},
+                                ]}
+                                raw_text_al = _call_polza(_rl, [_sys_al, _usr_al], max_tokens=4096)
+                            except Exception:
+                                raw_text_al = ""
                     elif ext_al == "pdf":
-                        raw_text_al, _ = _extract_text_pdf(file_bytes_al)
+                        try:
+                            _sys_al = {"role": "system", "content": "Ты — OCR. Верни текст документа."}
+                            _usr_al = {"role": "user", "content": [
+                                {"type": "text", "text": "Извлеки ВЕСЬ текст из этого PDF, сохраняя табличную структуру строка за строкой."},
+                                {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64_al}"}},
+                            ]}
+                            raw_text_al = _call_polza(_rl, [_sys_al, _usr_al], max_tokens=4096)
+                        except Exception:
+                            raw_text_al = ""
                     else:
                         return err(f"Формат {ext_al} не поддерживается для локального парсинга")
+
+                    if not raw_text_al.strip():
+                        return err("Не удалось извлечь текст из файла для локального парсинга")
 
                     zones_al = _split_document(raw_text_al)
                     table_lines_al = zones_al["table_lines"]

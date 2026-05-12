@@ -4,7 +4,8 @@ import { TableTemplate, MAPPABLE_FIELDS } from "./invoices.shared";
 import { api } from "@/lib/api";
 
 function fmtDate(s: string | null) {
-  return s ? new Date(s).toLocaleDateString("ru-RU") : "—";
+  try { return s ? new Date(s).toLocaleDateString("ru-RU") : "—"; }
+  catch { return "—"; }
 }
 
 const FIELD_LABEL: Record<string, string> = Object.fromEntries(MAPPABLE_FIELDS.map(f => [f.key, f.label]));
@@ -12,15 +13,29 @@ const FIELD_LABEL: Record<string, string> = Object.fromEntries(MAPPABLE_FIELDS.m
 export default function TemplatesTab() {
   const [templates, setTemplates] = useState<TableTemplate[]>([]);
   const [loading,   setLoading]   = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [expanded,  setExpanded]  = useState<number | null>(null);
   const [renaming,  setRenaming]  = useState<number | null>(null);
   const [newName,   setNewName]   = useState("");
   const [saving,    setSaving]    = useState(false);
   const [deleting,  setDeleting]  = useState<number | null>(null);
 
-  const load = () => {
+  const load = async () => {
     setLoading(true);
-    api.get("table_templates").then(setTemplates).finally(() => setLoading(false));
+    setLoadError(null);
+    try {
+      const res = await api.get("table_templates");
+      // Ответ может быть массивом напрямую или завёрнут в объект
+      const list: TableTemplate[] = Array.isArray(res)
+        ? res
+        : Array.isArray(res?.data) ? res.data : [];
+      setTemplates(list);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Ошибка загрузки шаблонов");
+      setTemplates([]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);
@@ -31,6 +46,8 @@ export default function TemplatesTab() {
     try {
       await api.post("table_templates", { action: "delete", id });
       setTemplates(t => t.filter(x => x.id !== id));
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Ошибка удаления");
     } finally {
       setDeleting(null);
     }
@@ -48,6 +65,8 @@ export default function TemplatesTab() {
       await api.post("table_templates", { action: "rename", id, name: newName.trim() });
       setTemplates(t => t.map(x => x.id === id ? { ...x, name: newName.trim() } : x));
       setRenaming(null);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Ошибка переименования");
     } finally {
       setSaving(false);
     }
@@ -56,6 +75,20 @@ export default function TemplatesTab() {
   if (loading) return (
     <div className="flex items-center justify-center py-16 text-muted-foreground gap-2">
       <Icon name="Loader" size={16} className="animate-spin" />Загрузка шаблонов...
+    </div>
+  );
+
+  if (loadError) return (
+    <div className="flex flex-col items-center justify-center py-16 gap-3">
+      <Icon name="AlertTriangle" size={32} className="text-amber-500 opacity-60" />
+      <div className="text-center">
+        <div className="text-[14px] font-medium text-foreground">Ошибка загрузки шаблонов</div>
+        <div className="text-[12px] text-muted-foreground mt-1">{loadError}</div>
+      </div>
+      <button onClick={load}
+        className="flex items-center gap-1.5 px-4 py-2 border border-border rounded-lg text-[13px] hover:bg-secondary transition-colors">
+        <Icon name="RefreshCw" size={13} />Попробовать снова
+      </button>
     </div>
   );
 
@@ -96,10 +129,17 @@ export default function TemplatesTab() {
           const isRenaming = renaming === tpl.id;
           const isDel      = deleting === tpl.id;
 
-          // Разворачиваем column_map в читабельный вид
-          const colMapEntries = Object.entries(tpl.column_map)
-            .filter(([k, v]) => v !== null && k !== "skip")
-            .sort((a, b) => (a[1] as number) - (b[1] as number));
+          // Безопасный разбор column_map
+          let colMapEntries: [string, number | null][] = [];
+          try {
+            const cm = tpl.column_map ?? {};
+            colMapEntries = (Object.entries(cm) as [string, number | null][])
+              .filter(([k, v]) => v !== null && k !== "skip")
+              .sort((a, b) => (a[1] as number) - (b[1] as number));
+          } catch { /* пустой маппинг — ничего страшного */ }
+
+          // Безопасный разбор headers
+          const headers: string[] = Array.isArray(tpl.headers) ? tpl.headers : [];
 
           return (
             <div key={tpl.id}
@@ -113,7 +153,10 @@ export default function TemplatesTab() {
                       <input
                         value={newName}
                         onChange={e => setNewName(e.target.value)}
-                        onKeyDown={e => { if (e.key === "Enter") handleRename(tpl.id); if (e.key === "Escape") setRenaming(null); }}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") handleRename(tpl.id);
+                          if (e.key === "Escape") setRenaming(null);
+                        }}
                         autoFocus
                         className="flex-1 border border-primary rounded px-2 py-1 text-[13px] outline-none focus:ring-1 focus:ring-primary"
                       />
@@ -138,7 +181,7 @@ export default function TemplatesTab() {
                   <div className="flex items-center gap-3 text-[11px] text-muted-foreground mt-0.5">
                     <span className="flex items-center gap-1">
                       <Icon name="BarChart2" size={10} />
-                      Использован {tpl.use_count} раз
+                      Использован {tpl.use_count ?? 0} раз
                     </span>
                     <span>Создан {fmtDate(tpl.created_at)}</span>
                     {tpl.last_used_at && <span>· Последний раз {fmtDate(tpl.last_used_at)}</span>}
@@ -173,13 +216,17 @@ export default function TemplatesTab() {
                     <div className="text-[11px] font-semibold text-muted-foreground mb-1.5">
                       Заголовки таблицы из документа
                     </div>
-                    <div className="flex flex-wrap gap-1">
-                      {tpl.headers.map((h, i) => (
-                        <span key={i} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-white border border-border rounded font-mono">
-                          <span className="text-hint">[{i}]</span> {h}
-                        </span>
-                      ))}
-                    </div>
+                    {headers.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {headers.map((h, i) => (
+                          <span key={i} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-white border border-border rounded font-mono">
+                            <span className="text-hint">[{i}]</span> {h}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-[11px] text-hint italic">Заголовки не сохранены</span>
+                    )}
                   </div>
 
                   {/* Маппинг колонок */}
@@ -187,17 +234,21 @@ export default function TemplatesTab() {
                     <div className="text-[11px] font-semibold text-muted-foreground mb-1.5">
                       Маппинг полей
                     </div>
-                    <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
-                      {colMapEntries.map(([field, colIdx]) => (
-                        <div key={field} className="flex items-center gap-2 text-[11px] bg-white border border-border rounded px-2 py-1">
-                          <span className="font-medium text-primary">{FIELD_LABEL[field] ?? field}</span>
-                          <span className="text-hint">←</span>
-                          <span className="font-mono text-[10px]">
-                            [{colIdx}] {tpl.headers[colIdx as number] ?? "?"}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+                    {colMapEntries.length > 0 ? (
+                      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+                        {colMapEntries.map(([field, colIdx]) => (
+                          <div key={field} className="flex items-center gap-2 text-[11px] bg-white border border-border rounded px-2 py-1">
+                            <span className="font-medium text-primary">{FIELD_LABEL[field] ?? field}</span>
+                            <span className="text-hint">←</span>
+                            <span className="font-mono text-[10px]">
+                              [{colIdx}] {headers[colIdx as number] ?? "?"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-[11px] text-hint italic">Маппинг не задан</span>
+                    )}
                   </div>
                 </div>
               )}
@@ -212,7 +263,7 @@ export default function TemplatesTab() {
           <Icon name="Info" size={13} className="shrink-0 mt-0.5" />
           <span>
             При распознавании нового счёта система ищет шаблон с совпадением заголовков &gt;70%.
-            Если найден — парсит мгновенно без AI. Если качество &lt;50% — автоматически переключается на AI.
+            Если найден — парсит без AI. Если качество &lt;50% — автоматически переключается на AI.
           </span>
         </div>
       )}
