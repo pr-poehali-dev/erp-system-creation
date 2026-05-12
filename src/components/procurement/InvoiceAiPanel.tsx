@@ -109,12 +109,7 @@ export default function InvoiceAiPanel({
   const handleSaveTemplate = useCallback(async (colMap: Record<string, number | null>, name: string) => {
     setSavingTpl(true);
     try {
-      const res = await api.post("table_templates", {
-        action: "save",
-        name,
-        headers: result.table_headers ?? [],
-        column_map: colMap,
-      });
+      const res = await api.table_templates.save(name, result.table_headers ?? [], colMap);
       setTplSaved({ id: res.id, name: res.name });
       setTab(displayItems.length > 0 ? "items" : "manual");
     } catch {
@@ -129,12 +124,7 @@ export default function InvoiceAiPanel({
     setSavingAndApplying(true);
     try {
       // 1. Сохраняем шаблон
-      const saveRes = await api.post("table_templates", {
-        action: "save",
-        name,
-        headers: result.table_headers ?? [],
-        column_map: colMap,
-      });
+      const saveRes = await api.table_templates.save(name, result.table_headers ?? [], colMap);
       setTplSaved({ id: saveRes.id, name: saveRes.name });
 
       // 2. Применяем шаблон локально (без AI) — бэкенд перечитает файл
@@ -142,14 +132,12 @@ export default function InvoiceAiPanel({
         setTab("items");
         return;
       }
-      const applyRes = await api.post("table_templates", {
-        action:         "apply_locally",
-        invoice_id:     invoiceId,
-        column_map:     colMap,
-        supplier_name:  result.meta.invoice_date ? "" : "",
-        invoice_date:   invoiceDate   || null,
-        invoice_number: invoiceNumber || null,
-      });
+      const applyRes = await api.table_templates.applyLocally(
+        invoiceId,
+        colMap,
+        invoiceDate   || null,
+        invoiceNumber || null,
+      );
 
       const newItems: AiItem[] = applyRes.items ?? [];
       setLocalItems(newItems);

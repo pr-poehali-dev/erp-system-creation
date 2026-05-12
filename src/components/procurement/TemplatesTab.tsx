@@ -24,11 +24,8 @@ export default function TemplatesTab() {
     setLoading(true);
     setLoadError(null);
     try {
-      const res = await api.get("table_templates");
-      // Ответ может быть массивом напрямую или завёрнут в объект
-      const list: TableTemplate[] = Array.isArray(res)
-        ? res
-        : Array.isArray(res?.data) ? res.data : [];
+      const res = await api.table_templates.list();
+      const list: TableTemplate[] = Array.isArray(res) ? res : [];
       setTemplates(list);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : "Ошибка загрузки шаблонов");
@@ -44,7 +41,7 @@ export default function TemplatesTab() {
     if (!confirm("Удалить шаблон? Это не затронет уже созданные счета.")) return;
     setDeleting(id);
     try {
-      await api.post("table_templates", { action: "delete", id });
+      await api.table_templates.delete(id);
       setTemplates(t => t.filter(x => x.id !== id));
     } catch (e) {
       alert(e instanceof Error ? e.message : "Ошибка удаления");
@@ -62,7 +59,7 @@ export default function TemplatesTab() {
     if (!newName.trim()) return;
     setSaving(true);
     try {
-      await api.post("table_templates", { action: "rename", id, name: newName.trim() });
+      await api.table_templates.rename(id, newName.trim());
       setTemplates(t => t.map(x => x.id === id ? { ...x, name: newName.trim() } : x));
       setRenaming(null);
     } catch (e) {

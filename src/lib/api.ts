@@ -284,6 +284,23 @@ export const api = {
       request<ClientAct>("client_portal", "POST", { action: "create_act", project_id, stage_id, amount, title }),
   },
 
+  table_templates: {
+    list: () =>
+      request<any[]>("table_templates"),
+    save: (name: string, headers: string[], column_map: Record<string, number | null>) =>
+      request<{ id: number; name: string }>("table_templates", "POST", { action: "save", name, headers, column_map }),
+    applyLocally: (invoice_id: number, column_map: Record<string, number | null>, invoice_date?: string | null, invoice_number?: string | null) =>
+      request<any>("table_templates", "POST", { action: "apply_locally", invoice_id, column_map, invoice_date: invoice_date ?? null, invoice_number: invoice_number ?? null }),
+    delete: (id: number) =>
+      request<{ ok: boolean }>("table_templates", "POST", { action: "delete", id }),
+    rename: (id: number, name: string) =>
+      request<{ ok: boolean }>("table_templates", "POST", { action: "rename", id, name }),
+  },
+
+  /** Универсальный POST для ресурсов без отдельного метода (legacy) */
+  post: (resource: string, body: object) =>
+    request<any>(resource, "POST", body),
+
 };
 
 // ─── Types ────────────────────────────────────────────────────────────────────

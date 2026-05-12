@@ -3274,7 +3274,17 @@ unit_price и quantity — только числа, без символов ва
 Фрагмент таблицы:
 {chunk}"""
 
-_PROMPT_OCR_IMAGE = """Извлеки весь текст с этого изображения документа. Не форматируй — просто текст, строка за строкой, как он написан."""
+_PROMPT_OCR_IMAGE = """Извлеки ВЕСЬ текст с этого изображения счёта или накладной.
+Не пропускай ни одной строки. Сохраняй структуру таблицы: строки разделяй переводом строки, столбцы — двумя пробелами или табуляцией.
+Если значение нечёткое — всё равно попытайся его прочитать. Верни только текст без пояснений."""
+
+_PROMPT_IMAGE_DIRECT = """Извлеки все строки таблицы из этого изображения счёта.
+Для каждой строки определи: наименование материала/товара, единицу измерения, количество, цену за единицу.
+Даже если значение нечёткое — попытайся прочитать и включи строку в ответ.
+Никогда не пропускай строки без причины.
+Верни JSON-массив:
+[{"material":"название","unit":"шт|м3|т|пог.м|м2|компл","unit_price":число_или_null,"quantity":число_или_null,"supplier_name":"поставщик или null","invoice_date":"YYYY-MM-DD или null","invoice_number":"номер или null"}]
+Только JSON-массив, без пояснений."""
 
 _ITEM_KEY_ALIASES = {
     "supplier_name":  ["supplier", "vendor", "company", "поставщик", "организация", "from", "seller"],
@@ -4013,64 +4023,129 @@ def recognize_invoice(cur, invoice_id: int):
     is_scan     = False
     text_source = "unknown"
 
-    # Промпт для извлечения текста из документа
+    # ── Стратегия по типу файла ───────────────────────────────────────────────
+    # JPG/PNG  → мультимодальный запрос в GPT-4o (image_url)
+    # XLS/XLSX → openpyxl (нативно), fallback xlrd (.xls)
+    # PDF      → GPT-4o с PDF как image_url (поддерживается через Polza.ai)
+    # DOCX     → GPT-4o с PDF как image_url (поддерживается через Polza.ai)
+    # Если всё провалилось → пользователю предлагается JPG или ручной ввод
+
+    sys_extract = {"role": "system", "content": "Ты — OCR-система. Верни только текст документа без пояснений."}
     _EXTRACT_TEXT_PROMPT = (
         "Извлеки ВЕСЬ текст из этого документа, сохраняя табличную структуру. "
-        "Не форматируй специально — просто текст строка за строкой. "
-        "Если есть таблица — сохрани столбцы разделёнными несколькими пробелами или табуляцией. "
-        "Включи все страницы, все листы, все ячейки."
+        "Строки таблицы разделяй переводом строки, столбцы — несколькими пробелами или табуляцией. "
+        "Включи все страницы."
     )
 
-    sys_extract = {"role": "system", "content": "Ты — OCR-система. Верни только текст документа, без пояснений."}
-
     if ext in ("jpg", "jpeg", "png"):
-        # Изображение — мультимодальный запрос
+        # Изображение — мультимодальный запрос (всегда работает)
         mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
-        raw_text    = _ocr_image_polza(req_lib, file_b64, mime)
-        text_source = "ocr_image"
-        debug_log.append(f"OCR image: {len(raw_text)} chars")
+        try:
+            raw_text    = _ocr_image_polza(req_lib, file_b64, mime)
+            text_source = "ocr_image"
+            debug_log.append(f"OCR image: {len(raw_text)} chars")
+        except Exception as ie:
+            debug_log.append(f"image OCR error: {ie}")
+        # Флаг: для JPG после text-extract будем использовать усиленный промпт
+        is_scan = True
 
-    elif ext in ("pdf", "xls", "xlsx", "docx"):
-        # Определяем MIME-тип для base64-документа
-        mime_map = {
-            "pdf":  "application/pdf",
-            "xls":  "application/vnd.ms-excel",
-            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        }
-        doc_mime = mime_map.get(ext, "application/octet-stream")
+    elif ext in ("xls", "xlsx"):
+        # Шаг 1: openpyxl (есть в requirements.txt, поддерживает .xlsx)
+        try:
+            raw_text    = _extract_text_excel(file_bytes)
+            text_source = "excel_openpyxl"
+            debug_log.append(f"Excel via openpyxl: {len(raw_text)} chars")
+        except Exception as xe:
+            debug_log.append(f"openpyxl failed: {xe}")
+            raw_text = ""
 
-        # Если Excel — дополнительно пробуем openpyxl (есть в requirements.txt)
-        if ext in ("xls", "xlsx"):
+        # Шаг 2: xlrd (поддерживает старый .xls)
+        if not raw_text.strip() and ext == "xls":
             try:
-                raw_text    = _extract_text_excel(file_bytes)
-                text_source = "excel_openpyxl"
-                debug_log.append(f"Excel via openpyxl: {len(raw_text)} chars")
-            except Exception as xe:
-                debug_log.append(f"openpyxl failed: {xe} — falling back to polza.ai")
-                raw_text = ""
+                import xlrd, io as _xlrd_io
+                wb_xls = xlrd.open_workbook(file_contents=file_bytes)
+                lines_xls = []
+                for sh in wb_xls.sheets()[:3]:
+                    for ri in range(sh.nrows):
+                        row_vals = []
+                        for ci in range(sh.ncols):
+                            cell = sh.cell(ri, ci)
+                            v = cell.value
+                            if v == "" or v is None: continue
+                            if isinstance(v, float):
+                                row_vals.append(str(int(v)) if v == int(v) else str(round(v, 4)))
+                            else:
+                                row_vals.append(str(v).strip())
+                        if row_vals:
+                            lines_xls.append("\t".join(row_vals))
+                raw_text    = "\n".join(lines_xls)
+                text_source = "excel_xlrd"
+                debug_log.append(f"Excel via xlrd: {len(raw_text)} chars")
+            except Exception as xle:
+                debug_log.append(f"xlrd failed: {xle}")
 
-        # Если текст не получен — отправляем документ в GPT-4o как base64
+        # Шаг 3: если оба упали — GPT-4o с image_url (xlsx читается как PDF)
         if not raw_text.strip():
             try:
-                user_doc_msg = {"role": "user", "content": [
+                doc_mime = ("application/vnd.ms-excel" if ext == "xls"
+                            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                usr_msg = {"role": "user", "content": [
                     {"type": "text", "text": _EXTRACT_TEXT_PROMPT},
                     {"type": "image_url", "image_url": {"url": f"data:{doc_mime};base64,{file_b64}"}},
                 ]}
-                raw_text    = _call_polza(req_lib, [sys_extract, user_doc_msg], max_tokens=4096)
-                text_source = f"polza_doc_{ext}"
-                is_scan     = ext == "pdf"
-                debug_log.append(f"polza.ai doc extraction ({ext}): {len(raw_text)} chars")
-            except Exception as pe:
-                debug_log.append(f"polza.ai doc extraction error: {pe}")
-                raw_text = ""
+                raw_text    = _call_polza(req_lib, [sys_extract, usr_msg], max_tokens=4096)
+                text_source = "excel_polza_fallback"
+                debug_log.append(f"Excel via polza fallback: {len(raw_text)} chars")
+            except Exception as epf:
+                debug_log.append(f"Excel polza fallback error: {epf}")
+
+    elif ext == "pdf":
+        # GPT-4o поддерживает PDF через image_url с mime application/pdf
+        try:
+            usr_pdf = {"role": "user", "content": [
+                {"type": "text", "text": _EXTRACT_TEXT_PROMPT},
+                {"type": "image_url", "image_url": {"url": f"data:application/pdf;base64,{file_b64}"}},
+            ]}
+            raw_text    = _call_polza(req_lib, [sys_extract, usr_pdf], max_tokens=4096)
+            text_source = "pdf_polza"
+            is_scan     = True
+            debug_log.append(f"PDF via polza: {len(raw_text)} chars")
+        except Exception as pe:
+            debug_log.append(f"PDF polza error: {pe}")
+
+    elif ext == "docx":
+        # DOCX: пробуем python-docx, затем polza
+        try:
+            from docx import Document as _DocxDoc
+            import io as _docx_io
+            _doc = _DocxDoc(_docx_io.BytesIO(file_bytes))
+            raw_text    = "\n".join(p.text for p in _doc.paragraphs if p.text.strip())
+            text_source = "docx_native"
+            debug_log.append(f"DOCX native: {len(raw_text)} chars")
+        except Exception as dxe:
+            debug_log.append(f"DOCX native failed: {dxe}")
+            try:
+                usr_docx = {"role": "user", "content": [
+                    {"type": "text", "text": _EXTRACT_TEXT_PROMPT},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{file_b64}"
+                    }},
+                ]}
+                raw_text    = _call_polza(req_lib, [sys_extract, usr_docx], max_tokens=4096)
+                text_source = "docx_polza"
+                debug_log.append(f"DOCX via polza: {len(raw_text)} chars")
+            except Exception as dpe:
+                debug_log.append(f"DOCX polza error: {dpe}")
     else:
         debug_log.append(f"Unsupported ext: {ext}")
 
     if not raw_text.strip():
         return None, (
-            "Не удалось прочитать документ. "
-            "Попробуйте загрузить скан в формате JPG или ввести позиции вручную."
+            "Не удалось прочитать документ.\n"
+            "Попробуйте:\n"
+            "1) Сохранить таблицу как изображение (JPG/PNG) и загрузить его\n"
+            "2) Загрузить CSV-файл\n"
+            "3) Ввести позиции вручную"
         )
 
     # ── 3. Разбивка на зоны ───────────────────────────────────────────────────
@@ -4163,20 +4238,39 @@ def recognize_invoice(cur, invoice_id: int):
                 debug_log.append(f"  chunk[{ci}]: {len(chunk_items)} items")
                 all_raw_items.extend(chunk_items)
         else:
-            debug_log.append("No table lines — full-text fallback")
-            sys_msg  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
-            user_msg = {"role": "user", "content": (
-                "Из следующего текста счёта извлеки ВСЕ позиции товаров.\n"
-                "Верни ТОЛЬКО JSON-массив: [{\"material\":\"...\",\"unit\":\"...\","
-                "\"unit_price\":число,\"quantity\":число}]\n\nТекст:\n" + raw_text[:4000]
-            )}
-            try:
-                fb_raw   = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
-                fb_items, fb_err = _parse_json_list(fb_raw)
-                all_raw_items = fb_items or []
-                if fb_err: debug_log.append(f"  fallback parse error: {fb_err}")
-            except Exception as fe:
-                debug_log.append(f"  fallback error: {fe}")
+            # Нет таблицы в тексте — пробуем полнотекстовый или мультимодальный запрос
+            if is_scan and ext in ("jpg", "jpeg", "png"):
+                # Для изображений — прямой структурированный запрос (минует OCR-текст)
+                debug_log.append("Image: no table in OCR text — direct structured request")
+                try:
+                    mime_direct = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+                    sys_direct  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
+                    usr_direct  = {"role": "user", "content": [
+                        {"type": "text", "text": _PROMPT_IMAGE_DIRECT},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_direct};base64,{file_b64}"}},
+                    ]}
+                    direct_raw = _call_polza(req_lib, [sys_direct, usr_direct], max_tokens=4096)
+                    direct_items, direct_err = _parse_json_list(direct_raw)
+                    all_raw_items = direct_items or []
+                    debug_log.append(f"  direct image parse: {len(all_raw_items)} items, err={direct_err}")
+                except Exception as de:
+                    debug_log.append(f"  direct image error: {de}")
+
+            if not all_raw_items:
+                debug_log.append("No table lines — full-text fallback")
+                sys_msg  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
+                user_msg = {"role": "user", "content": (
+                    "Из следующего текста счёта извлеки ВСЕ позиции товаров.\n"
+                    "Верни ТОЛЬКО JSON-массив: [{\"material\":\"...\",\"unit\":\"...\","
+                    "\"unit_price\":число,\"quantity\":число}]\n\nТекст:\n" + raw_text[:4000]
+                )}
+                try:
+                    fb_raw   = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
+                    fb_items, fb_err = _parse_json_list(fb_raw)
+                    all_raw_items = fb_items or []
+                    if fb_err: debug_log.append(f"  fallback parse error: {fb_err}")
+                except Exception as fe:
+                    debug_log.append(f"  fallback error: {fe}")
 
     debug_log.append(f"total raw items before postprocess: {len(all_raw_items)}")
 
