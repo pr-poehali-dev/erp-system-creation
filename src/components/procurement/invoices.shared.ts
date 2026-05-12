@@ -195,3 +195,116 @@ export interface UploadedFile {
   url: string;
   name: string;
 }
+
+// ── Prямое распознавание файла через Polza.ai (без Cloud Function) ────────────
+// Используется для Excel и PDF с QR — обходит таймаут бэкенда.
+const POLZA_URL = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf";
+
+const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечения данных из счетов.
+Я передаю содержимое файла счёта. Извлеки ВСЕ позиции без исключений.
+
+Для каждой позиции верни:
+- material: полное название (не сокращай)
+- quantity: число (может быть дробным)
+- unit: единица измерения (м3, шт, м, пог.м, м2 и т.д.)
+- unit_price: цена за единицу
+- amount: сумма строки (unit_price × quantity)
+
+Поставщика, дату и номер счёта ищи в начале документа (шапке).
+
+ПРАВИЛА:
+1. Строки-заголовки (№, Наименование, Кол-во...) — пропускай.
+2. Если значение отсутствует — ставь null.
+3. Числа — только цифры без пробелов и символов валюты.
+4. Не добавляй комментариев.
+
+Верни строго JSON без markdown-обёрток:
+{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
+
+function _parseAiJson(raw: string): { ai_obj: Record<string, unknown>; items: unknown[] } {
+  const s = raw.trim().replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
+  try {
+    const p = JSON.parse(s);
+    if (typeof p === "object" && p && "items" in p) return { ai_obj: p as Record<string, unknown>, items: (p as Record<string, unknown[]>).items as unknown[] };
+  } catch { /* fallback */ }
+  const m = [...s.matchAll(/\{[\s\S]+\}/g)].sort((a, b) => b[0].length - a[0].length);
+  for (const match of m) {
+    try {
+      const p = JSON.parse(match[0]);
+      if (typeof p === "object" && p && "items" in p) return { ai_obj: p as Record<string, unknown>, items: (p as Record<string, unknown[]>).items as unknown[] };
+    } catch { /* continue */ }
+  }
+  return { ai_obj: {}, items: [] };
+}
+
+/**
+ * Распознаёт файл напрямую через Polza.ai из браузера.
+ * file_b64 — base64 содержимого, file_name — имя (для определения типа).
+ * onProgress — колбэк для обновления текста статуса.
+ */
+export async function recognizeViaPolza(
+  file_b64: string,
+  file_name: string,
+  onProgress?: (msg: string) => void,
+): Promise<{ success: boolean; ai_obj: Record<string, unknown>; items: unknown[]; raw: string; error?: string }> {
+  const ext = file_name.split(".").pop()?.toLowerCase() ?? "";
+
+  onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
+
+  // Gemini Flash поддерживает PDF и Excel через data URI (image_url)
+  const mimeMap: Record<string, string> = {
+    pdf:  "application/pdf",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    xls:  "application/vnd.ms-excel",
+    jpg:  "image/jpeg",
+    jpeg: "image/jpeg",
+    png:  "image/png",
+  };
+  const mime   = mimeMap[ext] ?? "application/octet-stream";
+  const dataUrl = `data:${mime};base64,${file_b64}`;
+
+  const messages = [
+    {
+      role: "system" as const,
+      content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown-обёрток.",
+    },
+    {
+      role: "user" as const,
+      content: [
+        { type: "text",      text: _RECOGNIZE_PROMPT },
+        { type: "image_url", image_url: { url: dataUrl } },
+      ] as unknown as string,
+    },
+  ];
+
+  try {
+    const resp = await fetch(`${POLZA_URL}?action=generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages,
+        model: "google/gemini-3.1-flash-lite",
+        temperature: 0,
+        max_tokens: 8192,
+      }),
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return { success: false, ai_obj: {}, items: [], raw: errText, error: `Polza вернул ${resp.status}: ${errText.slice(0, 200)}` };
+    }
+
+    const data = await resp.json();
+    const raw: string = data.content ?? "";
+
+    if (!raw.trim()) {
+      return { success: false, ai_obj: {}, items: [], raw, error: `Пустой ответ от модели. Попробуйте снова.` };
+    }
+
+    const { ai_obj, items } = _parseAiJson(raw);
+    return { success: true, ai_obj, items, raw };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { success: false, ai_obj: {}, items: [], raw: "", error: msg };
+  }
+}

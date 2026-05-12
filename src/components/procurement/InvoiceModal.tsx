@@ -14,8 +14,9 @@ interface Props {
   localFile: File | null;
   uploadedFile: UploadedFile | null;
   saving: boolean;
-  /** "idle" | "converting" — подготовка изображения | "recognizing" — AI | "excel_chunking" — TSV DeepSeek */
-  procStage: "idle" | "converting" | "recognizing" | "excel_chunking";
+  /** "idle" | "converting" | "recognizing" | "excel_chunking" | "polza_direct" */
+  procStage: "idle" | "converting" | "recognizing" | "excel_chunking" | "polza_direct";
+  polzaStatus?: string;
   autoRecognize: boolean;
   error: string;
   recognizing: boolean;
@@ -33,16 +34,17 @@ interface Props {
   onRecognize: () => void;
   onApplyAI: (items: AiItem[], invoiceDate: string, invoiceNumber: string) => void;
   onDismissAI: () => void;
+  onRetryPolza?: () => void;
 }
 
 export default function InvoiceModal({
   editItem, form, setForm,
   localFile, uploadedFile,
-  saving, procStage, autoRecognize, error,
+  saving, procStage, polzaStatus, autoRecognize, error,
   recognizing, applying, aiResult, aiError, canRecognize, canSeeRawData,
   suppliers, materials,
   onClose, onSave, onFileSelect, onRemoveFile,
-  onRecognize, onApplyAI, onDismissAI,
+  onRecognize, onApplyAI, onDismissAI, onRetryPolza,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -144,9 +146,18 @@ export default function InvoiceModal({
                 </button>
               )}
               {aiError && (
-                <div className="flex items-center gap-1.5 text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                  <Icon name="AlertCircle" size={13} className="shrink-0" />
-                  {aiError}
+                <div className="text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                  <div className="flex items-start gap-1.5">
+                    <Icon name="AlertCircle" size={13} className="shrink-0 mt-0.5" />
+                    <span>{aiError}</span>
+                  </div>
+                  {onRetryPolza && (
+                    <button type="button" onClick={onRetryPolza}
+                      className="mt-1.5 flex items-center gap-1 text-[11px] text-red-700 underline hover:no-underline">
+                      <Icon name="RefreshCw" size={11} />
+                      Попробовать снова
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -177,6 +188,13 @@ export default function InvoiceModal({
             <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
               <Icon name="Loader" size={13} className="animate-spin shrink-0" />
               Обработка Excel через Gemini... обычно 5–8 секунд
+            </div>
+          )}
+
+          {procStage === "polza_direct" && (
+            <div className="flex items-center gap-2 text-[12px] text-primary bg-primary/5 border border-primary/20 rounded-lg px-3 py-2">
+              <Icon name="Loader" size={13} className="animate-spin shrink-0" />
+              {polzaStatus || "Распознавание через ИИ... может занять до 60 секунд"}
             </div>
           )}
 
