@@ -3253,7 +3253,7 @@ def add_gantt_substage(cur, project_id: int, body: dict):
 
 CHATGPT_URL = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf"
 
-ALLOWED_EXTS = {'pdf','jpg','jpeg','png','xls','xlsx','docx'}
+ALLOWED_EXTS = {'jpg','jpeg','png'}  # PDF/Excel временно отключены — нужна конвертация в изображение
 
 # ── Промпты ──────────────────────────────────────────────────────────────────
 
@@ -3327,7 +3327,7 @@ _ITEM_KEY_ALIASES = {
     "invoice_date":   ["date", "дата", "issue_date", "doc_date"],
     "invoice_number": ["number", "num", "номер", "invoice_no", "doc_number", "#"],
 }
-_VALID_UNITS = ['шт','м3','т','пог.м','м2','компл']
+_VALID_UNITS = ['шт','м3','т','пог.м','м2','компл','кг','л','уп','рул','пач','компл','г','мл']
 
 
 def _normalize_obj(obj: dict) -> dict:
@@ -3377,7 +3377,8 @@ def _match_or_create_supplier(cur, name: str):
 def _match_or_create_material(cur, name: str, raw_unit: str):
     if not name or _is_null(name):
         return None, False, 'шт'
-    unit = raw_unit if raw_unit in _VALID_UNITS else 'шт'
+    # Используем unit из AI как есть, дефолт "шт" только если пусто
+    unit = raw_unit.strip() if raw_unit and raw_unit.strip() and raw_unit.strip().lower() not in ('null','none','') else 'шт'
     cur.execute(
         f"SELECT id FROM {SCHEMA}.materials WHERE lower(name)=lower(%s) AND name!='(не указан)' LIMIT 1",
         (name,)
@@ -3698,16 +3699,35 @@ def _postprocess_items(raw_items: list, supplier_name: str, invoice_date: str | 
         unit_low = unit.lower().strip()
         if unit_low in _TONNE_KEYWORDS:
             unit = "т"
-        elif unit_low in ('м2', 'кв.м', 'кв м', 'квм', 'm2'):
+        elif unit_low in ('м2', 'кв.м', 'кв м', 'квм', 'm2', 'sq.m', 'sqm'):
             unit = "м2"
-        elif unit_low in ('м3', 'куб.м', 'куб м', 'кубм', 'm3'):
+        elif unit_low in ('м3', 'куб.м', 'куб м', 'кубм', 'm3', 'cu.m', 'cum'):
             unit = "м3"
-        elif unit_low in ('пог.м', 'пог м', 'погм', 'rm', 'п.м'):
+        elif unit_low in ('пог.м', 'пог м', 'погм', 'п.м', 'п/м', 'lm', 'lin.m'):
             unit = "пог.м"
-        elif unit_low in ('компл', 'комплект', 'компл.', 'set'):
+        elif unit_low in ('м', 'метр', 'метры', 'метров', 'ml', 'lin', 'rm'):
+            unit = "пог.м"
+        elif unit_low in ('компл', 'комплект', 'компл.', 'set', 'комп'):
             unit = "компл"
-        elif unit_low in ('шт', 'шт.', 'piece', 'pc', 'pcs', 'ед', 'ед.'):
+        elif unit_low in ('шт', 'шт.', 'piece', 'pc', 'pcs', 'ед', 'ед.', 'штук', 'штуки', 'штука'):
             unit = "шт"
+        elif unit_low in ('кг', 'kg', 'килограмм', 'килограммов', 'кило'):
+            unit = "кг"
+        elif unit_low in ('г', 'gr', 'gram', 'грамм'):
+            unit = "г"
+        elif unit_low in ('л', 'liter', 'litre', 'литр', 'литров', 'lt'):
+            unit = "л"
+        elif unit_low in ('мл', 'ml', 'миллилитр'):
+            unit = "мл"
+        elif unit_low in ('уп', 'уп.', 'упак', 'упаковка', 'pack', 'pck'):
+            unit = "уп"
+        elif unit_low in ('рул', 'рул.', 'рулон', 'roll'):
+            unit = "рул"
+        elif unit_low in ('пач', 'пач.', 'пачка', 'пачек'):
+            unit = "пач"
+        # Если единица не распознана — оставляем как есть (не сбрасываем в "шт")
+        elif unit_low and unit_low not in ('null', 'none', '-', '—'):
+            unit = unit  # сохраняем оригинал
 
         price_fixed = False
 
@@ -4346,7 +4366,7 @@ def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, 
 # ─── SUPPLIERS ────────────────────────────────────────────────────────────────
 
 SUPPLIER_CATEGORIES = ['бетон','пиломатериалы','металл','кровля','инженерия','отделка','прочее']
-MATERIAL_UNITS      = ['шт','м3','т','пог.м','м2','компл']
+MATERIAL_UNITS      = ['шт','м3','т','пог.м','м2','компл','кг','л','уп','рул','пач','г','мл']
 
 def get_suppliers(cur):
     """Список поставщиков."""

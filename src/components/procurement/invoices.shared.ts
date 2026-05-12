@@ -4,7 +4,7 @@ import { Role } from "@/App";
 export const AI_ROLES: Role[] = ["director", "supply_director", "supplier"];
 
 export const ACCEPT_TYPES = ".jpg,.jpeg,.png";
-export const ACCEPT_HINT  = "JPG, PNG (фото или скан счёта)";
+export const ACCEPT_HINT  = "JPG или PNG — фото счёта или скрин с экрана";
 
 export const EXT_ICON: Record<string, string> = {
   pdf: "FileText", jpg: "Image", jpeg: "Image", png: "Image",
@@ -43,10 +43,10 @@ export async function prepareFileForUpload(file: File): Promise<{ b64: string; n
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
   const isImage = file.type.startsWith("image/") || ["jpg", "jpeg", "png"].includes(ext);
 
-  // Только изображения поддерживаются сейчас
+  // Только изображения поддерживаются
   if (!isImage) {
     throw new Error(
-      "Формат временно не поддерживается. Пожалуйста, загрузите фото или скан счёта в JPG/PNG."
+      "Поддерживается только JPG/PNG. Для PDF или Excel — откройте документ, сделайте скриншот или сохраните как изображение и загрузите."
     );
   }
 
