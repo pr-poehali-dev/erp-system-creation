@@ -3768,6 +3768,247 @@ def _normalize_postprocessed(cur, items: list) -> list:
     return result
 
 
+# ── TABLE TEMPLATES: поиск, применение, сохранение ───────────────────────────
+
+# Синонимы для сравнения заголовков
+_HEADER_SYNONYMS = {
+    "наименование": ["товар", "материал", "услуга", "номенклатура", "описание",
+                     "name", "item", "goods", "description", "product"],
+    "количество":   ["кол-во", "кол.", "кол", "qty", "кол-ть", "кол_во", "count"],
+    "цена":         ["цена за ед", "цена за единицу", "ед.цена", "price",
+                     "стоимость ед", "unit price", "цена/ед"],
+    "единица":      ["ед", "ед.", "ед.изм", "ед. изм", "единица изм", "uom",
+                     "unit", "measure", "ед.изм."],
+    "сумма":        ["итого", "стоимость", "total", "amount", "итог", "сумма руб"],
+    "номер":        ["№", "no", "n", "п/п", "п п", "поз", "позиция", "line"],
+}
+
+# Какие поля нас интересуют — только эти колонки можно маппить
+_MAPPABLE_FIELDS = ["material", "quantity", "unit_price", "unit", "total", "row_num", "skip"]
+
+# Метки полей для фронта
+_FIELD_LABELS = {
+    "material":   "Наименование",
+    "quantity":   "Количество",
+    "unit_price": "Цена",
+    "unit":       "Ед. изм.",
+    "total":      "Сумма",
+    "row_num":    "№ строки",
+    "skip":       "Пропустить",
+}
+
+
+def _normalize_header(h: str) -> str:
+    """Приводит заголовок к нижнему регистру, убирает лишние символы."""
+    import re
+    return re.sub(r'[^\w\s]', '', h.lower()).strip()
+
+
+def _header_to_canonical(h: str) -> str | None:
+    """Пытается привести заголовок к одному из канонических значений через синонимы."""
+    norm = _normalize_header(h)
+    for canonical, synonyms in _HEADER_SYNONYMS.items():
+        if norm == canonical or norm in synonyms:
+            return canonical
+        # Частичное вхождение (для составных заголовков типа «Кол-во шт»)
+        for syn in [canonical] + synonyms:
+            if syn in norm or norm in syn:
+                return canonical
+    return None
+
+
+def _headers_similarity(headers_a: list, headers_b: list) -> float:
+    """
+    Возвращает долю совпавших заголовков (0.0 – 1.0).
+    Сравнение через канонические синонимы.
+    """
+    if not headers_a or not headers_b:
+        return 0.0
+    canon_a = set(c for c in (_header_to_canonical(h) for h in headers_a) if c)
+    canon_b = set(c for c in (_header_to_canonical(h) for h in headers_b) if c)
+    if not canon_a or not canon_b:
+        # Fallback: посимвольное сравнение нормализованных строк
+        norm_a = set(_normalize_header(h) for h in headers_a)
+        norm_b = set(_normalize_header(h) for h in headers_b)
+        inter  = norm_a & norm_b
+        return len(inter) / max(len(norm_a), len(norm_b))
+    inter = canon_a & canon_b
+    return len(inter) / max(len(canon_a), len(canon_b))
+
+
+def _find_table_header_row(table_lines: list) -> tuple[list, int]:
+    """
+    Ищет строку-заголовок таблицы среди первых 5 строк.
+    Возвращает (список заголовков, индекс строки) или ([], -1).
+    """
+    import re
+    header_keywords = r'(?i)(наименование|товар|материал|кол|цена|сумма|ед|№|наим|услуг)'
+    for i, line in enumerate(table_lines[:6]):
+        parts = re.split(r'\s{2,}|\t', line.strip())
+        parts = [p.strip() for p in parts if p.strip()]
+        if len(parts) >= 3 and re.search(header_keywords, line):
+            return parts, i
+    return [], -1
+
+
+def _find_matching_template(cur, headers: list) -> dict | None:
+    """
+    Ищет шаблон в БД с совпадением > 70%.
+    Возвращает строку шаблона (dict) или None.
+    """
+    cur.execute(
+        f"SELECT id, name, headers, column_map, use_count FROM {SCHEMA}.table_templates ORDER BY use_count DESC, id ASC"
+    )
+    rows = cur.fetchall()
+    best_tmpl = None
+    best_score = 0.0
+    for row in rows:
+        tid, tname, theaders_raw, tcol_map, tuse = row
+        theaders = theaders_raw if isinstance(theaders_raw, list) else json.loads(theaders_raw or "[]")
+        score = _headers_similarity(headers, theaders)
+        if score > best_score:
+            best_score = score
+            best_tmpl = {"id": tid, "name": tname, "headers": theaders,
+                         "column_map": tcol_map if isinstance(tcol_map, dict) else json.loads(tcol_map or "{}"),
+                         "use_count": tuse, "score": round(score, 2)}
+    if best_tmpl and best_score >= 0.7:
+        return best_tmpl
+    return None
+
+
+def _apply_template(table_lines: list, col_map: dict, header_row_idx: int,
+                    supplier_name: str, invoice_date: str | None,
+                    invoice_number: str | None) -> list:
+    """
+    Парсит строки таблицы по col_map (без AI).
+    col_map: {"material": 1, "quantity": 3, "unit_price": 4, "unit": 2}  — 0-based индексы.
+    Возвращает список сырых позиций (dict) для _postprocess_items.
+    """
+    import re
+    # Данные строки — всё что после заголовка
+    data_lines = table_lines[header_row_idx + 1:]
+    result = []
+    for line in data_lines:
+        parts = re.split(r'\s{2,}|\t', line.strip())
+        parts = [p.strip() for p in parts if p.strip() != ""]
+        if not parts or len(parts) < 2:
+            continue
+        def get_col(field):
+            idx = col_map.get(field)
+            if idx is None: return None
+            try: return parts[int(idx)]
+            except IndexError: return None
+
+        material   = get_col("material")
+        qty_raw    = get_col("quantity")
+        price_raw  = get_col("unit_price")
+        unit_raw   = get_col("unit")
+
+        # Пропускаем строки без наименования или с нечисловой ценой
+        if not material or len(material) < 2:
+            continue
+        # Пропускаем итоговые строки
+        if re.match(r'(?i)^(итого|всего|ндс|в т\.ч\.|total)', material):
+            continue
+
+        result.append({
+            "material":       material,
+            "unit":           unit_raw or "шт",
+            "unit_price":     _safe_float(price_raw),
+            "quantity":       _safe_float(qty_raw),
+            "supplier_name":  supplier_name or None,
+            "invoice_date":   invoice_date,
+            "invoice_number": invoice_number,
+        })
+    return result
+
+
+def _ai_suggest_column_map(req_lib, headers: list) -> dict:
+    """
+    Просит AI предположить маппинг колонок по заголовкам.
+    Возвращает dict {field: col_index, ...}.
+    """
+    prompt = (
+        f"Дан список заголовков таблицы счёта (нумерация с 0): {json.dumps(headers, ensure_ascii=False)}.\n"
+        f"Определи, какой индекс (число) соответствует каждому полю:\n"
+        f"  material (наименование товара), quantity (количество), unit_price (цена за единицу), "
+        f"unit (единица измерения), total (сумма строки), row_num (номер строки).\n"
+        f"Верни ТОЛЬКО JSON-объект: {{\"material\":N,\"quantity\":N,\"unit_price\":N,\"unit\":N,\"total\":N,\"row_num\":N}}\n"
+        f"Если поле не найдено — ставь null. Только JSON, без пояснений."
+    )
+    sys_msg  = {"role": "system", "content": "Отвечай ТОЛЬКО JSON-объектом."}
+    user_msg = {"role": "user",   "content": prompt}
+    try:
+        raw = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=128)
+        return _parse_json_obj(raw)
+    except Exception:
+        return {}
+
+
+def _save_template(cur, name: str, headers: list, column_map: dict, ai_suggested: bool = False) -> int:
+    """Сохраняет новый шаблон в БД. Возвращает id."""
+    cur.execute(
+        f"INSERT INTO {SCHEMA}.table_templates (name, headers, column_map, ai_suggested) "
+        f"VALUES (%s,%s,%s,%s) RETURNING id",
+        (name, json.dumps(headers, ensure_ascii=False),
+         json.dumps(column_map, ensure_ascii=False), ai_suggested)
+    )
+    return cur.fetchone()[0]
+
+
+def _increment_template_use(cur, template_id: int):
+    cur.execute(
+        f"UPDATE {SCHEMA}.table_templates SET use_count=use_count+1, last_used_at=now(), updated_at=now() WHERE id=%s",
+        (template_id,)
+    )
+
+
+def get_table_templates(cur) -> list:
+    """CRUD: список всех шаблонов."""
+    cur.execute(
+        f"SELECT id, name, headers, column_map, ai_suggested, use_count, last_used_at, created_at "
+        f"FROM {SCHEMA}.table_templates ORDER BY use_count DESC, id ASC"
+    )
+    rows = cur.fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            "id":           r[0],
+            "name":         r[1],
+            "headers":      r[2] if isinstance(r[2], list) else json.loads(r[2] or "[]"),
+            "column_map":   r[3] if isinstance(r[3], dict) else json.loads(r[3] or "{}"),
+            "ai_suggested": r[4],
+            "use_count":    r[5],
+            "last_used_at": r[6].isoformat() if r[6] else None,
+            "created_at":   r[7].isoformat() if r[7] else None,
+        })
+    return result
+
+
+def delete_table_template(cur, template_id: int):
+    cur.execute(f"DELETE FROM {SCHEMA}.table_templates WHERE id=%s RETURNING id", (template_id,))
+    if not cur.fetchone():
+        return False
+    return True
+
+
+def rename_table_template(cur, template_id: int, new_name: str):
+    cur.execute(
+        f"UPDATE {SCHEMA}.table_templates SET name=%s, updated_at=now() WHERE id=%s RETURNING id",
+        (new_name, template_id)
+    )
+    return bool(cur.fetchone())
+
+
+def save_user_template(cur, req_lib, name: str, headers: list, column_map: dict) -> dict:
+    """
+    Сохраняет шаблон подтверждённый снабженцем.
+    Возвращает {id, name}.
+    """
+    tid = _save_template(cur, name, headers, column_map, ai_suggested=False)
+    return {"id": tid, "name": name}
+
+
 # ── Главная функция ───────────────────────────────────────────────────────────
 
 def recognize_invoice(cur, invoice_id: int):
@@ -3866,53 +4107,106 @@ def recognize_invoice(cur, invoice_id: int):
     if not raw_text.strip():
         return None, "Не удалось извлечь текст из файла."
 
-    # ── 3. Разбивка на зоны (ШАГ 2) ─────────────────────────────────────────
+    # ── 3. Разбивка на зоны ───────────────────────────────────────────────────
     zones = _split_document(raw_text)
+    table_lines = zones["table_lines"]
     debug_log.append(
         f"zones: header={len(zones['header'])}c "
-        f"table_lines={len(zones['table_lines'])} "
+        f"table_lines={len(table_lines)} "
         f"expected_count={zones['expected_count']}"
     )
 
-    # ── 4. AI-запросы (ШАГ 3) ────────────────────────────────────────────────
-    # 4a. Шапка → meta
+    # ── 4. Шапка → meta (всегда через AI) ────────────────────────────────────
     meta = _extract_header_meta(req_lib, zones["header"])
     supplier_name  = _clean(meta.get("supplier_name"))  or ""
     invoice_date   = _clean(meta.get("invoice_date"))
     invoice_number = _clean(meta.get("invoice_number"))
     debug_log.append(f"meta: supplier={supplier_name!r} date={invoice_date} num={invoice_number}")
 
-    # 4b. Чанки таблицы → items
-    table_lines = zones["table_lines"]
+    # ── 5. Поиск шаблона таблицы ─────────────────────────────────────────────
+    table_headers, header_row_idx = _find_table_header_row(table_lines)
+    matched_template   = None
+    template_used      = False
+    need_template_setup = False   # фронт получит этот флаг → покажет Мастер
+    ai_col_suggestion  = {}
     all_raw_items: list = []
 
-    if table_lines:
-        chunks = _make_chunks(table_lines, chunk_size=15)
-        debug_log.append(f"chunks: {len(chunks)} × ≤15 строк")
-        for ci, chunk in enumerate(chunks):
-            chunk_items = _extract_chunk_items(req_lib, chunk, supplier_name)
-            debug_log.append(f"  chunk[{ci}]: {len(chunk_items)} items")
-            all_raw_items.extend(chunk_items)
+    if table_headers:
+        debug_log.append(f"table_headers detected: {table_headers}")
+        matched_template = _find_matching_template(cur, table_headers)
+        if matched_template:
+            debug_log.append(
+                f"template matched: id={matched_template['id']} "
+                f"name={matched_template['name']!r} score={matched_template['score']}"
+            )
     else:
-        # Нет явной таблицы — пробуем единый запрос по всему тексту
-        debug_log.append("No table lines found — fallback to full-text single request")
-        sys_msg  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
-        user_msg = {"role": "user", "content": (
-            "Из следующего текста счёта извлеки ВСЕ позиции товаров.\n"
-            "Верни ТОЛЬКО JSON-массив: [{\"material\":\"...\",\"unit\":\"...\","
-            "\"unit_price\":число,\"quantity\":число}]\n\nТекст:\n" + raw_text[:4000]
-        )}
-        try:
-            fb_raw = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
-            fb_items, fb_err = _parse_json_list(fb_raw)
-            all_raw_items = fb_items or []
-            if fb_err: debug_log.append(f"  fallback parse error: {fb_err}")
-        except Exception as fe:
-            debug_log.append(f"  fallback error: {fe}")
+        debug_log.append("no table header row detected")
+
+    if matched_template:
+        # ── 5a. Шаблон найден — парсим без AI ────────────────────────────────
+        raw_from_template = _apply_template(
+            table_lines, matched_template["column_map"], header_row_idx,
+            supplier_name, invoice_date, invoice_number
+        )
+        debug_log.append(f"template parse: {len(raw_from_template)} raw items")
+
+        # Автоматический откат на AI если < 50% позиций полные
+        processed_preview = _postprocess_items(
+            raw_from_template, supplier_name, invoice_date, invoice_number
+        )
+        complete_ratio = (
+            sum(1 for p in processed_preview if p.get("unit_price") and p.get("quantity"))
+            / max(len(processed_preview), 1)
+        )
+        debug_log.append(f"template complete_ratio={complete_ratio:.2f}")
+
+        if complete_ratio >= 0.5:
+            all_raw_items  = raw_from_template
+            template_used  = True
+            _increment_template_use(cur, matched_template["id"])
+        else:
+            debug_log.append(
+                f"template quality too low ({complete_ratio:.0%}) — falling back to AI"
+            )
+            matched_template = None  # сбрасываем, идём в AI ветку
+
+    if not matched_template:
+        # ── 5b. Шаблон не найден / не подошёл — AI-конвейер ─────────────────
+        if table_headers:
+            # Получаем AI-предложение по маппингу колонок (для Мастера)
+            try:
+                ai_col_suggestion = _ai_suggest_column_map(req_lib, table_headers)
+                debug_log.append(f"ai_col_suggestion: {ai_col_suggestion}")
+            except Exception as ace:
+                debug_log.append(f"ai_col_suggestion error: {ace}")
+            need_template_setup = True  # фронт откроет Мастер
+
+        if table_lines:
+            chunks = _make_chunks(table_lines, chunk_size=15)
+            debug_log.append(f"AI chunks: {len(chunks)} × ≤15 строк")
+            for ci, chunk in enumerate(chunks):
+                chunk_items = _extract_chunk_items(req_lib, chunk, supplier_name)
+                debug_log.append(f"  chunk[{ci}]: {len(chunk_items)} items")
+                all_raw_items.extend(chunk_items)
+        else:
+            debug_log.append("No table lines — full-text fallback")
+            sys_msg  = {"role": "system", "content": "Ты — парсер счетов. Отвечай ТОЛЬКО JSON-массивом."}
+            user_msg = {"role": "user", "content": (
+                "Из следующего текста счёта извлеки ВСЕ позиции товаров.\n"
+                "Верни ТОЛЬКО JSON-массив: [{\"material\":\"...\",\"unit\":\"...\","
+                "\"unit_price\":число,\"quantity\":число}]\n\nТекст:\n" + raw_text[:4000]
+            )}
+            try:
+                fb_raw   = _call_polza(req_lib, [sys_msg, user_msg], max_tokens=4096)
+                fb_items, fb_err = _parse_json_list(fb_raw)
+                all_raw_items = fb_items or []
+                if fb_err: debug_log.append(f"  fallback parse error: {fb_err}")
+            except Exception as fe:
+                debug_log.append(f"  fallback error: {fe}")
 
     debug_log.append(f"total raw items before postprocess: {len(all_raw_items)}")
 
-    # ── 5. Постобработка (ШАГ 4) ─────────────────────────────────────────────
+    # ── 6. Постобработка ─────────────────────────────────────────────────────
     processed = _postprocess_items(
         all_raw_items,
         supplier_name=supplier_name,
@@ -3921,7 +4215,6 @@ def recognize_invoice(cur, invoice_id: int):
     )
     debug_log.append(f"after postprocess: {len(processed)} items")
 
-    # Проверка по expected_count из footer
     expected = zones.get("expected_count", 0)
     if expected > 0 and len(processed) < expected * 0.5:
         parse_error = (
@@ -3930,15 +4223,12 @@ def recognize_invoice(cur, invoice_id: int):
         )
         debug_log.append(f"LOW COVERAGE: got {len(processed)}/{expected}")
 
-    # ── 6. Матчинг справочников ───────────────────────────────────────────────
+    # ── 7. Матчинг справочников ───────────────────────────────────────────────
     norm_items = _normalize_postprocessed(cur, processed)
 
-    # ── 7. Сохраняем в БД ────────────────────────────────────────────────────
+    # ── 8. Сохраняем в БД ────────────────────────────────────────────────────
     all_ok = bool(norm_items) and all(i["complete"] for i in norm_items)
     status = "обработан" if (all_ok and not parse_error) else "требуется_проверка"
-
-    meta_date = invoice_date
-    meta_num  = invoice_number
 
     cur.execute(
         f"UPDATE {SCHEMA}.invoices SET recognition_status=%s, recognized_data=%s, updated_at=now() WHERE id=%s",
@@ -3946,12 +4236,22 @@ def recognize_invoice(cur, invoice_id: int):
     )
 
     return {
-        "status":      status,
-        "meta":        {"invoice_date": meta_date, "invoice_number": meta_num},
-        "items":       norm_items,
-        "items_count": len(norm_items),
-        "parse_error": parse_error,
-        "fallback_used": is_scan,
+        "status":             status,
+        "meta":               {"invoice_date": invoice_date, "invoice_number": invoice_number},
+        "items":              norm_items,
+        "items_count":        len(norm_items),
+        "parse_error":        parse_error,
+        "fallback_used":      is_scan,
+        # ── шаблонная информация ──
+        "template_used":      template_used,
+        "template":           {
+            "id":    matched_template["id"]   if matched_template else None,
+            "name":  matched_template["name"] if matched_template else None,
+            "score": matched_template["score"] if matched_template else None,
+        },
+        "need_template_setup": need_template_setup,
+        "table_headers":      table_headers,      # заголовки таблицы из документа
+        "ai_col_suggestion":  ai_col_suggestion,  # предложение AI для Мастера
         "debug": {
             "raw_response":     raw_text[:2000],
             "raw_response_2":   "",
@@ -4733,6 +5033,41 @@ def handler(event: dict, context) -> dict:
                     result = create_invoice(cur, body)
                     conn.commit()
                     return ok(result, 201)
+
+        # ── TABLE TEMPLATES ────────────────────────────────────────────────────
+        elif resource == "table_templates":
+            if user_role not in ("director", "supply_director", "supplier"):
+                return err("Нет прав", 403)
+            if method == "GET":
+                return ok(get_table_templates(cur))
+            elif method == "POST":
+                action = body.get("action", "")
+                if action == "save":
+                    import requests as _rl
+                    name       = (body.get("name") or "").strip()
+                    headers    = body.get("headers") or []
+                    column_map = body.get("column_map") or {}
+                    if not headers or not column_map:
+                        return err("headers и column_map обязательны")
+                    if not name:
+                        name = "Шаблон: " + " / ".join(str(h) for h in headers[:4])
+                    result = save_user_template(cur, _rl, name, headers, column_map)
+                    conn.commit()
+                    return ok(result, 201)
+                elif action == "delete":
+                    tid = int(body["id"])
+                    ok_res = delete_table_template(cur, tid)
+                    if not ok_res: return err("Шаблон не найден", 404)
+                    conn.commit()
+                    return ok({"ok": True})
+                elif action == "rename":
+                    tid      = int(body["id"])
+                    new_name = (body.get("name") or "").strip()
+                    if not new_name: return err("name обязателен")
+                    ok_res = rename_table_template(cur, tid, new_name)
+                    if not ok_res: return err("Шаблон не найден", 404)
+                    conn.commit()
+                    return ok({"ok": True})
 
         # ── PURCHASE REQUESTS ──────────────────────────────────────────────────
         elif resource == "purchase_requests":

@@ -7,10 +7,11 @@ import MaterialsTab from "@/components/procurement/MaterialsTab";
 import InvoicesTab from "@/components/procurement/InvoicesTab";
 import PurchaseRequestsTab from "@/components/procurement/PurchaseRequestsTab";
 import PurchasePlanTab from "@/components/procurement/PurchasePlanTab";
+import TemplatesTab from "@/components/procurement/TemplatesTab";
 
 interface Props { role: Role; }
 
-type ProcTab = "requests" | "suppliers" | "materials" | "invoices" | "purchase_requests" | "plan";
+type ProcTab = "requests" | "suppliers" | "materials" | "invoices" | "purchase_requests" | "plan" | "templates";
 
 const STATUS_MAP: Record<string, { label: string; cls: string }> = {
   new:         { label: "Новая",     cls: "bg-amber-100 text-amber-700 border-amber-200" },
@@ -41,6 +42,8 @@ const TABS: { key: ProcTab; label: string; icon: string; roles?: Role[] }[] = [
   { key: "invoices",          label: "Счета",               icon: "FileText" },
   { key: "purchase_requests", label: "Заявки на закупку",   icon: "ShoppingCart" },
   { key: "plan",              label: "Плановые закупки",    icon: "CalendarRange" },
+  { key: "templates",         label: "Шаблоны",             icon: "BookOpen",
+    roles: ["director", "supply_director", "supplier"] },
 ];
 
 export default function Procurement({ role }: Props) {
@@ -149,7 +152,7 @@ export default function Procurement({ role }: Props) {
 
       {/* Вкладки */}
       <div className="flex items-center border-b border-border gap-0 overflow-x-auto">
-        {TABS.map(t => (
+        {TABS.filter(t => !t.roles || t.roles.includes(role)).map(t => (
           <button key={t.key} onClick={() => setActiveTab(t.key)}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-[13px] font-medium border-b-2 whitespace-nowrap transition-colors ${
               activeTab === t.key ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
@@ -238,6 +241,7 @@ export default function Procurement({ role }: Props) {
       {activeTab === "invoices"          && <InvoicesTab role={role} />}
       {activeTab === "purchase_requests" && <PurchaseRequestsTab />}
       {activeTab === "plan"              && <PurchasePlanTab />}
+      {activeTab === "templates"         && <TemplatesTab />}
 
       {/* Модалка создания заявки на материал */}
       {modalOpen && (

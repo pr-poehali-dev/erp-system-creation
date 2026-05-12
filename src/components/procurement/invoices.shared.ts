@@ -127,6 +127,30 @@ export const EMPTY_AI_ITEM: AiItem = {
   quality: "ok", price_fixed: false,
 };
 
+// Шаблон таблицы
+export interface TableTemplate {
+  id: number;
+  name: string;
+  headers: string[];
+  /** { material: 1, quantity: 3, unit_price: 4, unit: 2, ... } — 0-based индексы */
+  column_map: Record<string, number | null>;
+  ai_suggested: boolean;
+  use_count: number;
+  last_used_at: string | null;
+  created_at: string | null;
+}
+
+// Маппируемые поля и их метки
+export const MAPPABLE_FIELDS: { key: string; label: string }[] = [
+  { key: "material",   label: "Наименование" },
+  { key: "quantity",   label: "Количество"   },
+  { key: "unit_price", label: "Цена"         },
+  { key: "unit",       label: "Ед. изм."     },
+  { key: "total",      label: "Сумма"        },
+  { key: "row_num",    label: "№ строки"     },
+  { key: "skip",       label: "Пропустить"   },
+];
+
 // Полный ответ от бэкенда после AI-распознавания
 export interface AiRecognizeResult {
   status: string;
@@ -135,6 +159,12 @@ export interface AiRecognizeResult {
   parse_error: string | null;
   fallback_used?: boolean;
   items_count?: number;
+  // ── шаблонная информация ──
+  template_used?: boolean;
+  template?: { id: number | null; name: string | null; score: number | null };
+  need_template_setup?: boolean;
+  table_headers?: string[];
+  ai_col_suggestion?: Record<string, number | null>;
   debug: {
     raw_response: string | null;
     raw_response_2?: string | null;
