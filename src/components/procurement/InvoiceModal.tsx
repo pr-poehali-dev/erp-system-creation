@@ -152,29 +152,6 @@ export default function InvoiceModal({
           {/* ── Поля формы ── */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-[13px] font-medium mb-1">Поставщик</label>
-              <select value={form.supplier_id} onChange={e => setForm(p => ({ ...p, supplier_id: e.target.value }))}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
-                <option value="">— не указан —</option>
-                {suppliers.filter(s => s.name !== "(не указан)").map(s =>
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                )}
-              </select>
-            </div>
-            <div>
-              <label className="block text-[13px] font-medium mb-1">Материал</label>
-              <select value={form.material_id} onChange={e => setForm(p => ({ ...p, material_id: e.target.value }))}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
-                <option value="">— не указан —</option>
-                {materials.filter(m => m.name !== "(не указан)").map(m =>
-                  <option key={m.id} value={m.id}>{m.name} ({m.unit})</option>
-                )}
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
               <label className="block text-[13px] font-medium mb-1">Дата счёта</label>
               <input type="date" value={form.invoice_date}
                 onChange={e => setForm(p => ({ ...p, invoice_date: e.target.value }))}

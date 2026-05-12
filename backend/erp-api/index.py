@@ -4551,7 +4551,7 @@ def create_invoice(cur, body):
     return {"id": cur.fetchone()[0]}
 
 def update_invoice(cur, iid, body):
-    """Обновить счёт (статус, распознанные данные, поля)."""
+    """Обновить счёт (статус, распознанные данные, поля, включая supplier_id/material_id)."""
     sets, vals = [], []
     fields_map = {
         'invoice_date':'invoice_date', 'invoice_number':'invoice_number',
@@ -4565,6 +4565,13 @@ def update_invoice(cur, iid, body):
             if col == 'recognition_status' and val not in ('новый','обработан','требуется_проверка'):
                 val = 'требуется_проверка'
             sets.append(f"{col}=%s"); vals.append(val)
+    # supplier_id и material_id — отдельная обработка (FK с заглушкой 0)
+    if 'supplier_id' in body:
+        sid = body['supplier_id']
+        sets.append("supplier_id=%s"); vals.append(int(sid) if sid else 0)
+    if 'material_id' in body:
+        mid = body['material_id']
+        sets.append("material_id=%s"); vals.append(int(mid) if mid else 0)
     if not sets: return False
     sets.append("updated_at=now()"); vals.append(int(iid))
     cur.execute(f"UPDATE {SCHEMA}.invoices SET {', '.join(sets)} WHERE id=%s", vals)
