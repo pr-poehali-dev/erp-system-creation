@@ -228,28 +228,42 @@ const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечени
 {"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
 
 // ── Вызов DeepSeek API (текст) ────────────────────────────────────────────────
+// Кастомная ошибка с HTTP-статусом для диагностики
+class DeepSeekError extends Error {
+  constructor(public readonly status: number | null, public readonly body: string) {
+    super(`DeepSeek ${status ?? "network"}: ${body.slice(0, 300)}`);
+  }
+}
+
 async function _callDeepSeekRaw(userContent: string, maxTokens = 16384): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
   try {
-    const resp = await fetch(DS_API_URL, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${DS_API_KEY}`, "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: DS_MODEL,
-        messages: [{ role: "user", content: userContent }],
-        temperature: 0,
-        max_tokens: maxTokens,
-      }),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(DS_API_URL, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${DS_API_KEY}`, "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model: DS_MODEL,
+          messages: [{ role: "user", content: userContent }],
+          temperature: 0,
+          max_tokens: maxTokens,
+        }),
+      });
+    } catch (netErr) {
+      // Сетевая ошибка (таймаут, CORS, offline)
+      const msg = netErr instanceof Error ? netErr.message : String(netErr);
+      throw new DeepSeekError(null, msg);
+    }
     if (!resp.ok) {
-      const t = await resp.text();
-      throw new Error(`DeepSeek ${resp.status}: ${t.slice(0, 200)}`);
+      const t = await resp.text().catch(() => resp.statusText);
+      throw new DeepSeekError(resp.status, t);
     }
     const data    = await resp.json();
     const content: string = data?.choices?.[0]?.message?.content ?? "";
-    if (!content.trim()) throw new Error("DeepSeek вернул пустой ответ");
+    if (!content.trim()) throw new DeepSeekError(resp.status, "пустой ответ от модели");
     return content;
   } finally {
     clearTimeout(timer);
@@ -500,14 +514,16 @@ const _PDF_DEEPSEEK_PROMPT =
 
 async function _callDeepSeekPdf(pdfB64: string): Promise<Record<string, unknown>> {
   const content = `${_PDF_DEEPSEEK_PROMPT}\n\nPDF (base64):\n${pdfB64}`;
-  // Явно передаём max_tokens=16384 чтобы ответ не обрывался
   const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content, 16384));
+  // Попытка 1
   try {
     return await run();
-  } catch {
-    await new Promise(r => setTimeout(r, 2000));
-    return await run();
+  } catch (e1) {
+    console.warn("[PDF] DeepSeek попытка 1 провалилась:", e1 instanceof Error ? e1.message : e1);
   }
+  // Попытка 2 (через 2 сек, пробрасываем ошибку наружу для диагностики)
+  await new Promise(r => setTimeout(r, 2000));
+  return await run(); // бросает DeepSeekError если снова ошибка
 }
 
 /**
@@ -574,9 +590,9 @@ export async function recognizeViaPolza(
       return { success: true, ai_obj: merged, items, raw: JSON.stringify(merged) };
     }
 
-    // ── PDF: Попытка 1 — DeepSeek (текст, игнорирует QR/графику) ────────────
+    // ── PDF → DeepSeek (2 попытки, точная диагностика ошибок) ───────────────
     if (isPdf) {
-      onProgress?.("Распознавание PDF через DeepSeek...");
+      onProgress?.("DeepSeek обрабатывает PDF...");
       try {
         const dsResult = await _callDeepSeekPdf(file_b64);
         const dsItems  = Array.isArray(dsResult.items) ? dsResult.items as unknown[] : [];
@@ -584,12 +600,24 @@ export async function recognizeViaPolza(
           console.info("[PDF] DeepSeek успешно:", dsItems.length, "позиций");
           return { success: true, ai_obj: dsResult, items: dsItems, raw: JSON.stringify(dsResult) };
         }
-        console.warn("[PDF] DeepSeek вернул пустые items, переключаемся на Gemini");
+        // Ответ получен, но позиций нет
+        return { success: false, ai_obj: dsResult, items: [], raw: JSON.stringify(dsResult),
+          error: `Ошибка DeepSeek: 200 — модель не нашла позиций в PDF. Файл: ${file_name}. Попробуйте загрузить скан в JPG.` };
       } catch (e) {
-        console.warn("[PDF] DeepSeek ошибка:", e instanceof Error ? e.message : e);
+        // Формируем точное диагностическое сообщение
+        let errMsg: string;
+        if (e instanceof DeepSeekError) {
+          const statusStr = e.status !== null ? String(e.status) : "network";
+          const bodyShort = e.body.slice(0, 300);
+          errMsg = `Ошибка DeepSeek: ${statusStr} — ${bodyShort}. Файл: ${file_name}. Попробуйте загрузить скан в JPG.`;
+        } else {
+          errMsg = `Ошибка DeepSeek: ${e instanceof Error ? e.message : String(e)}. Файл: ${file_name}.`;
+        }
+        console.warn("[PDF] DeepSeek финальная ошибка:", errMsg);
+        return { success: false, ai_obj: {}, items: [], raw: "", error: errMsg };
       }
 
-      // ── Попытка 2 — Gemini (рендер PDF → JPEG → изображение) ──────────────
+      /* ── FALLBACK Gemini (закомментирован, включить если DeepSeek нестабилен) ──
       onProgress?.("Переключение на резервный метод...");
       try {
         const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
@@ -602,12 +630,12 @@ export async function recognizeViaPolza(
             return { success: true, ai_obj, items, raw: raw2 };
           }
         }
-      } catch (e) {
-        console.warn("[PDF] Gemini fallback ошибка:", e instanceof Error ? e.message : e);
+      } catch (eFb) {
+        console.warn("[PDF] Gemini fallback ошибка:", eFb instanceof Error ? eFb.message : eFb);
       }
-
       return { success: false, ai_obj: {}, items: [], raw: "",
         error: "Не удалось распознать счёт. Попробуйте загрузить скан в JPG." };
+      ── END FALLBACK ── */
     }
 
     // ── JPG / PNG ──────────────────────────────────────────────────────────────
