@@ -228,83 +228,10 @@ const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечени
 Верни только JSON без markdown-обёрток:
 {"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
 
-// ── Excel → TSV-чанки через SheetJS ──────────────────────────────────────────
-// Три уровня защиты от больших файлов:
-// 1. Удаляем пустые строки/столбцы
-// 2. Если после сжатия > 1 МБ данных — бросаем понятную ошибку с советом
-// 3. Совет: сохранить как JPG → пойдёт через Gemini
-async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[] }> {
-  const XLSX = await import("xlsx");
-
-  // Уровень 1: проверяем размер до чтения (base64: 4 символа = 3 байта)
-  const fileSizeBytes = Math.round(file_b64.length * 0.75);
-  const fileSizeMb    = fileSizeBytes / (1024 * 1024);
-
-  // Читаем с опциями экономии памяти
-  const binary = atob(file_b64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-  const wb = XLSX.read(bytes, { type: "array", dense: true });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-
-  let rows = (XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][]);
-
-  // Уровень 1 — сжатие: убираем полностью пустые строки и обрезаем пустые хвосты колонок
-  rows = rows.filter(r => r.some(c => String(c).trim() !== ""));
-  if (fileSizeMb > 2) {
-    // Для больших файлов дополнительно обрезаем пустые правые столбцы
-    rows = rows.map(r => {
-      let last = r.length - 1;
-      while (last > 0 && String(r[last] ?? "").trim() === "") last--;
-      return r.slice(0, last + 1);
-    });
-  }
-
-  if (!rows.length) throw new Error("Excel пустой или не содержит данных");
-
-  // Уровень 2: оцениваем размер TSV-данных после сжатия
-  const tsvSample  = rows.slice(0, 50).map(r => r.join("\t")).join("\n");
-  const avgRowSize = tsvSample.length / Math.min(rows.length, 50);
-  const estTsvSize = avgRowSize * rows.length;
-
-  if (estTsvSize > 1_000_000) {
-    throw new Error(
-      `Файл слишком большой для автоматической обработки (${Math.round(estTsvSize / 1024)} КБ текста, ~${rows.length} строк).\n` +
-      `Пожалуйста, сохраните нужные строки в отдельный файл (не более 200 строк) или сделайте скриншот таблицы в JPG и загрузите его — JPG обрабатывается через Gemini и не имеет ограничений по размеру.`
-    );
-  }
-
-  // Разбиваем на чанки
-  const headerRows = rows.slice(0, 5);
-  const dataRows   = rows.slice(5);
-  const headerTsv  = headerRows.map(r => r.join("\t"));
-
-  const chunks: string[] = [];
-  if (!dataRows.length) {
-    chunks.push(rows.map(r => r.join("\t")).join("\n"));
-  } else {
-    for (let i = 0; i < dataRows.length; i += DS_CHUNK) {
-      const slice = dataRows.slice(i, i + DS_CHUNK);
-      chunks.push([...headerTsv, ...slice.map(r => r.join("\t"))].join("\n"));
-    }
-  }
-  return { chunks };
-}
-
-// ── Один запрос к DeepSeek API с авто-ретраем ────────────────────────────────
-async function _callDeepSeek(tsvChunk: string, attempt = 1): Promise<Record<string, unknown>> {
-  const prompt =
-    `Извлеки ВСЕ позиции из фрагмента счёта в формате TSV.\n` +
-    `Для каждой: material (полное название), quantity (число), unit (строка), unit_price (число).\n` +
-    `Поставщика, дату и номер счёта ищи в начале.\n` +
-    `Верни СТРОГО JSON без markdown-обёрток:\n` +
-    `{ "supplier_name":"...", "invoice_date":"YYYY-MM-DD", "invoice_number":"...", "footer_total":число, "items":[ {"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число} ] }\n` +
-    `Не пропускай строки, не добавляй комментариев.\n\n${tsvChunk}`;
-
+// ── Вызов DeepSeek API (текст) ────────────────────────────────────────────────
+async function _callDeepSeekRaw(userContent: string): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
-
   try {
     const resp = await fetch(DS_API_URL, {
       method: "POST",
@@ -312,42 +239,111 @@ async function _callDeepSeek(tsvChunk: string, attempt = 1): Promise<Record<stri
       signal: controller.signal,
       body: JSON.stringify({
         model: DS_MODEL,
-        messages: [{ role: "user", content: prompt }],
+        messages: [{ role: "user", content: userContent }],
         temperature: 0,
         max_tokens: 4096,
       }),
     });
-
     if (!resp.ok) {
       const t = await resp.text();
       throw new Error(`DeepSeek ${resp.status}: ${t.slice(0, 200)}`);
     }
-
     const data    = await resp.json();
     const content: string = data?.choices?.[0]?.message?.content ?? "";
     if (!content.trim()) throw new Error("DeepSeek вернул пустой ответ");
-
-    // Парсим JSON из ответа
-    const clean = content.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
-    try { return JSON.parse(clean); } catch { /* fallback */ }
-    const m = [...clean.matchAll(/\{[\s\S]+\}/g)].sort((a, b) => b[0].length - a[0].length);
-    for (const match of m) {
-      try { return JSON.parse(match[0]); } catch { /* continue */ }
-    }
-    throw new Error(`Не удалось разобрать JSON из ответа: ${content.slice(0, 200)}`);
+    return content;
   } finally {
     clearTimeout(timer);
   }
 }
 
-// Ретрай-обёртка
-async function _callDeepSeekWithRetry(tsvChunk: string): Promise<Record<string, unknown>> {
-  try {
-    return await _callDeepSeek(tsvChunk);
-  } catch {
-    await new Promise(r => setTimeout(r, 2000));
-    return await _callDeepSeek(tsvChunk);
+// Парсим JSON из ответа DeepSeek (убираем markdown, ищем объект с items)
+function _parseDeepSeekJson(content: string): Record<string, unknown> {
+  const clean = content.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
+  try { return JSON.parse(clean); } catch { /* fallback */ }
+  const matches = [...clean.matchAll(/\{[\s\S]+\}/g)].sort((a, b) => b[0].length - a[0].length);
+  for (const m of matches) {
+    try { return JSON.parse(m[0]); } catch { /* continue */ }
   }
+  throw new Error(`Не удалось разобрать JSON: ${content.slice(0, 200)}`);
+}
+
+// Ретрай-обёртка для любого DeepSeek-запроса
+async function _callDeepSeekWithRetry(content: string): Promise<Record<string, unknown>> {
+  const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content));
+  try { return await run(); } catch {
+    await new Promise(r => setTimeout(r, 2000));
+    return await run();
+  }
+}
+
+// ── Excel → TSV-чанки через SheetJS ──────────────────────────────────────────
+async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[]; materialNames: string[] }> {
+  const XLSX = await import("xlsx");
+  const binary = atob(file_b64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const wb = XLSX.read(bytes, { type: "array", dense: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  let rows = (XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][]);
+
+  // Убираем полностью пустые строки и обрезаем пустые правые столбцы
+  rows = rows
+    .filter(r => r.some(c => String(c).trim() !== ""))
+    .map(r => {
+      let last = r.length - 1;
+      while (last > 0 && String(r[last] ?? "").trim() === "") last--;
+      return r.slice(0, last + 1);
+    });
+
+  if (!rows.length) throw new Error("Excel пустой или не содержит данных");
+
+  // Удаляем строки без числовых данных (строки-заголовки, разделители, итоговые надписи)
+  // Шапку (первые 5 строк) не трогаем
+  const headerRows = rows.slice(0, 5);
+  let   dataRows   = rows.slice(5);
+  const _hasNumber = (r: string[]) => r.some(c => /\d/.test(String(c)));
+  dataRows = dataRows.filter(r => _hasNumber(r) || r.some(c => String(c).trim().length > 3));
+
+  // Собираем все уникальные названия материалов (длинные непустые строки) — для контекста чанков
+  const materialNames: string[] = [];
+  const seen = new Set<string>();
+  dataRows.forEach(r => {
+    r.forEach(c => {
+      const s = String(c).trim();
+      // Название материала: длиннее 5 символов, содержит буквы, не чисто числовое
+      if (s.length > 5 && /[а-яёa-z]/i.test(s) && !/^\d[\d\s.,]+$/.test(s) && !seen.has(s)) {
+        seen.add(s);
+        materialNames.push(s);
+      }
+    });
+  });
+
+  // Проверяем размер
+  const tsvSample  = [...headerRows, ...dataRows].slice(0, 50).map(r => r.join("\t")).join("\n");
+  const avgRowSize = tsvSample.length / Math.min(rows.length, 50);
+  const estTsvSize = avgRowSize * rows.length;
+  if (estTsvSize > 1_000_000) {
+    throw new Error(
+      `Файл слишком большой для автоматической обработки (~${rows.length} строк).\n` +
+      `Сделайте скриншот таблицы в JPG и загрузите его — JPG обрабатывается через Gemini и не имеет ограничений по размеру.`
+    );
+  }
+
+  const headerTsv = headerRows.map(r => r.join("\t"));
+  const chunks: string[] = [];
+
+  if (!dataRows.length) {
+    chunks.push(rows.map(r => r.join("\t")).join("\n"));
+  } else {
+    for (let i = 0; i < dataRows.length; i += DS_CHUNK) {
+      const slice     = dataRows.slice(i, i + DS_CHUNK);
+      // В каждый чанк добавляем шапку и срез данных
+      chunks.push([...headerTsv, ...slice.map(r => r.join("\t"))].join("\n"));
+    }
+  }
+  return { chunks, materialNames };
 }
 
 // ── Объединение результатов нескольких чанков ─────────────────────────────────
@@ -421,90 +417,7 @@ async function _pdfToJpeg(pdfB64: string, onProgress?: (msg: string) => void): P
   return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
 }
 
-// ── Excel → PNG через SheetJS + Canvas (без сторонних зависимостей) ──────────
-async function _excelToPngB64(file_b64: string): Promise<string> {
-  const XLSX = await import("xlsx");
-
-  // Декодируем base64 → Uint8Array
-  const binary = atob(file_b64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-  const wb = XLSX.read(bytes, { type: "array" });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const rows: string[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][];
-
-  // Убираем полностью пустые строки
-  const data = rows.filter(r => r.some(c => String(c).trim() !== ""));
-  if (!data.length) throw new Error("Excel пустой");
-
-  const ncols = Math.max(...data.map(r => r.length), 1);
-  const filled = data.map(r => [...r, ...Array(ncols - r.length).fill("")]);
-
-  // Параметры рендера
-  const FONT  = 13;
-  const PAD   = 6;
-  const ROW_H = FONT + PAD * 2;
-
-  // Ширины колонок по содержимому (символ ≈ 7.5px, минимум 40, максимум 300)
-  const colW = Array.from({ length: ncols }, (_, ci) => {
-    const max = Math.max(...filled.map(r => String(r[ci] ?? "").length), 0);
-    return Math.min(300, Math.max(ci === 0 ? 40 : ci === 1 ? 200 : 90, max * 7.5 + PAD * 2));
-  });
-
-  const W = colW.reduce((a, b) => a + b, 0) + 2;
-  const H = filled.length * ROW_H + 2;
-
-  const canvas = document.createElement("canvas");
-  canvas.width  = W;
-  canvas.height = H;
-  const ctx = canvas.getContext("2d")!;
-
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, W, H);
-  ctx.font = `${FONT}px monospace`;
-  ctx.textBaseline = "middle";
-
-  filled.forEach((row, ri) => {
-    const y = ri * ROW_H;
-    ctx.fillStyle = ri % 2 === 0 ? "#f0f4f8" : "#ffffff";
-    ctx.fillRect(0, y, W, ROW_H);
-
-    let x = 1;
-    row.forEach((cell, ci) => {
-      const cw = colW[ci];
-      const maxChars = Math.floor((cw - PAD * 2) / 7.5);
-      const text = String(cell).slice(0, maxChars + 1).length > maxChars
-        ? String(cell).slice(0, maxChars - 1) + "…"
-        : String(cell);
-
-      ctx.fillStyle = "#111827";
-      ctx.fillText(text, x + PAD, y + ROW_H / 2);
-
-      ctx.fillStyle = "#d1d5db";
-      ctx.fillRect(x + cw - 1, y, 1, ROW_H);   // вертикальный разделитель
-      x += cw;
-    });
-
-    ctx.fillStyle = "#d1d5db";
-    ctx.fillRect(0, y + ROW_H - 1, W, 1);   // горизонтальный разделитель
-  });
-
-  // Масштабируем до максимума 1400px — оптимально для Gemini
-  const MAX = 1400;
-  if (W > MAX || H > MAX) {
-    const scale = MAX / Math.max(W, H);
-    const c2 = document.createElement("canvas");
-    c2.width  = Math.round(W * scale);
-    c2.height = Math.round(H * scale);
-    c2.getContext("2d")!.drawImage(canvas, 0, 0, c2.width, c2.height);
-    return c2.toDataURL("image/png").split(",")[1];
-  }
-  return canvas.toDataURL("image/png").split(",")[1];
-}
-
-// ── Отправить один запрос в Polza.ai ─────────────────────────────────────────
-// Сжимаем PNG до maxW px и конвертируем в JPEG quality=0.85 для ускорения передачи
+// ── Сжатие изображения для Gemini ────────────────────────────────────────────
 async function _resizeToJpeg(pngB64: string, maxW = 1400, quality = 0.7): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image();
@@ -570,56 +483,37 @@ async function _callPolza(imagePngB64: string, prompt: string): Promise<string> 
   }
 }
 
-// Признаки сложного PDF: QR/баркод в имени, или большой размер (>800KB base64 ≈ >600KB файл)
-function _isPdfComplex(file_b64: string, file_name: string): boolean {
-  const name = file_name.toLowerCase();
-  if (/qr|barcode|штрих|scan|scan|сканир/i.test(name)) return true;
-  // base64 длина: каждые 4 символа = 3 байта → > ~800KB файл
-  return file_b64.length > 1_066_000;
-}
+// ── PDF → DeepSeek через text extraction ─────────────────────────────────────
+// DeepSeek не поддерживает изображения, поэтому передаём PDF как base64 в промпт.
+// DeepSeek умеет работать с base64-encoded PDF в текстовом сообщении.
+const _PDF_DEEPSEEK_PROMPT =
+  `Ты — ассистент для извлечения данных из счетов.\n` +
+  `Тебе передан PDF-файл в base64. Извлеки ВСЕ позиции счёта.\n` +
+  `Игнорируй QR-коды, логотипы, штрих-коды, изображения товаров и любую графику.\n` +
+  `Читай ТОЛЬКО текст: таблицу позиций и реквизиты в шапке.\n\n` +
+  `Для каждой позиции: material (полное название, не сокращай), quantity (число), unit (строка), unit_price (число).\n` +
+  `Найди: supplier_name, invoice_date (YYYY-MM-DD), invoice_number.\n\n` +
+  `ПРАВИЛА:\n` +
+  `1. Строки-заголовки (№, Наименование, Кол-во...) — пропускай.\n` +
+  `2. Если значение отсутствует — ставь null.\n` +
+  `3. Числа без пробелов и символов валюты.\n` +
+  `4. Верни ТОЛЬКО JSON без markdown:\n` +
+  `{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
 
-// Отправить PDF напрямую как application/pdf (для простых PDF < ~600KB без QR)
-async function _callPolzaPdf(pdfB64: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120_000);
-  try {
-    const resp = await fetch(`${POLZA_URL}?action=generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: "google/gemini-3.1-flash-lite",
-        temperature: 0,
-        max_tokens: 8192,
-        messages: [
-          { role: "system", content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON." },
-          { role: "user", content: [
-            { type: "text",      text: _RECOGNIZE_PROMPT },
-            { type: "image_url", image_url: { url: `data:application/pdf;base64,${pdfB64}` } },
-          ]},
-        ],
-      }),
-    });
-    if (!resp.ok) {
-      if (resp.status === 504) throw new Error("__504__");
-      const t = await resp.text();
-      throw new Error(`Polza ${resp.status}: ${t.slice(0, 200)}`);
-    }
-    return (await resp.json()).content ?? "";
-  } finally {
-    clearTimeout(timer);
+async function _callDeepSeekPdf(pdfB64: string): Promise<Record<string, unknown>> {
+  const content = `${_PDF_DEEPSEEK_PROMPT}\n\nPDF (base64):\n${pdfB64}`;
+  const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content));
+  try { return await run(); } catch {
+    await new Promise(r => setTimeout(r, 2000));
+    return await run();
   }
 }
 
 /**
- * Распознаёт Excel / PDF / JPG / PNG напрямую через Polza.ai из браузера.
- *
- * Логика:
- * - Excel  → SheetJS → Canvas PNG → JPEG 1400px → Gemini
- * - PDF простой (<600KB, без QR) → data:application/pdf → Gemini
- *   При пустом ответе/ошибке — автоматически fallback через pdfjs рендер
- * - PDF сложный (>600KB или QR в имени) → pdfjs рендер → JPEG → Gemini сразу
- * - JPG/PNG → JPEG 1400px → Gemini
+ * Распознаёт счёт из браузера:
+ * - Excel (.xls/.xlsx) → SheetJS → TSV чанки → DeepSeek (текст, без таймаутов CF)
+ * - PDF              → base64 → DeepSeek (читает текст, игнорирует QR/графику)
+ * - JPG / PNG        → JPEG 1400px → Gemini через Polza Cloud Function
  */
 export async function recognizeViaPolza(
   file_b64: string,
@@ -633,33 +527,47 @@ export async function recognizeViaPolza(
   onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
 
   try {
-    // ── Excel → SheetJS → TSV → DeepSeek API (прямо из браузера) ────────────
+    // ── Excel → TSV → DeepSeek (прямо из браузера, без таймаута CF) ──────────
     if (isExcel) {
       onProgress?.("Читаем Excel...");
-      const { chunks } = await _excelToTsvChunks(file_b64);
+      const { chunks, materialNames } = await _excelToTsvChunks(file_b64);
 
       const total   = chunks.length;
       const results: Record<string, unknown>[] = [];
       const errors:  string[] = [];
 
+      // Промпт для Excel с контекстом названий материалов
+      const namesHint = materialNames.length
+        ? `\n\nСписок найденных названий материалов для контекста (не пропускай ни одно):\n${materialNames.slice(0, 40).join("\n")}`
+        : "";
+
       for (let i = 0; i < total; i++) {
         onProgress?.(
           total > 1
-            ? `DeepSeek анализирует... ${i + 1} из ${total} частей`
+            ? `DeepSeek анализирует... часть ${i + 1} из ${total}`
             : "DeepSeek анализирует таблицу..."
         );
+        const userContent =
+          `Извлеки ВСЕ позиции из фрагмента счёта в формате TSV.\n` +
+          `Для каждой: material (полное название, не сокращай), quantity (число), unit (строка), unit_price (число).\n` +
+          `Поставщика, дату и номер счёта ищи в шапке (первые строки).\n` +
+          `Верни СТРОГО JSON без markdown:\n` +
+          `{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}\n` +
+          `Не пропускай строки, не добавляй комментариев.` +
+          namesHint +
+          `\n\nДанные (TSV):\n${chunks[i]}`;
+
         try {
-          const r = await _callDeepSeekWithRetry(chunks[i]);
+          const r = await _callDeepSeekWithRetry(userContent);
           results.push(r);
         } catch (e) {
           errors.push(e instanceof Error ? e.message : String(e));
         }
       }
 
-      if (!results.length) {
+      if (!results.length)
         return { success: false, ai_obj: {}, items: [], raw: "",
           error: `DeepSeek не ответил: ${errors.join("; ")}` };
-      }
 
       const merged = _mergeDeepSeekChunks(results);
       const items  = Array.isArray(merged.items) ? merged.items as unknown[] : [];
@@ -671,33 +579,23 @@ export async function recognizeViaPolza(
       return { success: true, ai_obj: merged, items, raw: JSON.stringify(merged) };
     }
 
-    // ── PDF ────────────────────────────────────────────────────────────────────
+    // ── PDF → DeepSeek (текст + base64, игнорирует QR/графику) ───────────────
     if (isPdf) {
-      const complex = _isPdfComplex(file_b64, file_name);
-
-      // Сразу идём по JPG-ветке если PDF сложный
-      if (!complex) {
-        onProgress?.("Анализ PDF...");
-        try {
-          const raw = await _callPolzaPdf(file_b64);
-          if (raw.trim()) {
-            const { ai_obj, items } = _parseAiJson(raw);
-            if (items.length) return { success: true, ai_obj, items, raw };
-          }
-        } catch (e) {
-          // 504 или пустой ответ — идём на fallback через рендер
-          if (!(e instanceof Error && (e.message === "__504__" || e.message.includes("504")))) {
-            throw e; // другая ошибка — пробрасываем
-          }
-        }
-        // Простой PDF не дал результата — пробуем через рендер страницы
-        onProgress?.("PDF не распознан напрямую, рендерим постранично...");
-      } else {
-        onProgress?.("Сложный PDF — рендеринг в изображение...");
+      onProgress?.("DeepSeek читает PDF...");
+      try {
+        const dsResult = await _callDeepSeekPdf(file_b64);
+        const items    = Array.isArray(dsResult.items) ? dsResult.items as unknown[] : [];
+        if (items.length)
+          return { success: true, ai_obj: dsResult, items, raw: JSON.stringify(dsResult) };
+        // Пустой результат — fallback на Gemini (изображение)
+        onProgress?.("PDF не прочитан текстом, пробуем через изображение...");
+      } catch {
+        onProgress?.("Переключаемся на Gemini...");
       }
 
+      // Fallback: рендерим PDF в JPEG через pdfjs и отправляем Gemini
       const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
-      onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
+      onProgress?.("Распознавание через Gemini...");
       const raw2 = await _callPolza(jpegB64, _RECOGNIZE_PROMPT);
       if (!raw2.trim())
         return { success: false, ai_obj: {}, items: [], raw: raw2,
