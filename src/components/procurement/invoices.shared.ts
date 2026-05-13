@@ -196,11 +196,11 @@ export interface UploadedFile {
   name: string;
 }
 
-// ── Прямое распознавание файла через Polza.ai (без Cloud Function) ──────────
-// Excel → SheetJS → Canvas PNG → Gemini.
-// PDF простой → data:application/pdf → Gemini.
-// PDF с QR/сложной вёрсткой → pdfjs-dist рендер → JPEG → Gemini.
-const POLZA_URL = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf";
+// ── Распознавание счетов ───────────────────────────────────────────────────
+// Excel           → DeepSeek (TSV-текст через deepseek-invoice Cloud Function)
+// JPG/PNG/PDF     → Gemini (изображение через chatgpt-polza Cloud Function)
+const POLZA_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf";
+const DEEPSEEK_URL  = "https://functions.poehali.dev/dbd66068-31ba-4b8a-a3e8-d994769ded45";
 
 const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечения данных из счетов. Перед тобой изображение таблицы.
 
@@ -493,19 +493,38 @@ export async function recognizeViaPolza(
   onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
 
   try {
-    // ── Excel ──────────────────────────────────────────────────────────────────
+    // ── Excel → DeepSeek (TSV-текст, чанки по 20 строк) ──────────────────────
     if (isExcel) {
-      onProgress?.("Преобразование Excel в изображение...");
-      const pngB64 = await _excelToPngB64(file_b64);
-      onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
-      const raw = await _callPolza(pngB64, _RECOGNIZE_PROMPT);
-      if (!raw.trim())
-        return { success: false, ai_obj: {}, items: [], raw, error: "Модель не вернула данные. Попробуйте снова." };
-      const { ai_obj, items } = _parseAiJson(raw);
+      onProgress?.("Анализ Excel через DeepSeek...");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 120_000);
+      let dsResp: Response;
+      try {
+        dsResp = await fetch(DEEPSEEK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({ excel_b64: file_b64, file_name }),
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!dsResp.ok) {
+        const t = await dsResp.text();
+        return { success: false, ai_obj: {}, items: [], raw: t,
+          error: `DeepSeek ${dsResp.status}: ${t.slice(0, 200)}` };
+      }
+      const dsData = await dsResp.json();
+      const items  = Array.isArray(dsData.items) ? dsData.items : [];
       if (!items.length)
-        return { success: false, ai_obj: {}, items: [], raw,
-          error: "Счёт содержит слишком много графики. Сохраните его как JPG без картинок и загрузите снова." };
-      return { success: true, ai_obj, items, raw };
+        return { success: false, ai_obj: {}, items: [], raw: JSON.stringify(dsData),
+          error: "DeepSeek не нашёл позиций в таблице. Проверьте формат файла." };
+      return {
+        success: true,
+        ai_obj: dsData as Record<string, unknown>,
+        items,
+        raw: JSON.stringify(dsData),
+      };
     }
 
     // ── PDF ────────────────────────────────────────────────────────────────────

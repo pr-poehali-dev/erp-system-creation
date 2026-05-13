@@ -1,0 +1,26 @@
+{
+  "tests": [
+    {
+      "name": "OPTIONS preflight",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    },
+    {
+      "name": "POST without excel_b64 returns 400",
+      "method": "POST",
+      "path": "/",
+      "body": {},
+      "expectedStatus": 400,
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "POST invalid base64 returns 400",
+      "method": "POST",
+      "path": "/",
+      "body": { "excel_b64": "not-valid-base64!!!" },
+      "expectedStatus": 400,
+      "bodyMatcher": "partial"
+    }
+  ]
+}

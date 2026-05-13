@@ -48,7 +48,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   };
   useEffect(() => { load(); }, []);
 
-  // ── Прямое распознавание через Polza.ai (Excel и QR-PDF) ─────────────────
+  // ── Распознавание: Excel → DeepSeek, JPG/PDF → Gemini ────────────────────
   const runPolzaRecognize = async (b64: string, fileName: string) => {
     setPolzaFile({ b64, name: fileName });
     setRecognizing(true);
