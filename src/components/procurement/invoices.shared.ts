@@ -460,6 +460,81 @@ async function _callPolza(imagePngB64: string, prompt: string): Promise<string> 
   return _callPolzaWithModel(imagePngB64, prompt, "google/gemini-3.1-flash-lite");
 }
 
+// ── PDF → pdfjs рендер в JPEG → Gemini напрямую (минуя Cloud Function) ───────
+// Прямой вызов api.polza.ai/api/v1 обходит таймаут CF (≤180с).
+// deepseek-chat не поддерживает изображения — используем Gemini через Polza API.
+const POLZA_DIRECT_URL = "https://api.polza.ai/api/v1/chat/completions";
+const POLZA_DIRECT_KEY = "__POLZA_KEY__"; // вставь значение POLZA_AI_API_KEY из Настройки → Секреты
+
+async function _pdfPageToJpeg(pdfB64: string, onProgress?: (msg: string) => void): Promise<string> {
+  onProgress?.("Рендеринг PDF в изображение...");
+  const pdfjsLib = await import("pdfjs-dist");
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  }
+  const binary = atob(pdfB64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const pdf      = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const page     = await pdf.getPage(1);
+  const vp0      = page.getViewport({ scale: 1 });
+  const scale    = Math.min(1600 / vp0.width, 150 / 72); // 150 dpi, max 1600px
+  const viewport = page.getViewport({ scale });
+
+  const canvas  = document.createElement("canvas");
+  canvas.width  = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+}
+
+async function _callPolzaDirect(jpegB64: string, prompt: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const resp = await fetch(POLZA_DIRECT_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${POLZA_DIRECT_KEY}`,
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: "google/gemini-3.1-flash-lite",
+        temperature: 0,
+        max_tokens: 16384,
+        messages: [
+          {
+            role: "system",
+            content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON без пояснений и markdown-обёрток.",
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text",      text: prompt },
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${jpegB64}` } },
+            ],
+          },
+        ],
+      }),
+    });
+    if (!resp.ok) {
+      const t = await resp.text();
+      throw new Error(`Polza ${resp.status}: ${t.slice(0, 200)}`);
+    }
+    const data = await resp.json();
+    // Polza.ai возвращает либо data.content, либо стандартный OpenAI-формат choices
+    return data.content ?? data?.choices?.[0]?.message?.content ?? "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Распознаёт счёт из браузера:
  * - Excel (.xls/.xlsx) → SheetJS → TSV → DeepSeek (прямо из браузера)
@@ -524,10 +599,51 @@ export async function recognizeViaPolza(
       return { success: true, ai_obj: merged, items, raw: JSON.stringify(merged) };
     }
 
-    // ── PDF — заглушка (обработка будет через бэкенд PyMuPDF + DeepSeek) ─────
+    // ── PDF → pdfjs → JPEG → Gemini (прямой вызов Polza.ai, без таймаута CF) ─
     if (isPdf) {
-      return { success: false, ai_obj: {}, items: [], raw: "",
-        error: "Распознавание PDF временно недоступно. Пожалуйста, сохраните счёт как JPG и загрузите снова." };
+      onProgress?.("Рендеринг PDF в изображение...");
+      let jpegB64: string;
+      try {
+        jpegB64 = await _pdfPageToJpeg(file_b64, onProgress);
+      } catch (eRender) {
+        const m = eRender instanceof Error ? eRender.message : String(eRender);
+        return { success: false, ai_obj: {}, items: [], raw: "",
+          error: `Не удалось прочитать PDF: ${m}. Попробуйте загрузить скан в JPG.` };
+      }
+
+      onProgress?.("DeepSeek обрабатывает PDF...");
+
+      const tryOnce = async () => {
+        const raw = await _callPolzaDirect(jpegB64, _RECOGNIZE_PROMPT);
+        if (!raw.trim()) throw new Error("пустой ответ");
+        return raw;
+      };
+
+      let raw = "";
+      try {
+        raw = await tryOnce();
+      } catch (e1) {
+        const m1 = e1 instanceof Error ? e1.message : String(e1);
+        console.warn("[PDF] попытка 1 ошибка:", m1);
+        onProgress?.("Повторная попытка...");
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          raw = await tryOnce();
+        } catch (e2) {
+          const m2 = e2 instanceof Error ? e2.message : String(e2);
+          console.warn("[PDF] попытка 2 ошибка:", m2);
+          return { success: false, ai_obj: {}, items: [], raw: "",
+            error: `Не удалось распознать PDF: ${m2}. Попробуйте загрузить скан в JPG.` };
+        }
+      }
+
+      const { ai_obj, items } = _parseAiJson(raw);
+      if (!items.length) {
+        return { success: false, ai_obj, items: [], raw,
+          error: `Позиции не найдены в PDF. Ответ: ${raw.slice(0, 200)}` };
+      }
+      console.info("[PDF] DeepSeek успешно:", items.length, "позиций");
+      return { success: true, ai_obj, items, raw };
     }
 
     // ── JPG / PNG ──────────────────────────────────────────────────────────────
