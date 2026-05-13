@@ -293,6 +293,7 @@ export default function InvoiceAiPanel({
               hasParseError={hasParseError}
               parseError={result.parse_error}
               needWizard={needWizard}
+              footerTotal={result.footer_total ?? null}
               pluralInvoice={pluralInvoice}
               onToggleAll={toggleAll}
               onToggle={toggleOne}

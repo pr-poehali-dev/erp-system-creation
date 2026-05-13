@@ -10,6 +10,7 @@ interface Props {
   hasParseError: boolean;
   parseError: string | null;
   needWizard: boolean;
+  footerTotal?: number | null;
   pluralInvoice: (n: number) => string;
   onToggleAll: () => void;
   onToggle: (idx: number) => void;
@@ -20,7 +21,7 @@ interface Props {
 
 export default function AiItemsTab({
   items, selected, applying, checkedCount, allComplete,
-  hasParseError, parseError, needWizard, pluralInvoice,
+  hasParseError, parseError, needWizard, footerTotal, pluralInvoice,
   onToggleAll, onToggle, onApply, onGoWizard, onGoManual,
 }: Props) {
   if (!items.length) {
@@ -44,6 +45,14 @@ export default function AiItemsTab({
     );
   }
 
+  // Итого по выбранным позициям
+  const calcTotal = items.reduce((sum, item, idx) => {
+    if (!selected[idx]) return sum;
+    const t = item.unit_price != null && item.quantity != null
+      ? item.unit_price * item.quantity : 0;
+    return sum + t;
+  }, 0);
+
   return (
     <>
       <div className="border border-border rounded-lg overflow-hidden">
@@ -56,7 +65,7 @@ export default function AiItemsTab({
                 </th>
                 <th className="px-1 py-1.5 w-4" title="🟢 ок / 🟡 цена скорректирована / 🔴 нет данных"></th>
                 <th className="px-2 py-1.5 text-left font-medium">Поставщик</th>
-                <th className="px-2 py-1.5 text-left font-medium">Материал</th>
+                <th className="px-2 py-1.5 text-left font-medium min-w-[160px]">Материал</th>
                 <th className="px-2 py-1.5 text-left font-medium">Ед.</th>
                 <th className="px-2 py-1.5 text-right font-medium">Цена</th>
                 <th className="px-2 py-1.5 text-right font-medium">Кол-во</th>
@@ -84,8 +93,13 @@ export default function AiItemsTab({
                       <div className="truncate" title={item.supplier_name || ""}>{item.supplier_name || <span className="text-hint italic">—</span>}</div>
                       {item.supplier_created && <div className="text-[9px] text-emerald-600">✚ создан</div>}
                     </td>
-                    <td className="px-2 py-2 max-w-[110px]">
-                      <div className="truncate" title={item.material || ""}>{item.material || <span className="text-hint italic">—</span>}</div>
+                    <td className="px-2 py-2 min-w-[160px] max-w-[240px]">
+                      <div
+                        className="truncate cursor-help"
+                        title={item.material || ""}
+                      >
+                        {item.material || <span className="text-hint italic">—</span>}
+                      </div>
                       {item.material_created && <div className="text-[9px] text-emerald-600">✚ создан</div>}
                     </td>
                     <td className="px-2 py-2 whitespace-nowrap">{item.unit}</td>
@@ -105,6 +119,23 @@ export default function AiItemsTab({
                 );
               })}
             </tbody>
+            {/* Строка Итого */}
+            <tfoot>
+              <tr className="bg-secondary/40 border-t border-border font-medium text-[11px]">
+                <td colSpan={7} className="px-2 py-2 text-right text-muted-foreground">
+                  Итого по позициям:
+                </td>
+                <td className="px-2 py-2 text-right whitespace-nowrap">
+                  {fmtMoney(calcTotal)}
+                  {footerTotal != null && Math.abs(calcTotal - footerTotal) > 1 && (
+                    <div className="text-[9px] text-muted-foreground font-normal leading-tight">
+                      в счёте: {fmtMoney(footerTotal)}
+                    </div>
+                  )}
+                </td>
+                <td />
+              </tr>
+            </tfoot>
           </table>
         </div>
       </div>

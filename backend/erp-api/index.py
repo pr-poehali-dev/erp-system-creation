@@ -4694,60 +4694,95 @@ def recognize_invoice(cur, invoice_id: int):
 
 def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, invoice_number, file_url: str, file_name: str):
     """Создаёт отдельные записи счетов для каждой выбранной позиции.
-    Если supplier_id/material_id = 0 — матчит или создаёт по имени."""
+    Если supplier_id/material_id = 0 — матчит или создаёт по имени.
+    Каждая позиция защищена try/except — ошибка одной не рушит всю транзакцию."""
     created_ids = []
-    for item in items:
+    skipped     = []
+
+    for idx, item in enumerate(items):
         if not isinstance(item, dict):
+            logger.warning(f"apply_invoice_items: item[{idx}] не dict, пропуск: {type(item)}")
             continue
 
-        up  = _safe_float(item.get("unit_price"))
-        qty = _safe_float(item.get("quantity"))
-
-        # ── Поставщик: матчим по имени если id не передан ─────────────────────
-        s_id = item.get("supplier_id") or 0
-        if not s_id:
-            s_name = _clean(item.get("supplier_name") or item.get("supplier") or "")
-            if s_name:
-                matched_id, _ = _match_or_create_supplier(cur, s_name)
-                s_id = matched_id or 0
-
-        # ── Материал: матчим по имени если id не передан ──────────────────────
-        m_id = item.get("material_id") or 0
-        raw_unit = _clean(item.get("unit") or "шт") or "шт"
-        if not m_id:
-            m_name = _clean(item.get("material") or item.get("material_name") or "")
-            if m_name:
-                matched_id, _, raw_unit = _match_or_create_material(cur, m_name, raw_unit)
-                m_id = matched_id or 0
-
-        material = _clean(item.get("material") or item.get("material_name")) or None
-        key_ok   = bool(material and up is not None and qty is not None)
-        item_status = "обработан" if key_ok else "требуется_проверка"
-
         try:
-            rec_data = json.dumps(item, ensure_ascii=False)
-        except Exception:
-            rec_data = None
+            up  = _safe_float(item.get("unit_price"))
+            qty = _safe_float(item.get("quantity"))
 
-        cur.execute(f"""
-            INSERT INTO {SCHEMA}.invoices
-                (supplier_id, material_id, invoice_date, invoice_number,
-                 unit_price, quantity, pdf_file_url, pdf_file_name,
-                 recognition_status, recognized_data)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            RETURNING id
-        """, (
-            int(s_id), int(m_id),
-            invoice_date or None,
-            invoice_number or None,
-            up,
-            qty,
-            file_url  or None,
-            file_name or None,
-            item_status,
-            rec_data,
-        ))
-        created_ids.append(cur.fetchone()[0])
+            # ── Поставщик: матчим по имени если id не передан ─────────────────
+            s_id = item.get("supplier_id") or 0
+            if not s_id:
+                s_name = _clean(item.get("supplier_name") or item.get("supplier") or "")
+                if s_name:
+                    try:
+                        matched_id, _ = _match_or_create_supplier(cur, s_name)
+                        s_id = matched_id or 0
+                    except Exception as e_s:
+                        logger.warning(f"apply_invoice_items[{idx}]: supplier match error '{s_name}': {e_s}")
+                        s_id = 0
+
+            # ── Материал: матчим по имени если id не передан ──────────────────
+            m_id     = item.get("material_id") or 0
+            raw_unit = _clean(item.get("unit") or "шт") or "шт"
+            if not m_id:
+                m_name = _clean(item.get("material") or item.get("material_name") or "")
+                if m_name:
+                    try:
+                        matched_id, _, raw_unit = _match_or_create_material(cur, m_name, raw_unit)
+                        m_id = matched_id or 0
+                    except Exception as e_m:
+                        logger.warning(f"apply_invoice_items[{idx}]: material match error '{m_name}': {e_m}")
+                        m_id = 0
+
+            material    = _clean(item.get("material") or item.get("material_name")) or None
+            key_ok      = bool(material and up is not None and qty is not None)
+            item_status = "обработан" if key_ok else "требуется_проверка"
+
+            try:
+                rec_data = json.dumps(item, ensure_ascii=False)
+            except Exception:
+                rec_data = None
+
+            logger.info(
+                f"apply_invoice_items[{idx}]: material={material!r} s_id={s_id} m_id={m_id} "
+                f"up={up} qty={qty} status={item_status}"
+            )
+
+            cur.execute("SAVEPOINT _apply_item")
+            cur.execute(f"""
+                INSERT INTO {SCHEMA}.invoices
+                    (supplier_id, material_id, invoice_date, invoice_number,
+                     unit_price, quantity, pdf_file_url, pdf_file_name,
+                     recognition_status, recognized_data)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
+            """, (
+                int(s_id), int(m_id),
+                invoice_date or None,
+                invoice_number or None,
+                up,
+                qty,
+                file_url  or None,
+                file_name or None,
+                item_status,
+                rec_data,
+            ))
+            created_ids.append(cur.fetchone()[0])
+
+        except Exception as e_item:
+            logger.error(
+                f"apply_invoice_items[{idx}]: ОШИБКА, позиция пропущена. "
+                f"item={json.dumps(item, ensure_ascii=False)[:300]} err={e_item}\n{traceback.format_exc()}"
+            )
+            skipped.append(idx)
+            # Сбрасываем состояние курсора после ошибки, чтобы продолжить транзакцию
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT _apply_item")
+            except Exception:
+                pass
+
+    if skipped:
+        logger.warning(f"apply_invoice_items: пропущено {len(skipped)} позиций из {len(items)}: {skipped}")
+
     return created_ids
 
 
