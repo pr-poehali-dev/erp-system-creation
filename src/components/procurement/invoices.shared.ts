@@ -448,20 +448,21 @@ async function _resizeToJpeg(pngB64: string, maxW = 1400, quality = 0.7): Promis
   });
 }
 
-async function _callPolza(imagePngB64: string, prompt: string): Promise<string> {
-  // Сжимаем до 1400px JPEG quality 0.7 — ускоряет ответ и снижает риск таймаута
+async function _callPolzaWithModel(
+  imagePngB64: string,
+  prompt: string,
+  model: string,
+): Promise<string> {
   const jpegB64 = await _resizeToJpeg(imagePngB64, 1400, 0.7);
-
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 190_000); // 190 сек > таймаут CF 180с
-
+  const timer = setTimeout(() => controller.abort(), 190_000);
   try {
     const resp = await fetch(`${POLZA_URL}?action=generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
       body: JSON.stringify({
-        model: "google/gemini-3.1-flash-lite",
+        model,
         temperature: 0,
         max_tokens: 8192,
         messages: [
@@ -479,21 +480,23 @@ async function _callPolza(imagePngB64: string, prompt: string): Promise<string> 
         ],
       }),
     });
-
     if (!resp.ok) {
       const t = await resp.text();
-      // 504 = таймаут Cloud Function — понятное сообщение
-      if (resp.status === 504) {
-        throw new Error("Счёт содержит сложные элементы. Попробуйте преобразовать его в JPG и загрузить снова.");
-      }
+      if (resp.status === 504) throw new Error("__504__");
       throw new Error(`Polza ${resp.status}: ${t.slice(0, 200)}`);
     }
-    const data = await resp.json();
-    return data.content ?? "";
+    return (await resp.json()).content ?? "";
   } finally {
     clearTimeout(timer);
   }
 }
+
+// JPG/PNG — Gemini (стабильная модель для изображений)
+async function _callPolza(imagePngB64: string, prompt: string): Promise<string> {
+  return _callPolzaWithModel(imagePngB64, prompt, "google/gemini-3.1-flash-lite");
+}
+
+
 
 // ── PDF → DeepSeek через text extraction ─────────────────────────────────────
 // DeepSeek не поддерживает изображения, поэтому передаём PDF как base64 в промпт.
@@ -590,25 +593,44 @@ export async function recognizeViaPolza(
       return { success: true, ai_obj: merged, items, raw: JSON.stringify(merged) };
     }
 
-    // ── PDF → pdfjs рендер в JPG → Gemini (Polza.ai) ────────────────────────
+    // ── PDF → pdfjs → JPG → Попытка 1: Qwen3.5 Plus / Попытка 2: Gemini ─────
     if (isPdf) {
       onProgress?.("Рендеринг PDF в изображение...");
+      const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
+
+      // Попытка 1: Qwen3.5 Plus — быстрее, не даёт 504 на сложных PDF
+      onProgress?.("Qwen анализирует PDF...");
       try {
-        const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
-        onProgress?.("Gemini анализирует изображение...");
-        const raw2 = await _callPolza(jpegB64, _RECOGNIZE_PROMPT);
+        const raw1 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "qwen/qwen3.5-plus");
+        if (raw1.trim()) {
+          const { ai_obj, items } = _parseAiJson(raw1);
+          if (items.length) {
+            console.info("[PDF] Qwen успешно:", items.length, "позиций");
+            return { success: true, ai_obj, items, raw: raw1 };
+          }
+        }
+        console.warn("[PDF] Qwen не нашёл позиций, fallback на Gemini");
+      } catch (e1) {
+        const m1 = e1 instanceof Error ? e1.message : String(e1);
+        console.warn("[PDF] Qwen ошибка:", m1, "— переключаемся на Gemini");
+      }
+
+      // Попытка 2: Gemini — надёжный fallback
+      onProgress?.("Переключение на Gemini...");
+      try {
+        const raw2 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "google/gemini-3.1-flash-lite");
         if (raw2.trim()) {
           const { ai_obj, items } = _parseAiJson(raw2);
           if (items.length) {
-            console.info("[PDF] Gemini успешно:", items.length, "позиций");
+            console.info("[PDF] Gemini fallback успешно:", items.length, "позиций");
             return { success: true, ai_obj, items, raw: raw2 };
           }
         }
         return { success: false, ai_obj: {}, items: [], raw: raw2,
-          error: "Gemini не нашёл позиций в PDF. Попробуйте загрузить скан в JPG вручную." };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.warn("[PDF] Gemini ошибка:", msg);
+          error: "Не удалось извлечь позиции из PDF. Попробуйте загрузить скан в JPG." };
+      } catch (e2) {
+        const msg = e2 instanceof Error ? e2.message : String(e2);
+        console.warn("[PDF] Gemini fallback ошибка:", msg);
         return { success: false, ai_obj: {}, items: [], raw: "",
           error: `Ошибка распознавания PDF: ${msg}. Попробуйте загрузить скан в JPG.` };
       }
