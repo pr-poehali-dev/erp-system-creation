@@ -453,7 +453,7 @@ async function _callPolza(imagePngB64: string, prompt: string): Promise<string> 
   const jpegB64 = await _resizeToJpeg(imagePngB64, 1400, 0.7);
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120_000); // 120 сек
+  const timer = setTimeout(() => controller.abort(), 190_000); // 190 сек > таймаут CF 180с
 
   try {
     const resp = await fetch(`${POLZA_URL}?action=generate`, {
