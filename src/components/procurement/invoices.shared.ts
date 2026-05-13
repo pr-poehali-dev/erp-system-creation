@@ -392,43 +392,6 @@ function _parseAiJson(raw: string): { ai_obj: Record<string, unknown>; items: un
   return { ai_obj: {}, items: [] };
 }
 
-// ── PDF → JPEG через pdfjs-dist (первая страница) ────────────────────────────
-// Используется как fallback для PDF с QR, сложной вёрсткой или при пустом ответе.
-async function _pdfToJpeg(pdfB64: string, onProgress?: (msg: string) => void): Promise<string> {
-  onProgress?.("Рендеринг PDF в изображение...");
-
-  // Динамический импорт pdfjs
-  const pdfjsLib = await import("pdfjs-dist");
-
-  // Указываем worker через CDN чтобы не тащить в бандл
-  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
-  }
-
-  const binary = atob(pdfB64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-  const pdf  = await pdfjsLib.getDocument({ data: bytes }).promise;
-  const page = await pdf.getPage(1);
-
-  // Масштаб: 150 dpi ≈ scale 2.08 для A4, max 1600px по ширине
-  const viewport0 = page.getViewport({ scale: 1 });
-  const scale     = Math.min(1600 / viewport0.width, 150 / 72); // 150 dpi
-  const viewport  = page.getViewport({ scale });
-
-  const canvas  = document.createElement("canvas");
-  canvas.width  = Math.round(viewport.width);
-  canvas.height = Math.round(viewport.height);
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  await page.render({ canvasContext: ctx, viewport }).promise;
-  return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
-}
-
 // ── Сжатие изображения для Gemini ────────────────────────────────────────────
 async function _resizeToJpeg(pngB64: string, maxW = 1400, quality = 0.7): Promise<string> {
   return new Promise((resolve) => {
@@ -492,49 +455,16 @@ async function _callPolzaWithModel(
   }
 }
 
-// JPG/PNG — Gemini (стабильная модель для изображений)
+// JPG/PNG — Gemini через Polza Cloud Function
 async function _callPolza(imagePngB64: string, prompt: string): Promise<string> {
   return _callPolzaWithModel(imagePngB64, prompt, "google/gemini-3.1-flash-lite");
 }
 
-
-
-// ── PDF → DeepSeek через text extraction ─────────────────────────────────────
-// DeepSeek не поддерживает изображения, поэтому передаём PDF как base64 в промпт.
-// DeepSeek умеет работать с base64-encoded PDF в текстовом сообщении.
-const _PDF_DEEPSEEK_PROMPT =
-  `Ты — ассистент для извлечения данных из счетов.\n` +
-  `Тебе передан PDF-файл в base64. Извлеки ВСЕ позиции счёта.\n` +
-  `Игнорируй QR-коды, логотипы, штрих-коды, изображения товаров и любую графику.\n` +
-  `Читай ТОЛЬКО текст: таблицу позиций и реквизиты в шапке.\n\n` +
-  `Для каждой позиции: material (полное название, не сокращай), quantity (число), unit (строка), unit_price (число).\n` +
-  `Найди: supplier_name, invoice_date (YYYY-MM-DD), invoice_number.\n\n` +
-  `ПРАВИЛА:\n` +
-  `1. Строки-заголовки (№, Наименование, Кол-во...) — пропускай.\n` +
-  `2. Если значение отсутствует — ставь null.\n` +
-  `3. Числа без пробелов и символов валюты.\n` +
-  `4. Верни ТОЛЬКО JSON без markdown:\n` +
-  `{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
-
-async function _callDeepSeekPdf(pdfB64: string): Promise<Record<string, unknown>> {
-  const content = `${_PDF_DEEPSEEK_PROMPT}\n\nPDF (base64):\n${pdfB64}`;
-  const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content, 16384));
-  // Попытка 1
-  try {
-    return await run();
-  } catch (e1) {
-    console.warn("[PDF] DeepSeek попытка 1 провалилась:", e1 instanceof Error ? e1.message : e1);
-  }
-  // Попытка 2 (через 2 сек, пробрасываем ошибку наружу для диагностики)
-  await new Promise(r => setTimeout(r, 2000));
-  return await run(); // бросает DeepSeekError если снова ошибка
-}
-
 /**
  * Распознаёт счёт из браузера:
- * - Excel (.xls/.xlsx) → SheetJS → TSV чанки → DeepSeek (текст, без таймаутов CF)
- * - PDF              → base64 → DeepSeek (читает текст, игнорирует QR/графику)
- * - JPG / PNG        → JPEG 1400px → Gemini через Polza Cloud Function
+ * - Excel (.xls/.xlsx) → SheetJS → TSV → DeepSeek (прямо из браузера)
+ * - JPG / PNG          → JPEG 1400px → Gemini через Polza Cloud Function
+ * - PDF                → не обрабатывается (заглушка, будет реализовано через бэкенд PyMuPDF)
  */
 export async function recognizeViaPolza(
   file_b64: string,
@@ -594,49 +524,10 @@ export async function recognizeViaPolza(
       return { success: true, ai_obj: merged, items, raw: JSON.stringify(merged) };
     }
 
-    // ── PDF → pdfjs → JPG → Попытка 1: Qwen3.5 Plus / Попытка 2: Gemini ─────
+    // ── PDF — заглушка (обработка будет через бэкенд PyMuPDF + DeepSeek) ─────
     if (isPdf) {
-      onProgress?.("Рендеринг PDF в изображение...");
-      const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
-
-      // Попытка 1: GPT-5.5
-      onProgress?.("GPT-5.5 анализирует PDF...");
-      let gpt55Error = "";
-      try {
-        const raw1 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "openai/gpt-5.5");
-        if (raw1.trim()) {
-          const { ai_obj, items } = _parseAiJson(raw1);
-          if (items.length) {
-            console.info("[PDF] gpt-5.5 успешно:", items.length, "позиций");
-            return { success: true, ai_obj, items, raw: raw1 };
-          }
-        }
-        gpt55Error = "gpt-5.5 вернул пустой ответ";
-        console.warn("[PDF]", gpt55Error);
-      } catch (e1) {
-        gpt55Error = e1 instanceof Error ? e1.message : String(e1);
-        console.warn("[PDF] gpt-5.5 ошибка:", gpt55Error);
-      }
-      onProgress?.(`gpt-5.5: ${gpt55Error.slice(0, 80)} → Gemini fallback...`);
-
-      // Попытка 2: Gemini fallback
-      try {
-        const raw2 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "google/gemini-3.1-flash-lite");
-        if (raw2.trim()) {
-          const { ai_obj, items } = _parseAiJson(raw2);
-          if (items.length) {
-            console.info("[PDF] Gemini fallback успешно:", items.length, "позиций");
-            return { success: true, ai_obj, items, raw: raw2 };
-          }
-        }
-        return { success: false, ai_obj: {}, items: [], raw: raw2,
-          error: "Не удалось извлечь позиции из PDF. Попробуйте загрузить скан в JPG." };
-      } catch (e2) {
-        const msg = e2 instanceof Error ? e2.message : String(e2);
-        console.warn("[PDF] Gemini fallback ошибка:", msg);
-        return { success: false, ai_obj: {}, items: [], raw: "",
-          error: `Ошибка распознавания PDF: ${msg}. Попробуйте загрузить скан в JPG.` };
-      }
+      return { success: false, ai_obj: {}, items: [], raw: "",
+        error: "Распознавание PDF временно недоступно. Пожалуйста, сохраните счёт как JPG и загрузите снова." };
     }
 
     // ── JPG / PNG ──────────────────────────────────────────────────────────────
