@@ -228,7 +228,7 @@ const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечени
 {"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
 
 // ── Вызов DeepSeek API (текст) ────────────────────────────────────────────────
-async function _callDeepSeekRaw(userContent: string): Promise<string> {
+async function _callDeepSeekRaw(userContent: string, maxTokens = 16384): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000);
   try {
@@ -240,7 +240,7 @@ async function _callDeepSeekRaw(userContent: string): Promise<string> {
         model: DS_MODEL,
         messages: [{ role: "user", content: userContent }],
         temperature: 0,
-        max_tokens: 4096,
+        max_tokens: maxTokens,
       }),
     });
     if (!resp.ok) {
@@ -267,19 +267,25 @@ function _parseDeepSeekJson(content: string): Record<string, unknown> {
   throw new Error(`Не удалось разобрать JSON: ${content.slice(0, 200)}`);
 }
 
-// Ретрай-обёртка для любого DeepSeek-запроса
+// Ретрай-обёртка:
+// - Сначала пробуем с max_tokens=16384
+// - Если JSON оборван (parse error) — повтор через 2 сек с теми же 16384
+// - Если сетевая/другая ошибка — повтор через 2 сек
 async function _callDeepSeekWithRetry(content: string): Promise<Record<string, unknown>> {
-  const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content));
-  try { return await run(); } catch {
+  const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content, 16384));
+  try {
+    return await run();
+  } catch (e) {
+    // Любая ошибка (обрыв JSON или сеть) — пауза и повтор
     await new Promise(r => setTimeout(r, 2000));
     return await run();
   }
 }
 
 // ── Excel → подготовленные TSV-чанки через SheetJS ───────────────────────────
-// ≤150 строк: один запрос (без чанков, без дублей)
-// >150 строк: чанки по 150 + только шапка (без списка всех материалов)
-const DS_CHUNK_LARGE = 150;
+// ≤100 строк: один запрос (без чанков, без дублей)
+// >100 строк: чанки по 100 + только шапка (без списка всех материалов)
+const DS_CHUNK_LARGE = 100;
 
 async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[] }> {
   const XLSX = await import("xlsx");
@@ -326,10 +332,10 @@ async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[] }
   const chunks: string[] = [];
 
   if (dataRows.length <= DS_CHUNK_LARGE) {
-    // ≤150 строк — один запрос, без чанков
+    // ≤100 строк — один запрос, без чанков
     chunks.push(allRows.map(r => r.join("\t")).join("\n"));
   } else {
-    // >150 строк — чанки по 150, только шапка без списка материалов
+    // >100 строк — чанки по 100, только шапка без списка материалов
     for (let i = 0; i < dataRows.length; i += DS_CHUNK_LARGE) {
       const slice = dataRows.slice(i, i + DS_CHUNK_LARGE);
       chunks.push([...headerTsv, ...slice.map(r => r.join("\t"))].join("\n"));
