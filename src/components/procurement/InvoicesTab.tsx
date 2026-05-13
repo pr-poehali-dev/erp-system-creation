@@ -71,7 +71,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
       supplier_id:      null,
       supplier_name:    (obj.supplier_name as string) ?? null,
       supplier_created: false,
-      material:         (it.material as string) ?? null,
+      material:         it.material != null ? String(it.material).trim() || null : null,
       material_id:      null,
       material_created: false,
       unit:             (it.unit as string) ?? "шт",

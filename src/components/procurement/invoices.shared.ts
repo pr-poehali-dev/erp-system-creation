@@ -399,9 +399,9 @@ async function _pdfToJpeg(pdfB64: string, onProgress?: (msg: string) => void): P
   const pdf  = await pdfjsLib.getDocument({ data: bytes }).promise;
   const page = await pdf.getPage(1);
 
-  // Масштаб: приводим страницу к ~1400px по ширине
+  // Масштаб: 150 dpi ≈ scale 2.08 для A4, max 1600px по ширине
   const viewport0 = page.getViewport({ scale: 1 });
-  const scale     = Math.min(1400 / viewport0.width, 2.5); // не больше 2.5x
+  const scale     = Math.min(1600 / viewport0.width, 150 / 72); // 150 dpi
   const viewport  = page.getViewport({ scale });
 
   const canvas  = document.createElement("canvas");
@@ -500,8 +500,11 @@ const _PDF_DEEPSEEK_PROMPT =
 
 async function _callDeepSeekPdf(pdfB64: string): Promise<Record<string, unknown>> {
   const content = `${_PDF_DEEPSEEK_PROMPT}\n\nPDF (base64):\n${pdfB64}`;
-  const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content));
-  try { return await run(); } catch {
+  // Явно передаём max_tokens=16384 чтобы ответ не обрывался
+  const run = async () => _parseDeepSeekJson(await _callDeepSeekRaw(content, 16384));
+  try {
+    return await run();
+  } catch {
     await new Promise(r => setTimeout(r, 2000));
     return await run();
   }
@@ -571,32 +574,40 @@ export async function recognizeViaPolza(
       return { success: true, ai_obj: merged, items, raw: JSON.stringify(merged) };
     }
 
-    // ── PDF → DeepSeek (текст + base64, игнорирует QR/графику) ───────────────
+    // ── PDF: Попытка 1 — DeepSeek (текст, игнорирует QR/графику) ────────────
     if (isPdf) {
-      onProgress?.("DeepSeek читает PDF...");
+      onProgress?.("Распознавание PDF через DeepSeek...");
       try {
         const dsResult = await _callDeepSeekPdf(file_b64);
-        const items    = Array.isArray(dsResult.items) ? dsResult.items as unknown[] : [];
-        if (items.length)
-          return { success: true, ai_obj: dsResult, items, raw: JSON.stringify(dsResult) };
-        // Пустой результат — fallback на Gemini (изображение)
-        onProgress?.("PDF не прочитан текстом, пробуем через изображение...");
-      } catch {
-        onProgress?.("Переключаемся на Gemini...");
+        const dsItems  = Array.isArray(dsResult.items) ? dsResult.items as unknown[] : [];
+        if (dsItems.length) {
+          console.info("[PDF] DeepSeek успешно:", dsItems.length, "позиций");
+          return { success: true, ai_obj: dsResult, items: dsItems, raw: JSON.stringify(dsResult) };
+        }
+        console.warn("[PDF] DeepSeek вернул пустые items, переключаемся на Gemini");
+      } catch (e) {
+        console.warn("[PDF] DeepSeek ошибка:", e instanceof Error ? e.message : e);
       }
 
-      // Fallback: рендерим PDF в JPEG через pdfjs и отправляем Gemini
-      const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
-      onProgress?.("Распознавание через Gemini...");
-      const raw2 = await _callPolza(jpegB64, _RECOGNIZE_PROMPT);
-      if (!raw2.trim())
-        return { success: false, ai_obj: {}, items: [], raw: raw2,
-          error: "PDF не поддаётся распознаванию. Попробуйте сохранить как JPG и загрузить снова." };
-      const { ai_obj, items } = _parseAiJson(raw2);
-      if (!items.length)
-        return { success: false, ai_obj: {}, items: [], raw: raw2,
-          error: `Позиции не найдены. Ответ модели: ${raw2.slice(0, 300)}` };
-      return { success: true, ai_obj, items, raw: raw2 };
+      // ── Попытка 2 — Gemini (рендер PDF → JPEG → изображение) ──────────────
+      onProgress?.("Переключение на резервный метод...");
+      try {
+        const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
+        onProgress?.("Gemini анализирует изображение...");
+        const raw2 = await _callPolza(jpegB64, _RECOGNIZE_PROMPT);
+        if (raw2.trim()) {
+          const { ai_obj, items } = _parseAiJson(raw2);
+          if (items.length) {
+            console.info("[PDF] Gemini fallback успешно:", items.length, "позиций");
+            return { success: true, ai_obj, items, raw: raw2 };
+          }
+        }
+      } catch (e) {
+        console.warn("[PDF] Gemini fallback ошибка:", e instanceof Error ? e.message : e);
+      }
+
+      return { success: false, ai_obj: {}, items: [], raw: "",
+        error: "Не удалось распознать счёт. Попробуйте загрузить скан в JPG." };
     }
 
     // ── JPG / PNG ──────────────────────────────────────────────────────────────
