@@ -197,10 +197,13 @@ export interface UploadedFile {
 }
 
 // ── Распознавание счетов ───────────────────────────────────────────────────
-// Excel           → DeepSeek (TSV-текст через deepseek-invoice Cloud Function)
-// JPG/PNG/PDF     → Gemini (изображение через chatgpt-polza Cloud Function)
-const POLZA_URL     = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf";
-const DEEPSEEK_URL  = "https://functions.poehali.dev/dbd66068-31ba-4b8a-a3e8-d994769ded45";
+// Excel  → SheetJS → TSV → DeepSeek API напрямую из браузера (без Cloud Function)
+// JPG / PNG / PDF → Gemini через chatgpt-polza Cloud Function
+const POLZA_URL    = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf";
+const DS_API_URL   = "https://api.deepseek.com/v1/chat/completions";
+const DS_API_KEY   = "sk-bd65a737066e44649654f6d16983950d";
+const DS_MODEL     = "deepseek-chat";
+const DS_CHUNK     = 20; // строк на один запрос
 
 const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечения данных из счетов. Перед тобой изображение таблицы.
 
@@ -224,6 +227,110 @@ const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечени
 
 Верни только JSON без markdown-обёрток:
 {"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
+
+// ── Excel → TSV-чанки через SheetJS ──────────────────────────────────────────
+async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[] }> {
+  const XLSX = await import("xlsx");
+  const binary = atob(file_b64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const wb   = XLSX.read(bytes, { type: "array" });
+  const ws   = wb.Sheets[wb.SheetNames[0]];
+  const rows = (XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][])
+    .filter(r => r.some(c => String(c).trim() !== ""));
+
+  if (!rows.length) throw new Error("Excel пустой или не содержит данных");
+
+  // Первые 5 строк — шапка с реквизитами (поставщик, дата, номер)
+  const headerRows = rows.slice(0, 5);
+  const dataRows   = rows.slice(5);
+  const headerTsv  = headerRows.map(r => r.join("\t"));
+
+  const chunks: string[] = [];
+  if (!dataRows.length) {
+    chunks.push(rows.map(r => r.join("\t")).join("\n"));
+  } else {
+    for (let i = 0; i < dataRows.length; i += DS_CHUNK) {
+      const slice = dataRows.slice(i, i + DS_CHUNK);
+      chunks.push([...headerTsv, ...slice.map(r => r.join("\t"))].join("\n"));
+    }
+  }
+  return { chunks };
+}
+
+// ── Один запрос к DeepSeek API с авто-ретраем ────────────────────────────────
+async function _callDeepSeek(tsvChunk: string, attempt = 1): Promise<Record<string, unknown>> {
+  const prompt =
+    `Извлеки ВСЕ позиции из фрагмента счёта в формате TSV.\n` +
+    `Для каждой: material (полное название), quantity (число), unit (строка), unit_price (число).\n` +
+    `Поставщика, дату и номер счёта ищи в начале.\n` +
+    `Верни СТРОГО JSON без markdown-обёрток:\n` +
+    `{ "supplier_name":"...", "invoice_date":"YYYY-MM-DD", "invoice_number":"...", "footer_total":число, "items":[ {"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число} ] }\n` +
+    `Не пропускай строки, не добавляй комментариев.\n\n${tsvChunk}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
+
+  try {
+    const resp = await fetch(DS_API_URL, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${DS_API_KEY}`, "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: DS_MODEL,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0,
+        max_tokens: 4096,
+      }),
+    });
+
+    if (!resp.ok) {
+      const t = await resp.text();
+      throw new Error(`DeepSeek ${resp.status}: ${t.slice(0, 200)}`);
+    }
+
+    const data    = await resp.json();
+    const content: string = data?.choices?.[0]?.message?.content ?? "";
+    if (!content.trim()) throw new Error("DeepSeek вернул пустой ответ");
+
+    // Парсим JSON из ответа
+    const clean = content.replace(/```(?:json)?\s*/g, "").replace(/```/g, "").trim();
+    try { return JSON.parse(clean); } catch { /* fallback */ }
+    const m = [...clean.matchAll(/\{[\s\S]+\}/g)].sort((a, b) => b[0].length - a[0].length);
+    for (const match of m) {
+      try { return JSON.parse(match[0]); } catch { /* continue */ }
+    }
+    throw new Error(`Не удалось разобрать JSON из ответа: ${content.slice(0, 200)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Ретрай-обёртка
+async function _callDeepSeekWithRetry(tsvChunk: string): Promise<Record<string, unknown>> {
+  try {
+    return await _callDeepSeek(tsvChunk);
+  } catch {
+    await new Promise(r => setTimeout(r, 2000));
+    return await _callDeepSeek(tsvChunk);
+  }
+}
+
+// ── Объединение результатов нескольких чанков ─────────────────────────────────
+function _mergeDeepSeekChunks(results: Record<string, unknown>[]): Record<string, unknown> {
+  const merged: Record<string, unknown> = {
+    supplier_name: null, invoice_date: null, invoice_number: null, footer_total: null, items: [],
+  };
+  for (const r of results) {
+    if (!merged.supplier_name  && r.supplier_name)  merged.supplier_name  = r.supplier_name;
+    if (!merged.invoice_date   && r.invoice_date)   merged.invoice_date   = r.invoice_date;
+    if (!merged.invoice_number && r.invoice_number) merged.invoice_number = r.invoice_number;
+    if (r.footer_total != null)                     merged.footer_total   = r.footer_total;
+    if (Array.isArray(r.items)) (merged.items as unknown[]).push(...r.items);
+  }
+  return merged;
+}
 
 // ── Парсер JSON-ответа ────────────────────────────────────────────────────────
 function _parseAiJson(raw: string): { ai_obj: Record<string, unknown>; items: unknown[] } {
@@ -493,38 +600,42 @@ export async function recognizeViaPolza(
   onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
 
   try {
-    // ── Excel → DeepSeek (TSV-текст, чанки по 20 строк) ──────────────────────
+    // ── Excel → SheetJS → TSV → DeepSeek API (прямо из браузера) ────────────
     if (isExcel) {
-      onProgress?.("Анализ Excel через DeepSeek...");
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 120_000);
-      let dsResp: Response;
-      try {
-        dsResp = await fetch(DEEPSEEK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({ excel_b64: file_b64, file_name }),
-        });
-      } finally {
-        clearTimeout(timer);
+      onProgress?.("Читаем Excel...");
+      const { chunks } = await _excelToTsvChunks(file_b64);
+
+      const total   = chunks.length;
+      const results: Record<string, unknown>[] = [];
+      const errors:  string[] = [];
+
+      for (let i = 0; i < total; i++) {
+        onProgress?.(
+          total > 1
+            ? `DeepSeek анализирует... ${i + 1} из ${total} частей`
+            : "DeepSeek анализирует таблицу..."
+        );
+        try {
+          const r = await _callDeepSeekWithRetry(chunks[i]);
+          results.push(r);
+        } catch (e) {
+          errors.push(e instanceof Error ? e.message : String(e));
+        }
       }
-      if (!dsResp.ok) {
-        const t = await dsResp.text();
-        return { success: false, ai_obj: {}, items: [], raw: t,
-          error: `DeepSeek ${dsResp.status}: ${t.slice(0, 200)}` };
+
+      if (!results.length) {
+        return { success: false, ai_obj: {}, items: [], raw: "",
+          error: `DeepSeek не ответил: ${errors.join("; ")}` };
       }
-      const dsData = await dsResp.json();
-      const items  = Array.isArray(dsData.items) ? dsData.items : [];
+
+      const merged = _mergeDeepSeekChunks(results);
+      const items  = Array.isArray(merged.items) ? merged.items as unknown[] : [];
+
       if (!items.length)
-        return { success: false, ai_obj: {}, items: [], raw: JSON.stringify(dsData),
+        return { success: false, ai_obj: merged, items: [], raw: JSON.stringify(merged),
           error: "DeepSeek не нашёл позиций в таблице. Проверьте формат файла." };
-      return {
-        success: true,
-        ai_obj: dsData as Record<string, unknown>,
-        items,
-        raw: JSON.stringify(dsData),
-      };
+
+      return { success: true, ai_obj: merged, items, raw: JSON.stringify(merged) };
     }
 
     // ── PDF ────────────────────────────────────────────────────────────────────
