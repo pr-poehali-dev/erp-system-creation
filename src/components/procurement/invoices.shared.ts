@@ -203,7 +203,6 @@ const POLZA_URL    = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb3
 const DS_API_URL   = "https://api.deepseek.com/v1/chat/completions";
 const DS_API_KEY   = "sk-bd65a737066e44649654f6d16983950d";
 const DS_MODEL     = "deepseek-chat";
-const DS_CHUNK     = 20; // строк на один запрос
 
 const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечения данных из счетов. Перед тобой изображение таблицы.
 
@@ -277,8 +276,12 @@ async function _callDeepSeekWithRetry(content: string): Promise<Record<string, u
   }
 }
 
-// ── Excel → TSV-чанки через SheetJS ──────────────────────────────────────────
-async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[]; materialNames: string[] }> {
+// ── Excel → подготовленные TSV-чанки через SheetJS ───────────────────────────
+// ≤150 строк: один запрос (без чанков, без дублей)
+// >150 строк: чанки по 150 + только шапка (без списка всех материалов)
+const DS_CHUNK_LARGE = 150;
+
+async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[] }> {
   const XLSX = await import("xlsx");
   const binary = atob(file_b64);
   const bytes  = new Uint8Array(binary.length);
@@ -299,51 +302,40 @@ async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[]; 
 
   if (!rows.length) throw new Error("Excel пустой или не содержит данных");
 
-  // Удаляем строки без числовых данных (строки-заголовки, разделители, итоговые надписи)
-  // Шапку (первые 5 строк) не трогаем
+  // Шапка (первые 5 строк — реквизиты: поставщик, дата, номер)
   const headerRows = rows.slice(0, 5);
   let   dataRows   = rows.slice(5);
+
+  // Убираем строки без числовых данных (заголовки столбцов, разделители и т.п.)
   const _hasNumber = (r: string[]) => r.some(c => /\d/.test(String(c)));
   dataRows = dataRows.filter(r => _hasNumber(r) || r.some(c => String(c).trim().length > 3));
 
-  // Собираем все уникальные названия материалов (длинные непустые строки) — для контекста чанков
-  const materialNames: string[] = [];
-  const seen = new Set<string>();
-  dataRows.forEach(r => {
-    r.forEach(c => {
-      const s = String(c).trim();
-      // Название материала: длиннее 5 символов, содержит буквы, не чисто числовое
-      if (s.length > 5 && /[а-яёa-z]/i.test(s) && !/^\d[\d\s.,]+$/.test(s) && !seen.has(s)) {
-        seen.add(s);
-        materialNames.push(s);
-      }
-    });
-  });
-
   // Проверяем размер
-  const tsvSample  = [...headerRows, ...dataRows].slice(0, 50).map(r => r.join("\t")).join("\n");
-  const avgRowSize = tsvSample.length / Math.min(rows.length, 50);
-  const estTsvSize = avgRowSize * rows.length;
+  const allRows    = [...headerRows, ...dataRows];
+  const tsvSample  = allRows.slice(0, 50).map(r => r.join("\t")).join("\n");
+  const avgRowSize = tsvSample.length / Math.min(allRows.length, 50);
+  const estTsvSize = avgRowSize * allRows.length;
   if (estTsvSize > 1_000_000) {
     throw new Error(
-      `Файл слишком большой для автоматической обработки (~${rows.length} строк).\n` +
-      `Сделайте скриншот таблицы в JPG и загрузите его — JPG обрабатывается через Gemini и не имеет ограничений по размеру.`
+      `Файл слишком большой (~${allRows.length} строк).\n` +
+      `Сделайте скриншот таблицы в JPG и загрузите его — JPG обрабатывается через Gemini без ограничений.`
     );
   }
 
   const headerTsv = headerRows.map(r => r.join("\t"));
   const chunks: string[] = [];
 
-  if (!dataRows.length) {
-    chunks.push(rows.map(r => r.join("\t")).join("\n"));
+  if (dataRows.length <= DS_CHUNK_LARGE) {
+    // ≤150 строк — один запрос, без чанков
+    chunks.push(allRows.map(r => r.join("\t")).join("\n"));
   } else {
-    for (let i = 0; i < dataRows.length; i += DS_CHUNK) {
-      const slice     = dataRows.slice(i, i + DS_CHUNK);
-      // В каждый чанк добавляем шапку и срез данных
+    // >150 строк — чанки по 150, только шапка без списка материалов
+    for (let i = 0; i < dataRows.length; i += DS_CHUNK_LARGE) {
+      const slice = dataRows.slice(i, i + DS_CHUNK_LARGE);
       chunks.push([...headerTsv, ...slice.map(r => r.join("\t"))].join("\n"));
     }
   }
-  return { chunks, materialNames };
+  return { chunks };
 }
 
 // ── Объединение результатов нескольких чанков ─────────────────────────────────
@@ -530,16 +522,11 @@ export async function recognizeViaPolza(
     // ── Excel → TSV → DeepSeek (прямо из браузера, без таймаута CF) ──────────
     if (isExcel) {
       onProgress?.("Читаем Excel...");
-      const { chunks, materialNames } = await _excelToTsvChunks(file_b64);
+      const { chunks } = await _excelToTsvChunks(file_b64);
 
       const total   = chunks.length;
       const results: Record<string, unknown>[] = [];
       const errors:  string[] = [];
-
-      // Промпт для Excel с контекстом названий материалов
-      const namesHint = materialNames.length
-        ? `\n\nСписок найденных названий материалов для контекста (не пропускай ни одно):\n${materialNames.slice(0, 40).join("\n")}`
-        : "";
 
       for (let i = 0; i < total; i++) {
         onProgress?.(
@@ -548,14 +535,13 @@ export async function recognizeViaPolza(
             : "DeepSeek анализирует таблицу..."
         );
         const userContent =
-          `Извлеки ВСЕ позиции из фрагмента счёта в формате TSV.\n` +
-          `Для каждой: material (полное название, не сокращай), quantity (число), unit (строка), unit_price (число).\n` +
+          `Извлеки ВСЕ позиции из счёта в формате TSV. Каждую строку данных обрабатывай ровно один раз — без дублей.\n` +
+          `Для каждой позиции: material (полное название, не сокращай), quantity (число), unit (строка), unit_price (число).\n` +
           `Поставщика, дату и номер счёта ищи в шапке (первые строки).\n` +
+          `Строки-заголовки таблицы (№, Наименование, Кол-во...) — пропускай.\n` +
           `Верни СТРОГО JSON без markdown:\n` +
-          `{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}\n` +
-          `Не пропускай строки, не добавляй комментариев.` +
-          namesHint +
-          `\n\nДанные (TSV):\n${chunks[i]}`;
+          `{"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}\n\n` +
+          `Данные (TSV):\n${chunks[i]}`;
 
         try {
           const r = await _callDeepSeekWithRetry(userContent);
