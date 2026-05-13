@@ -199,7 +199,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
           return;
         }
 
-        // JPG/PNG/PDF → загружаем и распознаём через бэкенд
+        // JPG/PNG/PDF → загружаем на S3, затем распознаём на фронте (без бэкенд Gemini)
+        const rawB64 = await fileToBase64(localFile); // читаем до setLocalFile(null)
         const { b64, name } = await prepareFileForUpload(localFile, (stage) => {
           setProcStage(stage === "converting" ? "converting" : "idle");
         });
@@ -211,25 +212,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
         if (autoRecognize) {
           setSaving(false);
           setEditItem((prev) => ({ ...prev, id: invoiceId, recognition_status: "новый" } as Invoice));
-          setRecognizing(true);
-          setProcStage("recognizing");
-          setAiError("");
-          try {
-            const res = await api.invoices.recognize(invoiceId);
-            setAiResult(res);
-            load();
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : "Ошибка распознавания";
-            // QR-код → предлагаем Polza-метод
-            if (msg.startsWith("qr_detected|")) {
-              setAiError(msg.replace("qr_detected|", ""));
-            } else {
-              setAiError(msg);
-            }
-          } finally {
-            setRecognizing(false);
-            setProcStage("idle");
-          }
+          // PDF → pdfjs→текст→DeepSeek, JPG/PNG → Gemini (всё через фронт, без бэкенд)
+          await runPolzaRecognize(rawB64, origName);
           return;
         }
       }
