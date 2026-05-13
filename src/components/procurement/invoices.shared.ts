@@ -452,6 +452,7 @@ async function _callPolzaWithModel(
   imagePngB64: string,
   prompt: string,
   model: string,
+  maxTokens = 16384,
 ): Promise<string> {
   const jpegB64 = await _resizeToJpeg(imagePngB64, 1400, 0.7);
   const controller = new AbortController();
@@ -464,7 +465,7 @@ async function _callPolzaWithModel(
       body: JSON.stringify({
         model,
         temperature: 0,
-        max_tokens: 8192,
+        max_tokens: maxTokens,
         messages: [
           {
             role: "system",
@@ -598,21 +599,21 @@ export async function recognizeViaPolza(
       onProgress?.("Рендеринг PDF в изображение...");
       const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
 
-      // Попытка 1: Qwen3.5 Plus — быстрее, не даёт 504 на сложных PDF
-      onProgress?.("Qwen анализирует PDF...");
+      // Попытка 1: GPT-5.5 — точнее на сложных счетах, лучше следует инструкциям
+      onProgress?.("GPT-5.5 анализирует PDF...");
       try {
-        const raw1 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "qwen/qwen3.5-plus");
+        const raw1 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "openai/gpt-5.5");
         if (raw1.trim()) {
           const { ai_obj, items } = _parseAiJson(raw1);
           if (items.length) {
-            console.info("[PDF] Qwen успешно:", items.length, "позиций");
+            console.info("[PDF] gpt-5.5 успешно:", items.length, "позиций");
             return { success: true, ai_obj, items, raw: raw1 };
           }
         }
-        console.warn("[PDF] Qwen не нашёл позиций, fallback на Gemini");
+        console.warn("[PDF] gpt-5.5 не нашёл позиций, fallback на Gemini");
       } catch (e1) {
         const m1 = e1 instanceof Error ? e1.message : String(e1);
-        console.warn("[PDF] Qwen ошибка:", m1, "— переключаемся на Gemini");
+        console.warn("[PDF] gpt-5.5 ошибка:", m1, "— переключаемся на Gemini");
       }
 
       // Попытка 2: Gemini — надёжный fallback
