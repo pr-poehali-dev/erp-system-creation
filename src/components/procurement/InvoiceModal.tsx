@@ -149,15 +149,22 @@ export default function InvoiceModal({
                 <div className="text-[12px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
                   <div className="flex items-start gap-1.5">
                     <Icon name="AlertCircle" size={13} className="shrink-0 mt-0.5" />
-                    <span>{aiError}</span>
+                    <span className="whitespace-pre-line">{aiError}</span>
                   </div>
-                  {onRetryPolza && (
-                    <button type="button" onClick={onRetryPolza}
-                      className="mt-1.5 flex items-center gap-1 text-[11px] text-red-700 underline hover:no-underline">
-                      <Icon name="RefreshCw" size={11} />
-                      Попробовать снова
-                    </button>
-                  )}
+                  <div className="flex items-center gap-3 mt-1.5 flex-wrap">
+                    {onRetryPolza && (
+                      <button type="button" onClick={onRetryPolza}
+                        className="flex items-center gap-1 text-[11px] text-red-700 underline hover:no-underline">
+                        <Icon name="RefreshCw" size={11} />
+                        Попробовать снова
+                      </button>
+                    )}
+                    {aiError.includes("JPG") && (
+                      <span className="text-[11px] text-red-500">
+                        Совет: загрузите скриншот таблицы как JPG — он пройдёт через Gemini без ограничений
+                      </span>
+                    )}
+                  </div>
                 </div>
               )}
             </div>

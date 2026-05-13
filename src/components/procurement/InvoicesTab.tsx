@@ -347,9 +347,16 @@ export default function InvoicesTab({ role }: { role?: Role }) {
             <table className="w-full">
               <thead>
                 <tr className="bg-secondary/50 text-left text-[11px] uppercase text-hint">
-                  {["№ счёта","Поставщик","Материал","Дата","Цена","Кол-во","Сумма","Файл","Статус",""].map(h => (
-                    <th key={h} className="px-4 py-2.5 font-medium whitespace-nowrap">{h}</th>
-                  ))}
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">№ счёта</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Поставщик</th>
+                  <th className="px-4 py-2.5 font-medium min-w-[240px]">Материал</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Дата</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Цена</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Кол-во</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Сумма</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Файл</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Статус</th>
+                  <th className="px-4 py-2.5 font-medium w-8"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -363,9 +370,15 @@ export default function InvoicesTab({ role }: { role?: Role }) {
                       <td className="px-4 py-3 text-[13px]">
                         {inv.supplier_name || <span className="text-hint italic text-[12px]">не указан</span>}
                       </td>
-                      <td className="px-4 py-3 text-[13px]">
+                      <td className="px-4 py-3 text-[13px] min-w-[240px] max-w-[360px]">
                         {inv.material_name
-                          ? <>{inv.material_name} <span className="text-hint">({inv.unit})</span></>
+                          ? <div
+                              className="break-words leading-snug cursor-help"
+                              title={`${inv.material_name} (${inv.unit})`}
+                            >
+                              {inv.material_name}{" "}
+                              <span className="text-hint whitespace-nowrap">({inv.unit})</span>
+                            </div>
                           : <span className="text-hint italic text-[12px]">не указан</span>
                         }
                       </td>

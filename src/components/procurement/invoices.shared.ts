@@ -229,20 +229,53 @@ const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечени
 {"supplier_name":"...","invoice_date":"YYYY-MM-DD","invoice_number":"...","footer_total":число,"items":[{"material":"...","quantity":число,"unit":"...","unit_price":число,"amount":число}]}`;
 
 // ── Excel → TSV-чанки через SheetJS ──────────────────────────────────────────
+// Три уровня защиты от больших файлов:
+// 1. Удаляем пустые строки/столбцы
+// 2. Если после сжатия > 1 МБ данных — бросаем понятную ошибку с советом
+// 3. Совет: сохранить как JPG → пойдёт через Gemini
 async function _excelToTsvChunks(file_b64: string): Promise<{ chunks: string[] }> {
   const XLSX = await import("xlsx");
+
+  // Уровень 1: проверяем размер до чтения (base64: 4 символа = 3 байта)
+  const fileSizeBytes = Math.round(file_b64.length * 0.75);
+  const fileSizeMb    = fileSizeBytes / (1024 * 1024);
+
+  // Читаем с опциями экономии памяти
   const binary = atob(file_b64);
   const bytes  = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-  const wb   = XLSX.read(bytes, { type: "array" });
-  const ws   = wb.Sheets[wb.SheetNames[0]];
-  const rows = (XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][])
-    .filter(r => r.some(c => String(c).trim() !== ""));
+  const wb = XLSX.read(bytes, { type: "array", dense: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+
+  let rows = (XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as string[][]);
+
+  // Уровень 1 — сжатие: убираем полностью пустые строки и обрезаем пустые хвосты колонок
+  rows = rows.filter(r => r.some(c => String(c).trim() !== ""));
+  if (fileSizeMb > 2) {
+    // Для больших файлов дополнительно обрезаем пустые правые столбцы
+    rows = rows.map(r => {
+      let last = r.length - 1;
+      while (last > 0 && String(r[last] ?? "").trim() === "") last--;
+      return r.slice(0, last + 1);
+    });
+  }
 
   if (!rows.length) throw new Error("Excel пустой или не содержит данных");
 
-  // Первые 5 строк — шапка с реквизитами (поставщик, дата, номер)
+  // Уровень 2: оцениваем размер TSV-данных после сжатия
+  const tsvSample  = rows.slice(0, 50).map(r => r.join("\t")).join("\n");
+  const avgRowSize = tsvSample.length / Math.min(rows.length, 50);
+  const estTsvSize = avgRowSize * rows.length;
+
+  if (estTsvSize > 1_000_000) {
+    throw new Error(
+      `Файл слишком большой для автоматической обработки (${Math.round(estTsvSize / 1024)} КБ текста, ~${rows.length} строк).\n` +
+      `Пожалуйста, сохраните нужные строки в отдельный файл (не более 200 строк) или сделайте скриншот таблицы в JPG и загрузите его — JPG обрабатывается через Gemini и не имеет ограничений по размеру.`
+    );
+  }
+
+  // Разбиваем на чанки
   const headerRows = rows.slice(0, 5);
   const dataRows   = rows.slice(5);
   const headerTsv  = headerRows.map(r => r.join("\t"));
