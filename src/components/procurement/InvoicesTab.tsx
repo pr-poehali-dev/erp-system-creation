@@ -286,9 +286,14 @@ export default function InvoicesTab({ role }: { role?: Role }) {
     setApplying(true);
     setAiError("");
     try {
+      // Гарантируем что material не пустой — бэкенд использует его для матчинга и material_name_raw
+      const safeItems = selectedItems.map(it => ({
+        ...it,
+        material: it.material?.trim() || "Не указан",
+      }));
       await api.invoices.applyItems({
         invoice_id:    editItem.id,
-        items:         selectedItems,
+        items:         safeItems,
         invoice_date:  invoiceDate  || null,
         invoice_number: invoiceNumber || null,
         file_url:  uploadedFile?.url  || null,

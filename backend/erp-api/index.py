@@ -4734,6 +4734,7 @@ def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, 
                         m_id = 0
 
             material    = _clean(item.get("material") or item.get("material_name")) or None
+            s_name_raw  = _clean(item.get("supplier_name") or item.get("supplier") or "") or None
             key_ok      = bool(material and up is not None and qty is not None)
             item_status = "обработан" if key_ok else "требуется_проверка"
 
@@ -4750,13 +4751,16 @@ def apply_invoice_items(cur, source_invoice_id: int, items: list, invoice_date, 
             cur.execute("SAVEPOINT _apply_item")
             cur.execute(f"""
                 INSERT INTO {SCHEMA}.invoices
-                    (supplier_id, material_id, invoice_date, invoice_number,
+                    (supplier_id, material_id, material_name_raw, supplier_name_raw,
+                     invoice_date, invoice_number,
                      unit_price, quantity, pdf_file_url, pdf_file_name,
                      recognition_status, recognized_data)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
             """, (
                 int(s_id), int(m_id),
+                material,       # всегда пишем сырое название — fallback если материал не нашёлся в справочнике
+                s_name_raw,     # сырое название поставщика
                 invoice_date or None,
                 invoice_number or None,
                 up,
@@ -4909,12 +4913,20 @@ def update_material(cur, mid, body):
 # ─── INVOICES ────────────────────────────────────────────────────────────────
 
 def get_invoices(cur):
-    """Список счетов с поставщиком и материалом. LEFT JOIN — счета без поставщика/материала тоже видны."""
+    """Список счетов с поставщиком и материалом.
+    material_name: из справочника, иначе сырое из AI (material_name_raw).
+    supplier_name: из справочника, иначе сырое из AI (supplier_name_raw)."""
     cur.execute(f"""
         SELECT i.id, i.supplier_id,
-               CASE WHEN s.name = '(не указан)' OR s.name IS NULL THEN NULL ELSE s.name END as supplier_name,
+               COALESCE(
+                   CASE WHEN s.name = '(не указан)' OR s.name IS NULL THEN NULL ELSE s.name END,
+                   i.supplier_name_raw
+               ) as supplier_name,
                i.material_id,
-               CASE WHEN m.name = '(не указан)' OR m.name IS NULL THEN NULL ELSE m.name END as material_name,
+               COALESCE(
+                   CASE WHEN m.name = '(не указан)' OR m.name IS NULL THEN NULL ELSE m.name END,
+                   i.material_name_raw
+               ) as material_name,
                COALESCE(m.unit, 'шт') as unit,
                i.invoice_date, i.invoice_number,
                i.unit_price, i.quantity, i.total_amount,
