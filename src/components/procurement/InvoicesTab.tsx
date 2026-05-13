@@ -8,6 +8,7 @@ import {
   prepareFileForUpload, InvoiceForm, UploadedFile, EMPTY_FORM, AiRecognizeResult, AiItem,
   recognizeViaPolza, fileToBase64,
 } from "./invoices.shared";
+import { usePagination } from "@/hooks/usePagination";
 
 export default function InvoicesTab({ role }: { role?: Role }) {
   const [invoices,  setInvoices]  = useState<Invoice[]>([]);
@@ -304,7 +305,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   };
 
   const totalSum    = invoices.reduce((s, i) => s + (i.total_amount || 0), 0);
-  const visible     = filterSt ? invoices.filter(i => i.recognition_status === filterSt) : invoices;
+  const filtered    = filterSt ? invoices.filter(i => i.recognition_status === filterSt) : invoices;
+  const { pageItems: visible, Pager } = usePagination(filtered);
   const canRecognize = canUseAI && !!editItem && !!uploadedFile?.url;
 
   return (
@@ -340,6 +342,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
             <div className="text-[13px]">Счетов пока нет</div>
           </div>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
@@ -398,6 +401,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
               </tbody>
             </table>
           </div>
+          {Pager}
+          </>
         )}
       </div>
 

@@ -1,144 +1,138 @@
 {
   "tests": [
-    {
-      "name": "GET dashboard",
-      "method": "GET",
-      "path": "/?r=dashboard",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET clients",
-      "method": "GET",
-      "path": "/?r=clients",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET deals",
-      "method": "GET",
-      "path": "/?r=deals",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET projects",
-      "method": "GET",
-      "path": "/?r=projects",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET procurement",
-      "method": "GET",
-      "path": "/?r=procurement",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET payments",
-      "method": "GET",
-      "path": "/?r=payments",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET kcompany",
-      "method": "GET",
-      "path": "/?r=kcompany",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET staff",
-      "method": "GET",
-      "path": "/?r=staff",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET employees",
-      "method": "GET",
-      "path": "/?r=employees",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET reports",
-      "method": "GET",
-      "path": "/?r=reports",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET slots free",
-      "method": "GET",
-      "path": "/?r=slots",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET slots plan",
-      "method": "GET",
-      "path": "/?r=slots&action=plan",
-      "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET client_portal invalid token",
-      "method": "GET",
-      "path": "/?r=client_portal&token=INVALID-TOKEN",
-      "expectedStatus": 404,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET gantt_stages no project_id",
-      "method": "GET",
-      "path": "/?r=gantt_stages&project_id=0",
+    { "name": "GET dashboard",         "method": "GET", "path": "/?r=dashboard",         "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET clients",           "method": "GET", "path": "/?r=clients",           "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET deals",             "method": "GET", "path": "/?r=deals",             "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET projects",          "method": "GET", "path": "/?r=projects",          "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET procurement",       "method": "GET", "path": "/?r=procurement",       "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET payments",          "method": "GET", "path": "/?r=payments",          "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET kcompany",          "method": "GET", "path": "/?r=kcompany",          "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET staff",             "method": "GET", "path": "/?r=staff",             "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET employees",         "method": "GET", "path": "/?r=employees",         "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET reports",           "method": "GET", "path": "/?r=reports",           "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET slots free",        "method": "GET", "path": "/?r=slots",             "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET slots plan",        "method": "GET", "path": "/?r=slots&action=plan", "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET client_portal invalid token", "method": "GET", "path": "/?r=client_portal&token=INVALID-TOKEN", "expectedStatus": 404, "bodyMatcher": "partial" },
+    { "name": "GET gantt_stages no project_id",  "method": "GET", "path": "/?r=gantt_stages&project_id=0", "expectedStatus": 400, "bodyMatcher": "partial" },
+    { "name": "GET gantt_stages project 42",     "method": "GET", "path": "/?r=gantt_stages&project_id=42", "expectedStatus": 200, "bodyMatcher": "partial" },
+
+    { "name": "GET suppliers — 200 ok",          "method": "GET", "path": "/?r=suppliers",         "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET materials — 200 ok",          "method": "GET", "path": "/?r=materials",         "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET invoices — 200 ok",           "method": "GET", "path": "/?r=invoices",          "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET purchase_requests — 200 ok",  "method": "GET", "path": "/?r=purchase_requests", "expectedStatus": 200, "bodyMatcher": "partial" },
+    { "name": "GET purchase_plan — 200 ok",      "method": "GET", "path": "/?r=purchase_plan",     "expectedStatus": 200, "bodyMatcher": "partial" },
+
+    { "name": "POST invoices create — missing fields returns 201",
+      "method": "POST", "path": "/?r=invoices",
+      "body": { "action": "create" },
+      "expectedStatus": 201, "bodyMatcher": "partial" },
+
+    { "name": "POST invoices apply_items — empty items returns 400",
+      "method": "POST", "path": "/?r=invoices",
+      "body": { "action": "apply_items", "invoice_id": 1, "items": [] },
+      "headers": { "X-User-Role": "director" },
       "expectedStatus": 400,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET gantt_stages project 42",
-      "method": "GET",
-      "path": "/?r=gantt_stages&project_id=42",
+      "expectedBody": { "error": "Список позиций пуст" },
+      "bodyMatcher": "partial" },
+
+    { "name": "POST invoices apply_items — no rights returns 403",
+      "method": "POST", "path": "/?r=invoices",
+      "body": { "action": "apply_items", "invoice_id": 1, "items": [{ "material": "Тест", "quantity": 1, "unit": "шт", "unit_price": 100 }] },
+      "headers": { "X-User-Role": "client" },
+      "expectedStatus": 403,
+      "bodyMatcher": "partial" },
+
+    { "name": "POST invoices apply_items — director creates items",
+      "method": "POST", "path": "/?r=invoices",
+      "body": {
+        "action": "apply_items",
+        "invoice_id": 1,
+        "items": [
+          { "material": "Тест-материал-автотест", "quantity": 2, "unit": "шт", "unit_price": 500, "supplier_name": "Тест-поставщик-автотест" }
+        ],
+        "invoice_date": "2026-01-01",
+        "invoice_number": "AUTOTEST-001"
+      },
+      "headers": { "X-User-Role": "director" },
       "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET suppliers",
-      "method": "GET",
-      "path": "/?r=suppliers",
+      "expectedBody": { "count": 1 },
+      "bodyMatcher": "partial" },
+
+    { "name": "GET suppliers — has id field in items",
+      "method": "GET", "path": "/?r=suppliers",
+      "headers": { "X-User-Role": "director" },
       "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET materials",
-      "method": "GET",
-      "path": "/?r=materials",
+      "bodyMatcher": "partial" },
+
+    { "name": "GET materials — has name and unit fields",
+      "method": "GET", "path": "/?r=materials",
+      "headers": { "X-User-Role": "director" },
       "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET invoices",
-      "method": "GET",
-      "path": "/?r=invoices",
+      "bodyMatcher": "partial" },
+
+    { "name": "GET invoices — pagination: returns ≤200 records",
+      "method": "GET", "path": "/?r=invoices",
       "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET purchase_requests",
-      "method": "GET",
-      "path": "/?r=purchase_requests",
+      "bodyMatcher": "partial" },
+
+    { "name": "POST invoices apply_items — special chars in material",
+      "method": "POST", "path": "/?r=invoices",
+      "body": {
+        "action": "apply_items",
+        "invoice_id": 1,
+        "items": [
+          { "material": "Металлочерепица МП (ПЭ-01-7024-0.5) \"Ламонтерра\" L=3м", "quantity": 10.5, "unit": "м2", "unit_price": 770 }
+        ]
+      },
+      "headers": { "X-User-Role": "director" },
       "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    },
-    {
-      "name": "GET purchase_plan",
-      "method": "GET",
-      "path": "/?r=purchase_plan",
+      "expectedBody": { "count": 1 },
+      "bodyMatcher": "partial" },
+
+    { "name": "POST invoices apply_items — null unit_price and quantity creates требуется_проверка",
+      "method": "POST", "path": "/?r=invoices",
+      "body": {
+        "action": "apply_items",
+        "invoice_id": 1,
+        "items": [
+          { "material": "Материал без цены", "quantity": null, "unit": "шт", "unit_price": null }
+        ]
+      },
+      "headers": { "X-User-Role": "director" },
       "expectedStatus": 200,
-      "bodyMatcher": "partial"
-    }
+      "expectedBody": { "count": 1 },
+      "bodyMatcher": "partial" },
+
+    { "name": "POST invoices apply_items — multiple items all saved",
+      "method": "POST", "path": "/?r=invoices",
+      "body": {
+        "action": "apply_items",
+        "invoice_id": 1,
+        "items": [
+          { "material": "Позиция 1", "quantity": 1, "unit": "шт", "unit_price": 100 },
+          { "material": "Позиция 2", "quantity": 2, "unit": "м2", "unit_price": 200 },
+          { "material": "Позиция 3", "quantity": 3, "unit": "м3", "unit_price": 300 }
+        ],
+        "invoice_number": "MULTI-TEST"
+      },
+      "headers": { "X-User-Role": "director" },
+      "expectedStatus": 200,
+      "expectedBody": { "count": 3 },
+      "bodyMatcher": "partial" },
+
+    { "name": "POST invoices recognize — no rights returns 403",
+      "method": "POST", "path": "/?r=invoices",
+      "body": { "action": "recognize", "invoice_id": 1 },
+      "headers": { "X-User-Role": "worker" },
+      "expectedStatus": 403,
+      "bodyMatcher": "partial" },
+
+    { "name": "POST invoices update — returns ok",
+      "method": "POST", "path": "/?r=invoices",
+      "body": { "action": "update", "id": 429, "recognition_status": "требуется_проверка" },
+      "headers": { "X-User-Role": "director" },
+      "expectedStatus": 200,
+      "expectedBody": { "ok": true },
+      "bodyMatcher": "partial" }
   ]
 }

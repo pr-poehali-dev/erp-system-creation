@@ -197,12 +197,14 @@ export interface UploadedFile {
 }
 
 // ── Прямое распознавание файла через Polza.ai (без Cloud Function) ──────────
-// Excel → SheetJS → Canvas PNG → Gemini. PDF → data:application/pdf → Gemini.
+// Excel → SheetJS → Canvas PNG → Gemini.
+// PDF простой → data:application/pdf → Gemini.
+// PDF с QR/сложной вёрсткой → pdfjs-dist рендер → JPEG → Gemini.
 const POLZA_URL = "https://functions.poehali.dev/778ceb38-0039-4da4-9a48-0cb34a7527cf";
 
 const _RECOGNIZE_PROMPT = `Ты — ассистент для извлечения данных из счетов. Перед тобой изображение таблицы.
 
-ВАЖНО: Игнорируй все фотографии товаров, логотипы, баннеры, иконки и любую другую графику.
+ВАЖНО: Игнорируй все фотографии товаров, логотипы, баннеры, QR-коды, штрих-коды, иконки и любую другую графику.
 Читай ТОЛЬКО текст таблицы и реквизиты документа.
 
 Извлеки ВСЕ позиции. Для каждой:
@@ -240,6 +242,43 @@ function _parseAiJson(raw: string): { ai_obj: Record<string, unknown>; items: un
     } catch { /* continue */ }
   }
   return { ai_obj: {}, items: [] };
+}
+
+// ── PDF → JPEG через pdfjs-dist (первая страница) ────────────────────────────
+// Используется как fallback для PDF с QR, сложной вёрсткой или при пустом ответе.
+async function _pdfToJpeg(pdfB64: string, onProgress?: (msg: string) => void): Promise<string> {
+  onProgress?.("Рендеринг PDF в изображение...");
+
+  // Динамический импорт pdfjs
+  const pdfjsLib = await import("pdfjs-dist");
+
+  // Указываем worker через CDN чтобы не тащить в бандл
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  }
+
+  const binary = atob(pdfB64);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+  const pdf  = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const page = await pdf.getPage(1);
+
+  // Масштаб: приводим страницу к ~1400px по ширине
+  const viewport0 = page.getViewport({ scale: 1 });
+  const scale     = Math.min(1400 / viewport0.width, 2.5); // не больше 2.5x
+  const viewport  = page.getViewport({ scale });
+
+  const canvas  = document.createElement("canvas");
+  canvas.width  = Math.round(viewport.width);
+  canvas.height = Math.round(viewport.height);
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  await page.render({ canvasContext: ctx, viewport }).promise;
+  return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
 }
 
 // ── Excel → PNG через SheetJS + Canvas (без сторонних зависимостей) ──────────
@@ -311,8 +350,8 @@ async function _excelToPngB64(file_b64: string): Promise<string> {
     ctx.fillRect(0, y + ROW_H - 1, W, 1);   // горизонтальный разделитель
   });
 
-  // Масштабируем до максимума 2400px (Gemini хорошо читает крупные изображения)
-  const MAX = 2400;
+  // Масштабируем до максимума 1400px — оптимально для Gemini
+  const MAX = 1400;
   if (W > MAX || H > MAX) {
     const scale = MAX / Math.max(W, H);
     const c2 = document.createElement("canvas");
@@ -326,7 +365,7 @@ async function _excelToPngB64(file_b64: string): Promise<string> {
 
 // ── Отправить один запрос в Polza.ai ─────────────────────────────────────────
 // Сжимаем PNG до maxW px и конвертируем в JPEG quality=0.85 для ускорения передачи
-async function _resizeToJpeg(pngB64: string, maxW = 1600): Promise<string> {
+async function _resizeToJpeg(pngB64: string, maxW = 1400, quality = 0.7): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
@@ -338,15 +377,15 @@ async function _resizeToJpeg(pngB64: string, maxW = 1600): Promise<string> {
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, w, h);
       ctx.drawImage(img, 0, 0, w, h);
-      resolve(c.toDataURL("image/jpeg", 0.85).split(",")[1]);
+      resolve(c.toDataURL("image/jpeg", quality).split(",")[1]);
     };
     img.src = `data:image/png;base64,${pngB64}`;
   });
 }
 
 async function _callPolza(imagePngB64: string, prompt: string): Promise<string> {
-  // Сжимаем изображение до 1600px JPEG — ускоряет ответ и снижает риск таймаута
-  const jpegB64 = await _resizeToJpeg(imagePngB64, 1600);
+  // Сжимаем до 1400px JPEG quality 0.7 — ускоряет ответ и снижает риск таймаута
+  const jpegB64 = await _resizeToJpeg(imagePngB64, 1400, 0.7);
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 120_000); // 120 сек
@@ -391,10 +430,56 @@ async function _callPolza(imagePngB64: string, prompt: string): Promise<string> 
   }
 }
 
+// Признаки сложного PDF: QR/баркод в имени, или большой размер (>800KB base64 ≈ >600KB файл)
+function _isPdfComplex(file_b64: string, file_name: string): boolean {
+  const name = file_name.toLowerCase();
+  if (/qr|barcode|штрих|scan|scan|сканир/i.test(name)) return true;
+  // base64 длина: каждые 4 символа = 3 байта → > ~800KB файл
+  return file_b64.length > 1_066_000;
+}
+
+// Отправить PDF напрямую как application/pdf (для простых PDF < ~600KB без QR)
+async function _callPolzaPdf(pdfB64: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120_000);
+  try {
+    const resp = await fetch(`${POLZA_URL}?action=generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: "google/gemini-3.1-flash-lite",
+        temperature: 0,
+        max_tokens: 8192,
+        messages: [
+          { role: "system", content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON." },
+          { role: "user", content: [
+            { type: "text",      text: _RECOGNIZE_PROMPT },
+            { type: "image_url", image_url: { url: `data:application/pdf;base64,${pdfB64}` } },
+          ]},
+        ],
+      }),
+    });
+    if (!resp.ok) {
+      if (resp.status === 504) throw new Error("__504__");
+      const t = await resp.text();
+      throw new Error(`Polza ${resp.status}: ${t.slice(0, 200)}`);
+    }
+    return (await resp.json()).content ?? "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * Распознаёт Excel или PDF напрямую через Polza.ai из браузера (без Cloud Function).
- * Excel конвертируется в PNG через SheetJS + Canvas.
- * PDF передаётся как data:application/pdf.
+ * Распознаёт Excel / PDF / JPG / PNG напрямую через Polza.ai из браузера.
+ *
+ * Логика:
+ * - Excel  → SheetJS → Canvas PNG → JPEG 1400px → Gemini
+ * - PDF простой (<600KB, без QR) → data:application/pdf → Gemini
+ *   При пустом ответе/ошибке — автоматически fallback через pdfjs рендер
+ * - PDF сложный (>600KB или QR в имени) → pdfjs рендер → JPEG → Gemini сразу
+ * - JPG/PNG → JPEG 1400px → Gemini
  */
 export async function recognizeViaPolza(
   file_b64: string,
@@ -403,65 +488,80 @@ export async function recognizeViaPolza(
 ): Promise<{ success: boolean; ai_obj: Record<string, unknown>; items: unknown[]; raw: string; error?: string }> {
   const ext     = file_name.split(".").pop()?.toLowerCase() ?? "";
   const isExcel = ["xls", "xlsx"].includes(ext);
+  const isPdf   = ext === "pdf";
 
   onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
 
   try {
-    let imagePngB64: string;
-
+    // ── Excel ──────────────────────────────────────────────────────────────────
     if (isExcel) {
       onProgress?.("Преобразование Excel в изображение...");
-      imagePngB64 = await _excelToPngB64(file_b64);
+      const pngB64 = await _excelToPngB64(file_b64);
       onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
-    } else {
-      // PDF / JPG / PNG — для PDF Gemini принимает application/pdf через image_url
-      const mimeMap: Record<string, string> = {
-        pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
-      };
-      const mime = mimeMap[ext] ?? "image/jpeg";
-      // Для PDF используем специальный путь — не PNG, а оригинал
-      if (ext === "pdf") {
-        const resp = await fetch(`${POLZA_URL}?action=generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "google/gemini-3.1-flash-lite",
-            temperature: 0,
-            max_tokens: 8192,
-            messages: [
-              { role: "system", content: "Ты — система извлечения данных из счетов. Отвечай ТОЛЬКО строгим JSON." },
-              { role: "user",   content: [
-                  { type: "text",      text: _RECOGNIZE_PROMPT },
-                  { type: "image_url", image_url: { url: `data:${mime};base64,${file_b64}` } },
-              ]},
-            ],
-          }),
-        });
-        if (!resp.ok) {
-          const t = await resp.text();
-          return { success: false, ai_obj: {}, items: [], raw: t, error: `Polza ${resp.status}: ${t.slice(0, 200)}` };
-        }
-        const raw = (await resp.json()).content ?? "";
-        if (!raw.trim()) return { success: false, ai_obj: {}, items: [], raw, error: "Пустой ответ. Попробуйте снова." };
-        const { ai_obj, items } = _parseAiJson(raw);
-        return { success: true, ai_obj, items, raw };
-      }
-      // JPG/PNG — конвертируем в PNG canvas (сжатие/нормализация)
-      imagePngB64 = file_b64;
+      const raw = await _callPolza(pngB64, _RECOGNIZE_PROMPT);
+      if (!raw.trim())
+        return { success: false, ai_obj: {}, items: [], raw, error: "Модель не вернула данные. Попробуйте снова." };
+      const { ai_obj, items } = _parseAiJson(raw);
+      if (!items.length)
+        return { success: false, ai_obj: {}, items: [], raw,
+          error: "Счёт содержит слишком много графики. Сохраните его как JPG без картинок и загрузите снова." };
+      return { success: true, ai_obj, items, raw };
     }
 
-    const raw = await _callPolza(imagePngB64, _RECOGNIZE_PROMPT);
+    // ── PDF ────────────────────────────────────────────────────────────────────
+    if (isPdf) {
+      const complex = _isPdfComplex(file_b64, file_name);
 
+      // Сразу идём по JPG-ветке если PDF сложный
+      if (!complex) {
+        onProgress?.("Анализ PDF...");
+        try {
+          const raw = await _callPolzaPdf(file_b64);
+          if (raw.trim()) {
+            const { ai_obj, items } = _parseAiJson(raw);
+            if (items.length) return { success: true, ai_obj, items, raw };
+          }
+        } catch (e) {
+          // 504 или пустой ответ — идём на fallback через рендер
+          if (!(e instanceof Error && (e.message === "__504__" || e.message.includes("504")))) {
+            throw e; // другая ошибка — пробрасываем
+          }
+        }
+        // Простой PDF не дал результата — пробуем через рендер страницы
+        onProgress?.("PDF не распознан напрямую, рендерим постранично...");
+      } else {
+        onProgress?.("Сложный PDF — рендеринг в изображение...");
+      }
+
+      const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
+      onProgress?.("Распознавание через ИИ... может занять до 60 секунд");
+      const raw2 = await _callPolza(jpegB64, _RECOGNIZE_PROMPT);
+      if (!raw2.trim())
+        return { success: false, ai_obj: {}, items: [], raw: raw2,
+          error: "PDF не поддаётся распознаванию. Попробуйте сохранить как JPG и загрузить снова." };
+      const { ai_obj, items } = _parseAiJson(raw2);
+      if (!items.length)
+        return { success: false, ai_obj: {}, items: [], raw: raw2,
+          error: `Позиции не найдены. Ответ модели: ${raw2.slice(0, 300)}` };
+      return { success: true, ai_obj, items, raw: raw2 };
+    }
+
+    // ── JPG / PNG ──────────────────────────────────────────────────────────────
+    const raw = await _callPolza(file_b64, _RECOGNIZE_PROMPT);
     if (!raw.trim())
       return { success: false, ai_obj: {}, items: [], raw, error: "Пустой ответ от модели. Попробуйте снова." };
-
     const { ai_obj, items } = _parseAiJson(raw);
     if (!items.length)
-      return { success: false, ai_obj: {}, items: [], raw, error: `Модель не извлекла позиции. Ответ: ${raw.slice(0, 300)}` };
-
+      return { success: false, ai_obj: {}, items: [], raw,
+        error: `Модель не извлекла позиции. Ответ: ${raw.slice(0, 300)}` };
     return { success: true, ai_obj, items, raw };
+
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return { success: false, ai_obj: {}, items: [], raw: "", error: msg };
+    // 504 с понятным текстом
+    const userMsg = msg.includes("504") || msg === "__504__"
+      ? "Счёт содержит слишком много графики. Пожалуйста, сохраните его как JPG без картинок и загрузите снова."
+      : msg;
+    return { success: false, ai_obj: {}, items: [], raw: "", error: userMsg };
   }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, PurchaseRequest, Material, Staff } from "@/lib/api";
 import Icon from "@/components/ui/icon";
+import { usePagination } from "@/hooks/usePagination";
 
 const STATUS_CFG = {
   новая:    { label: "Новая",    cls: "bg-amber-100 text-amber-700" },
@@ -54,7 +55,8 @@ export default function PurchaseRequestsTab() {
     } finally { setSaving(false); }
   };
 
-  const visible = filterSt ? requests.filter(r => r.status === filterSt) : requests;
+  const filtered = filterSt ? requests.filter(r => r.status === filterSt) : requests;
+  const { pageItems: visible, Pager } = usePagination(filtered);
 
   return (
     <div className="space-y-4">
@@ -82,6 +84,7 @@ export default function PurchaseRequestsTab() {
             <div className="text-[13px]">Заявок пока нет</div>
           </div>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
@@ -126,6 +129,8 @@ export default function PurchaseRequestsTab() {
               </tbody>
             </table>
           </div>
+          {Pager}
+          </>
         )}
       </div>
 

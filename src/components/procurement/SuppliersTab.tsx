@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, Supplier, SupplierCategory, SUPPLIER_CATEGORIES } from "@/lib/api";
 import Icon from "@/components/ui/icon";
+import { usePagination } from "@/hooks/usePagination";
 
 const CATEGORY_LABELS: Record<SupplierCategory, string> = {
   бетон: "Бетон", пиломатериалы: "Пиломатериалы", металл: "Металл",
@@ -78,7 +79,8 @@ export default function SuppliersTab() {
     }
   };
 
-  const visible = filterCat ? suppliers.filter(s => s.category === filterCat) : suppliers;
+  const filtered = filterCat ? suppliers.filter(s => s.category === filterCat) : suppliers;
+  const { pageItems: visible, Pager } = usePagination(filtered);
 
   return (
     <div className="space-y-4">
@@ -117,6 +119,7 @@ export default function SuppliersTab() {
             <div className="text-[11px] mt-1">Нажмите «Добавить поставщика» или импортируйте из CSV</div>
           </div>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
@@ -146,6 +149,8 @@ export default function SuppliersTab() {
               </tbody>
             </table>
           </div>
+          {Pager}
+          </>
         )}
       </div>
 

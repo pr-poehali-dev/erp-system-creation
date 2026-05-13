@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, Material, MaterialUnit, SupplierCategory, MATERIAL_UNITS, SUPPLIER_CATEGORIES } from "@/lib/api";
 import Icon from "@/components/ui/icon";
+import { usePagination } from "@/hooks/usePagination";
 
 const CAT_LABELS: Record<SupplierCategory, string> = {
   бетон: "Бетон", пиломатериалы: "Пиломатериалы", металл: "Металл",
@@ -43,9 +44,10 @@ export default function MaterialsTab() {
     } finally { setSaving(false); }
   };
 
-  const visible = search
+  const filtered = search
     ? materials.filter(m => m.name.toLowerCase().includes(search.toLowerCase()))
     : materials;
+  const { pageItems: visible, Pager } = usePagination(filtered);
 
   return (
     <div className="space-y-4">
@@ -70,6 +72,7 @@ export default function MaterialsTab() {
             <div className="text-[13px]">Материалов пока нет</div>
           </div>
         ) : (
+          <>
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
@@ -99,6 +102,8 @@ export default function MaterialsTab() {
               </tbody>
             </table>
           </div>
+          {Pager}
+          </>
         )}
       </div>
 
