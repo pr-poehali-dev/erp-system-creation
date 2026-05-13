@@ -599,8 +599,9 @@ export async function recognizeViaPolza(
       onProgress?.("Рендеринг PDF в изображение...");
       const jpegB64 = await _pdfToJpeg(file_b64, onProgress);
 
-      // Попытка 1: GPT-5.5 — точнее на сложных счетах, лучше следует инструкциям
+      // Попытка 1: GPT-5.5
       onProgress?.("GPT-5.5 анализирует PDF...");
+      let gpt55Error = "";
       try {
         const raw1 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "openai/gpt-5.5");
         if (raw1.trim()) {
@@ -610,14 +611,15 @@ export async function recognizeViaPolza(
             return { success: true, ai_obj, items, raw: raw1 };
           }
         }
-        console.warn("[PDF] gpt-5.5 не нашёл позиций, fallback на Gemini");
+        gpt55Error = "gpt-5.5 вернул пустой ответ";
+        console.warn("[PDF]", gpt55Error);
       } catch (e1) {
-        const m1 = e1 instanceof Error ? e1.message : String(e1);
-        console.warn("[PDF] gpt-5.5 ошибка:", m1, "— переключаемся на Gemini");
+        gpt55Error = e1 instanceof Error ? e1.message : String(e1);
+        console.warn("[PDF] gpt-5.5 ошибка:", gpt55Error);
       }
+      onProgress?.(`gpt-5.5: ${gpt55Error.slice(0, 80)} → Gemini fallback...`);
 
-      // Попытка 2: Gemini — надёжный fallback
-      onProgress?.("Переключение на Gemini...");
+      // Попытка 2: Gemini fallback
       try {
         const raw2 = await _callPolzaWithModel(jpegB64, _RECOGNIZE_PROMPT, "google/gemini-3.1-flash-lite");
         if (raw2.trim()) {
