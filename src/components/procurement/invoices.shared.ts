@@ -460,38 +460,31 @@ async function _callPolza(imagePngB64: string, prompt: string): Promise<string> 
   return _callPolzaWithModel(imagePngB64, prompt, "google/gemini-3.1-flash-lite");
 }
 
-// ── PDF → pdfjs извлечение текста → DeepSeek-chat ────────────────────────────
-// QR-коды и графика игнорируются автоматически — pdfjs берёт только текстовый слой.
-// Для скан-PDF (без текстового слоя) возвращает пустую строку → показываем ошибку.
+// ── PDF → PyMuPDF на бэкенде → текст → DeepSeek-chat ────────────────────────
+// Бэкенд erp-api/?r=extract_pdf_text извлекает текстовый слой через PyMuPDF.
+// QR-коды и графика игнорируются автоматически — берётся только текст.
+const ERP_API_URL = "https://functions.poehali.dev/73735141-dfc6-4557-8541-c9c5d55a9650";
 
 async function _pdfExtractText(pdfB64: string, onProgress?: (msg: string) => void): Promise<string> {
   onProgress?.("Читаем текст из PDF...");
-  const pdfjsLib = await import("pdfjs-dist");
-  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60_000);
+  try {
+    const resp = await fetch(`${ERP_API_URL}/?r=extract_pdf_text`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({ pdf_b64: pdfB64 }),
+    });
+    if (!resp.ok) {
+      const t = await resp.text();
+      throw new Error(`extract_pdf_text ${resp.status}: ${t.slice(0, 200)}`);
+    }
+    const data = await resp.json();
+    return (data.text ?? "") as string;
+  } finally {
+    clearTimeout(timer);
   }
-  const binary = atob(pdfB64);
-  const bytes  = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-
-  const pdf   = await pdfjsLib.getDocument({ data: bytes }).promise;
-  const parts: string[] = [];
-
-  // Извлекаем текст со всех страниц
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page    = await pdf.getPage(p);
-    const content = await page.getTextContent();
-    const pageText = content.items
-      .map((item: unknown) => {
-        const i = item as { str?: string };
-        return i.str ?? "";
-      })
-      .join(" ");
-    parts.push(pageText.trim());
-  }
-
-  return parts.filter(Boolean).join("\n\n");
 }
 
 /**

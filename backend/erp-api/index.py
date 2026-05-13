@@ -5168,7 +5168,8 @@ def handler(event: dict, context) -> dict:
               "stage_durations", "estimate_works", "estimate_materials", "estimate",
               "contractors", "documents", "doc_templates", "contract_docs",
               "notifications", "payout_requests", "realtors_report", "gantt_stages",
-              "suppliers", "materials", "invoices", "purchase_requests", "purchase_plan"}
+              "suppliers", "materials", "invoices", "purchase_requests", "purchase_plan",
+              "extract_pdf_text"}
     resource = qs.get("r", "")
     if not resource:
         parts = [p for p in path.split("/") if p]
@@ -6141,6 +6142,32 @@ def handler(event: dict, context) -> dict:
                     if error: return err(error)
                     conn.commit()
                     return ok(act, 201)
+
+        # ── EXTRACT PDF TEXT ───────────────────────────────────────────────────
+        elif resource == "extract_pdf_text":
+            if method != "POST":
+                return err("Method not allowed", 405)
+            pdf_b64 = body.get("pdf_b64", "")
+            if not pdf_b64:
+                return err("pdf_b64 обязателен", 400)
+            import base64 as _b64
+            import io as _io
+            try:
+                pdf_bytes = _b64.b64decode(pdf_b64)
+            except Exception:
+                return err("Некорректный base64", 400)
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(_io.BytesIO(pdf_bytes))
+                parts  = []
+                for page in reader.pages:
+                    text = page.extract_text() or ""
+                    if text.strip():
+                        parts.append(text.strip())
+                full_text = "\n\n".join(parts)
+                return ok({"text": full_text, "pages": len(reader.pages), "has_text": bool(full_text.strip())})
+            except Exception as e:
+                return err(f"Ошибка чтения PDF: {e}", 500)
 
         return err("Маршрут не найден", 404)
 

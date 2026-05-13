@@ -133,6 +133,12 @@
       "headers": { "X-User-Role": "director" },
       "expectedStatus": 200,
       "expectedBody": { "ok": true },
+      "bodyMatcher": "partial" },
+
+    { "name": "POST extract_pdf_text — no pdf_b64 returns 400",
+      "method": "POST", "path": "/?r=extract_pdf_text",
+      "body": {},
+      "expectedStatus": 400,
       "bodyMatcher": "partial" }
   ]
 }
