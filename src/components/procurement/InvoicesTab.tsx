@@ -3,6 +3,7 @@ import { api, Invoice, Supplier, Material } from "@/lib/api";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 import InvoiceModal from "./InvoiceModal";
+import BulkUploadModal from "./BulkUploadModal";
 import {
   AI_ROLES, EXT_ICON, STATUS_CFG, fmtMoney, fmtDate,
   prepareFileForUpload, InvoiceForm, UploadedFile, EMPTY_FORM, AiRecognizeResult, AiItem,
@@ -36,6 +37,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const [aiError,     setAiError]     = useState("");
   // Файл для повторного запроса через Polza (сохраняем b64 + имя)
   const [polzaFile,   setPolzaFile]   = useState<{ b64: string; name: string } | null>(null);
+
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   const canUseAI      = !role || AI_ROLES.includes(role);
   const canSeeRawData = canUseAI;
@@ -312,11 +315,20 @@ export default function InvoicesTab({ role }: { role?: Role }) {
             Итого: <span className="font-semibold text-foreground">{fmtMoney(totalSum)}</span>
           </div>
         </div>
-        <button onClick={openCreate}
-          className="flex items-center gap-1.5 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors">
-          <Icon name="Plus" size={14} />
-          Добавить счёт
-        </button>
+        <div className="flex items-center gap-2">
+          {canUseAI && (
+            <button onClick={() => setBulkOpen(true)}
+              className="flex items-center gap-1.5 px-4 py-2 border border-border rounded-lg text-[13px] font-medium hover:bg-secondary transition-colors">
+              <Icon name="Files" size={14} />
+              Загрузить несколько
+            </button>
+          )}
+          <button onClick={openCreate}
+            className="flex items-center gap-1.5 px-4 py-2 bg-primary text-white rounded-lg text-[13px] font-medium hover:bg-primary/90 transition-colors">
+            <Icon name="Plus" size={14} />
+            Добавить счёт
+          </button>
+        </div>
       </div>
 
       {/* Таблица */}
@@ -437,6 +449,14 @@ export default function InvoicesTab({ role }: { role?: Role }) {
           onApplyAI={handleApplyAI}
           onDismissAI={() => setAiResult(null)}
           onRetryPolza={polzaFile ? () => runPolzaRecognize(polzaFile.b64, polzaFile.name) : undefined}
+        />
+      )}
+
+      {/* Массовая загрузка */}
+      {bulkOpen && (
+        <BulkUploadModal
+          onClose={() => setBulkOpen(false)}
+          onDone={load}
         />
       )}
     </div>
