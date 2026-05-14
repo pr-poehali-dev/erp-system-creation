@@ -66,8 +66,12 @@ const ROLES: { value: Role; label: string }[] = [
 const queryClient = new QueryClient();
 
 function ERPApp() {
-  const [activeTab, setActiveTab] = useState("dashboard");
-  const [currentRole, setCurrentRole] = useState<Role>("director");
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    try { return sessionStorage.getItem("erp_active_tab") || "dashboard"; } catch { return "dashboard"; }
+  });
+  const [currentRole, setCurrentRole] = useState<Role>(() => {
+    try { return (sessionStorage.getItem("erp_current_role") as Role) || "director"; } catch { return "director"; }
+  });
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -93,6 +97,11 @@ function ERPApp() {
     });
     return () => { cancelled = true; };
   }, [currentRole]);
+
+  const setActiveTabPersist = (tab: string) => {
+    try { sessionStorage.setItem("erp_active_tab", tab); } catch { /* ignore */ }
+    setActiveTab(tab);
+  };
 
   const toggleSidebar = () => {
     setSidebarCollapsed(prev => {
@@ -211,10 +220,10 @@ function ERPApp() {
   ];
 
   const visibleItems = navItems.filter((item) => item.roles.includes(currentRole));
-  const activeItem = navItems.find((item) => item.id === activeTab);
   const currentRoleLabel = ROLES.find((r) => r.value === currentRole)?.label;
 
-  const safeActiveTab = visibleItems.find((i) => i.id === activeTab) ? activeTab : visibleItems[0]?.id;
+  const isTabVisible = visibleItems.some((i) => i.id === activeTab);
+  const safeActiveTab = isTabVisible ? activeTab : (visibleItems[0]?.id ?? "dashboard");
 
   return (
     <div className="min-h-screen bg-background flex font-golos">
@@ -245,7 +254,7 @@ function ERPApp() {
           {visibleItems.map((item) => (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id)}
+              onClick={() => setActiveTabPersist(item.id)}
               title={sidebarCollapsed ? item.label : undefined}
               className={`
                 flex items-center rounded-md text-[13px] font-medium transition-all
@@ -285,9 +294,10 @@ function ERPApp() {
                   <button
                     key={role.value}
                     onClick={() => {
+                      try { sessionStorage.setItem("erp_current_role", role.value); } catch { /* ignore */ }
                       setCurrentRole(role.value);
                       setRoleMenuOpen(false);
-                      setActiveTab("dashboard");
+                      setActiveTabPersist("dashboard");
                     }}
                     className={`w-full text-left px-3 py-2 text-[13px] hover:bg-secondary transition-colors flex items-center gap-2 ${
                       currentRole === role.value ? "text-primary font-medium" : "text-foreground"
