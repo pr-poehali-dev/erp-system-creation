@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, MaterialCategory } from "@/lib/api";
+import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 
-export default function CategoriesTab() {
+const CAN_IMPORT_ROLES: Role[] = ["director", "supply_director"];
+
+export default function CategoriesTab({ role }: { role?: Role }) {
+  const canImport = !role || CAN_IMPORT_ROLES.includes(role);
   const [cats, setCats] = useState<MaterialCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -48,11 +52,15 @@ export default function CategoriesTab() {
   };
 
   const handleImport = async () => {
-    if (!confirm("Импортировать стандартное дерево категорий? Существующие категории не дублируются.")) return;
+    if (!confirm("Импортировать полное стандартное дерево категорий (~700 позиций)? Существующие категории не дублируются.")) return;
     setBusy(true); setError("");
     try {
       const res = await api.material_categories.seed();
-      alert(`Импорт завершён. Добавлено категорий: ${res.created}`);
+      alert(
+        res.created > 0
+          ? `Импорт завершён. Добавлено новых категорий: ${res.created} (обработано позиций: ${res.total_lines}).`
+          : `Дерево уже импортировано — новых категорий не добавлено (обработано позиций: ${res.total_lines}).`
+      );
       load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Ошибка импорта");
@@ -166,7 +174,7 @@ export default function CategoriesTab() {
           Перетаскивайте категории мышью, чтобы изменить родителя. {cats.length} категорий.
         </div>
         <div className="flex items-center gap-2">
-          {cats.length === 0 && (
+          {canImport && (
             <button onClick={handleImport} disabled={busy}
               className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-lg text-[13px] hover:bg-secondary transition-colors disabled:opacity-50">
               <Icon name={busy ? "Loader" : "Download"} size={14} className={busy ? "animate-spin" : ""} />
@@ -202,9 +210,11 @@ export default function CategoriesTab() {
           <div className="py-12 text-center text-hint">
             <Icon name="FolderTree" size={28} className="mx-auto mb-2 opacity-40" />
             <div className="text-[13px]">Категорий пока нет</div>
-            <button onClick={handleImport} disabled={busy} className="mt-2 text-primary text-[13px] hover:underline">
-              Импортировать стандартное дерево
-            </button>
+            {canImport && (
+              <button onClick={handleImport} disabled={busy} className="mt-2 text-primary text-[13px] hover:underline">
+                Импортировать стандартное дерево
+              </button>
+            )}
           </div>
         ) : (
           <>

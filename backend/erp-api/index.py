@@ -3474,20 +3474,37 @@ def _match_or_create_material(cur, name: str, raw_unit: str):
         return None, False, 'шт'
     # Используем unit из AI как есть, дефолт "шт" только если пусто
     unit = raw_unit.strip() if raw_unit and raw_unit.strip() and raw_unit.strip().lower() not in ('null','none','') else 'шт'
+
+    # 1) Точное совпадение по name (без учёта регистра) — берём этот материал как есть.
     cur.execute(
         f"SELECT id FROM {SCHEMA}.materials WHERE lower(name)=lower(%s) AND name!='(не указан)' LIMIT 1",
         (name,)
     )
     row = cur.fetchone()
-    if not row:
-        cur.execute(
-            f"SELECT id FROM {SCHEMA}.materials WHERE name ILIKE %s AND name!='(не указан)' LIMIT 1",
-            (f"%{name}%",)
-        )
-        row = cur.fetchone()
     if row:
         return row[0], False, unit
-    # Новый материал из AI попадает в корневую категорию «Прочее»
+
+    # 2) Совпадение по подстроке (ILIKE). Если найдено несколько — берём самый
+    #    "популярный" материал (по числу использований в счетах), у которого
+    #    есть категория. Это даёт новому счёту правильную category_id.
+    cur.execute(
+        f"""
+        SELECT m.id
+        FROM {SCHEMA}.materials m
+        LEFT JOIN {SCHEMA}.invoices i ON i.material_id = m.id
+        WHERE m.name ILIKE %s AND m.name!='(не указан)'
+        GROUP BY m.id, m.category_id
+        ORDER BY (m.category_id IS NOT NULL) DESC, COUNT(i.id) DESC, m.id ASC
+        LIMIT 1
+        """,
+        (f"%{name}%",)
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0], False, unit
+
+    # 3) Не нашли ни одного — создаём новый материал в корневой категории «Прочее».
+    #    Снабженец позже перекатегоризирует его вручную.
     other_cat_id = get_or_create_other_category(cur)
     cur.execute(
         f"INSERT INTO {SCHEMA}.materials (name, unit, category_id) VALUES (%s,%s,%s) RETURNING id",

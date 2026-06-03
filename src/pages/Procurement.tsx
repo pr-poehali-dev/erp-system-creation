@@ -312,7 +312,7 @@ export default function Procurement({ role }: Props) {
       {activeTab === "invoices"          && <InvoicesTab role={role} />}
       {activeTab === "purchase_requests" && <PurchaseRequestsTab />}
       {activeTab === "plan"              && <PurchasePlanTab />}
-      {activeTab === "categories"        && <CategoriesTab />}
+      {activeTab === "categories"        && <CategoriesTab role={role} />}
       {activeTab === "templates"         && <TemplatesTab />}
 
       {/* Модалка создания заявки на материал */}
