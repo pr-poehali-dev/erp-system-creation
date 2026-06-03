@@ -35,6 +35,17 @@ const EMPTY_FORM = { project_id: "", material: "", quantity: "", unit: "шт", r
 
 const canChangeStatus = (role: Role) => ["director", "supply_director", "supplier"].includes(role);
 
+// Статус доставки по дате: просрочено / сегодня / в срок (закрытые заявки не считаем)
+const deliveryState = (req: MaterialRequest): "overdue" | "today" | "ok" | "done" => {
+  if (["purchased", "delivered"].includes(req.status)) return "done";
+  if (!req.required_date) return "ok";
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const due = new Date(req.required_date); due.setHours(0, 0, 0, 0);
+  if (due < today) return "overdue";
+  if (due.getTime() === today.getTime()) return "today";
+  return "ok";
+};
+
 const TABS: { key: ProcTab; label: string; icon: string; roles?: Role[] }[] = [
   { key: "requests",          label: "Заявки на материалы", icon: "ClipboardList" },
   { key: "suppliers",         label: "Поставщики",          icon: "Building2" },
@@ -56,6 +67,9 @@ export default function Procurement({ role }: Props) {
   const [saving, setSaving]       = useState(false);
   const [formError, setFormError] = useState("");
   const [statusSaving, setStatusSaving] = useState<number | null>(null);
+  const [filterProject, setFilterProject] = useState("");
+  const [filterStatus,  setFilterStatus]  = useState("");
+  const [onlyOverdue,   setOnlyOverdue]    = useState(false);
 
   const loadRequests = () => {
     setLoading(true);
@@ -70,6 +84,18 @@ export default function Procurement({ role }: Props) {
   const pendingCount    = requests.filter(r => r.status === "new").length;
   const inProgressCount = requests.filter(r => r.status === "in_progress" || r.status === "ordered").length;
   const purchasedCount  = requests.filter(r => r.status === "purchased" || r.status === "delivered").length;
+  const overdueCount    = requests.filter(r => deliveryState(r) === "overdue").length;
+
+  // Уникальные проекты для фильтра (по коду)
+  const projectCodes = Array.from(new Set(requests.map(r => r.project_code).filter(Boolean)));
+
+  // Применяем фильтры к списку заявок на материалы
+  const filteredRequests = requests.filter(r => {
+    if (filterProject && r.project_code !== filterProject) return false;
+    if (filterStatus && r.status !== filterStatus) return false;
+    if (onlyOverdue && deliveryState(r) !== "overdue") return false;
+    return true;
+  });
 
   const handleOpenModal = () => { setForm({ ...EMPTY_FORM }); setFormError(""); setModalOpen(true); };
   const handleCloseModal = () => { setModalOpen(false); setFormError(""); };
@@ -131,11 +157,12 @@ export default function Procurement({ role }: Props) {
 
       {/* Статистика (только на вкладке Заявки) */}
       {activeTab === "requests" && (
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
             { label: "Новых заявок",  value: loading ? "—" : String(pendingCount),    icon: "Clock",        color: "text-amber-600 bg-amber-50" },
             { label: "В работе",      value: loading ? "—" : String(inProgressCount), icon: "Truck",        color: "text-blue-600 bg-blue-50" },
             { label: "Закуплено",     value: loading ? "—" : String(purchasedCount),  icon: "PackageCheck", color: "text-emerald-600 bg-emerald-50" },
+            { label: "Просрочено",    value: loading ? "—" : String(overdueCount),    icon: "AlertTriangle", color: "text-red-600 bg-red-50" },
           ].map(c => (
             <div key={c.label} className="bg-white rounded-xl border border-border p-4 flex items-center gap-4">
               <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${c.color}`}>
@@ -166,8 +193,33 @@ export default function Procurement({ role }: Props) {
       {/* Содержимое вкладок */}
       {activeTab === "requests" && (
         <div className="bg-white rounded-xl border border-border">
-          <div className="px-5 py-4 border-b border-border">
+          <div className="px-5 py-4 border-b border-border flex items-center justify-between flex-wrap gap-3">
             <h2 className="font-semibold text-[15px]">Заявки на материалы</h2>
+            <div className="flex items-center gap-2 flex-wrap">
+              <select value={filterProject} onChange={e => setFilterProject(e.target.value)}
+                className="border border-border rounded-lg px-3 py-1.5 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
+                <option value="">Все проекты</option>
+                {projectCodes.map(code => <option key={code} value={code}>{code}</option>)}
+              </select>
+              <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+                className="border border-border rounded-lg px-3 py-1.5 text-[13px] bg-white outline-none focus:ring-1 focus:ring-primary">
+                <option value="">Все статусы</option>
+                {Object.entries(STATUS_MAP).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
+              <button onClick={() => setOnlyOverdue(v => !v)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] font-medium border transition-colors ${
+                  onlyOverdue ? "bg-red-50 border-red-300 text-red-700" : "border-border text-muted-foreground hover:bg-secondary"
+                }`}>
+                <Icon name="AlertTriangle" size={13} />
+                Только просрочка
+              </button>
+              {(filterProject || filterStatus || onlyOverdue) && (
+                <button onClick={() => { setFilterProject(""); setFilterStatus(""); setOnlyOverdue(false); }}
+                  className="text-[12px] text-hint hover:text-foreground underline">
+                  Сбросить
+                </button>
+              )}
+            </div>
           </div>
           {loading ? (
             <div className="divide-y divide-border">
@@ -189,14 +241,17 @@ export default function Procurement({ role }: Props) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {requests.length === 0 ? (
-                    <tr><td colSpan={8} className="px-4 py-8 text-center text-hint">Заявок пока нет</td></tr>
-                  ) : requests.map(r => {
+                  {filteredRequests.length === 0 ? (
+                    <tr><td colSpan={8} className="px-4 py-8 text-center text-hint">
+                      {requests.length === 0 ? "Заявок пока нет" : "Нет заявок по выбранным фильтрам"}
+                    </td></tr>
+                  ) : filteredRequests.map(r => {
                     const st = STATUS_MAP[r.status] || STATUS_MAP["new"];
                     const transitions = STATUS_TRANSITIONS[r.status] || [];
                     const isSaving = statusSaving === r.id;
+                    const dstate = deliveryState(r);
                     return (
-                      <tr key={r.id} className="hover:bg-background transition-colors">
+                      <tr key={r.id} className={`hover:bg-background transition-colors ${dstate === "overdue" ? "bg-red-50/40" : ""}`}>
                         <td className="px-4 py-3 text-[13px] text-primary font-medium whitespace-nowrap">{r.code}</td>
                         <td className="px-4 py-3 text-[13px] font-medium whitespace-nowrap">{r.project_code || "—"}</td>
                         <td className="px-4 py-3 text-[13px] max-w-[200px]">
@@ -205,9 +260,22 @@ export default function Procurement({ role }: Props) {
                         </td>
                         <td className="px-4 py-3 text-[13px] whitespace-nowrap">{r.quantity} {r.unit}</td>
                         <td className="px-4 py-3 whitespace-nowrap">
-                          <span className={`text-[13px] ${new Date(r.required_date) < new Date() && !["purchased","delivered"].includes(r.status) ? "text-red-500 font-medium" : "text-hint"}`}>
-                            {new Date(r.required_date).toLocaleDateString("ru-RU")}
-                          </span>
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-[13px] ${dstate === "overdue" ? "text-red-600 font-semibold" : dstate === "today" ? "text-amber-600 font-medium" : "text-hint"}`}>
+                              {r.required_date ? new Date(r.required_date).toLocaleDateString("ru-RU") : "—"}
+                            </span>
+                            {dstate === "overdue" && (
+                              <span className="flex items-center gap-0.5 text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-md font-bold">
+                                <Icon name="AlertTriangle" size={9} />
+                                Просрочено
+                              </span>
+                            )}
+                            {dstate === "today" && (
+                              <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-md font-bold">
+                                Сегодня
+                              </span>
+                            )}
+                          </div>
                         </td>
                         <td className="px-4 py-3 text-[13px] whitespace-nowrap">{r.foreman_name || "—"}</td>
                         <td className="px-4 py-3 whitespace-nowrap">
