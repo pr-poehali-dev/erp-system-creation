@@ -44,11 +44,12 @@ export default function Rental({ role }: Props) {
         <div className="px-5 py-4 border-b border-border">
           <h2 className="font-semibold text-[15px]">Парк техники</h2>
         </div>
+        <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="border-b border-border">
               {["ID", "Техника", "Гос. номер", "Статус", "Объект", "Оператор", "До", "Моточасы", "След. ТО"].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-hint font-medium">{h}</th>
+                <th key={h} className="px-4 py-3 text-left text-hint font-medium whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
@@ -79,6 +80,7 @@ export default function Rental({ role }: Props) {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Calendar */}

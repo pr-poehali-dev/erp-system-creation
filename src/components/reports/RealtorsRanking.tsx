@@ -87,6 +87,7 @@ export default function RealtorsRanking() {
           Активных риэлторов пока нет
         </div>
       ) : (
+        <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="bg-secondary/50 text-left text-[11px] uppercase text-hint">
@@ -128,6 +129,7 @@ export default function RealtorsRanking() {
             })}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   );

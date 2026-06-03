@@ -105,23 +105,24 @@ export default function Warehouse({ role: _role }: Props) {
             Ожидание синхронизации с МойСклад
           </span>
         </div>
+        <div className="overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr className="border-b border-border">
               {["Артикул", "Наименование", "Ед.", "На складе", "Резерв", "Цена", "Статус"].map(h => (
-                <th key={h} className="px-4 py-3 text-left text-hint font-medium">{h}</th>
+                <th key={h} className="px-4 py-3 text-left text-hint font-medium whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
             {MOCK_STOCK.map(item => (
               <tr key={item.sku} className="hover:bg-background transition-colors">
-                <td className="px-4 py-3 text-[13px] text-primary font-medium">{item.sku}</td>
+                <td className="px-4 py-3 text-[13px] text-primary font-medium whitespace-nowrap">{item.sku}</td>
                 <td className="px-4 py-3 text-[13px] font-medium max-w-xs truncate">{item.name}</td>
                 <td className="px-4 py-3 text-hint">{item.unit}</td>
                 <td className="px-4 py-3 text-[13px] font-semibold">{item.stock}</td>
                 <td className="px-4 py-3 text-hint">{item.reserved}</td>
-                <td className="px-4 py-3 text-[13px]">{fmt(item.price)}</td>
+                <td className="px-4 py-3 text-[13px] whitespace-nowrap">{fmt(item.price)}</td>
                 <td className="px-4 py-3">
                   <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${STATUS_MAP[item.status].cls}`}>
                     {STATUS_MAP[item.status].label}
@@ -131,6 +132,7 @@ export default function Warehouse({ role: _role }: Props) {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/* Active requests from DB */}

@@ -35,7 +35,7 @@ export default function TemplateWizard({
         AI предварительно заполнил соответствие колонок. Проверь и исправь если нужно.
       </div>
 
-      <div className="border border-border rounded-lg overflow-hidden">
+      <div className="border border-border rounded-lg overflow-x-auto">
         <table className="w-full text-[11px]">
           <thead>
             <tr className="bg-secondary/60 text-hint">

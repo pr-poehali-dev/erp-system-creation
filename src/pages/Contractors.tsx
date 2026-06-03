@@ -175,11 +175,12 @@ export default function Contractors({ role }: Props) {
             {canEdit && <button onClick={openCreate} className="mt-2 text-primary text-[13px] hover:underline">Добавить первого</button>}
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b border-border bg-background">
                 {["Тип", "Название", "ИНН", "Контактное лицо", "Телефон", "Документы", ""].map(h => (
-                  <th key={h} className="px-4 py-3 text-left text-hint text-[12px] font-medium">{h}</th>
+                  <th key={h} className="px-4 py-3 text-left text-hint text-[12px] font-medium whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -223,6 +224,7 @@ export default function Contractors({ role }: Props) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

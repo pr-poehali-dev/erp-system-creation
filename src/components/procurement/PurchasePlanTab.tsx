@@ -85,6 +85,7 @@ export default function PurchasePlanTab() {
               <span className="text-[13px] font-semibold">{PERIOD_LABELS[group.period]}: {fmtDate(group.period_start)}</span>
               <span className="text-[11px] text-hint ml-auto">{group.rows.length} позиций</span>
             </div>
+            <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="bg-secondary/20 text-left text-[11px] uppercase text-hint">
@@ -112,6 +113,7 @@ export default function PurchasePlanTab() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         ))
       )}

@@ -157,7 +157,7 @@ export default function Realtor({ role: _role }: Props) {
             <div className="text-[12px] mt-1">Перейдите в раздел «Продажи и CRM» чтобы создать первую сделку</div>
           </div>
         ) : (
-          <div className="bg-white border border-border rounded-xl overflow-hidden">
+          <div className="bg-white border border-border rounded-xl overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="bg-secondary/50 text-left text-[11px] uppercase text-hint">

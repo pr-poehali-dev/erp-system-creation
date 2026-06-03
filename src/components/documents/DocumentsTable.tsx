@@ -89,11 +89,12 @@ export default function DocumentsTable({
             <div>Документов не найдено</div>
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b border-border bg-background">
                 {["Категория", "Тип", "Название", "Контрагент", "Дата", "Сумма", ""].map(h => (
-                  <th key={h} className="px-4 py-3 text-left text-hint text-[12px] font-medium">{h}</th>
+                  <th key={h} className="px-4 py-3 text-left text-hint text-[12px] font-medium whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -138,6 +139,7 @@ export default function DocumentsTable({
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </>

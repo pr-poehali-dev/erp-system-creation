@@ -36,6 +36,7 @@ export default function SalesClosedTable({ loading, visibleClosed }: Props) {
               </div>
             )}
           </div>
+          <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="bg-secondary/50 text-left text-[11px] uppercase text-hint">
@@ -83,6 +84,7 @@ export default function SalesClosedTable({ loading, visibleClosed }: Props) {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

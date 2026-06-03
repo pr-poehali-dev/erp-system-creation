@@ -110,11 +110,12 @@ export default function Reports({ role }: Props) {
             {[1,2,3].map(i => <div key={i} className="h-10 bg-secondary rounded animate-pulse" />)}
           </div>
         ) : (
+          <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b border-border">
                 {["#", "Сотрудник", "Роль", "Лидов", "Договоров", "Конверсия", "Выручка", "KPI"].map(h => (
-                  <th key={h} className="px-5 py-3 text-left text-hint font-medium">{h}</th>
+                  <th key={h} className="px-5 py-3 text-left text-hint font-medium whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -146,6 +147,7 @@ export default function Reports({ role }: Props) {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

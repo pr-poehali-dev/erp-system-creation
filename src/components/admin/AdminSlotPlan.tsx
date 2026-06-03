@@ -235,10 +235,11 @@ export default function AdminSlotPlan({ readonly }: Props) {
                     {monthSlots.length === 0 ? (
                       <div className="px-4 py-3 text-[12px] text-hint">Нет слотов в этом месяце</div>
                     ) : (
+                      <div className="overflow-x-auto">
                       <table className="w-full text-[12px]">
                         <thead>
                           <tr className="bg-secondary/40 text-hint text-[11px]">
-                            <th className="text-left px-4 py-2 font-medium">Дата начала</th>
+                            <th className="text-left px-4 py-2 font-medium whitespace-nowrap">Дата начала</th>
                             <th className="text-left px-4 py-2 font-medium">Статус</th>
                             <th className="text-left px-4 py-2 font-medium">Сделка</th>
                             <th className="text-left px-4 py-2 font-medium">Клиент</th>
@@ -284,6 +285,7 @@ export default function AdminSlotPlan({ readonly }: Props) {
                           })}
                         </tbody>
                       </table>
+                      </div>
                     )}
                   </div>
                 )}
