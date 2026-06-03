@@ -5071,6 +5071,152 @@ def _find_category_for_name(cur, name: str, other_cat_id: int, exclude_material_
     return None
 
 
+# Стоп-слова, которые НЕ должны давать совпадение по ключевым словам
+# (слишком общие/технические токены в названиях материалов и категорий).
+_CAT_STOPWORDS = {
+    'для', 'или', 'под', 'над', 'без', 'про', 'при', 'из', 'на', 'по', 'в', 'и', 'с', 'к',
+    'мм', 'см', 'м', 'м2', 'м3', 'кг', 'гр', 'г', 'шт', 'л', 'мл', 'тн', 'т',
+    'ral', 'гост', 'ту', 'd', 'd10', 'd12', 'd16', 'd20', 'd25', 'd32',
+    'материалы', 'материал', 'изделия', 'изделие', 'элементы', 'элемент',
+    'комплектующие', 'аксессуары', 'прочее', 'прочие', 'разные', 'товары',
+    'система', 'системы', 'оборудование', 'набор', 'наборы',
+}
+
+
+def _normalize_token(tok: str) -> str:
+    """Приводит токен к нормальной форме: нижний регистр, убираем хвостовые
+    знаки и грубо отбрасываем окончания, чтобы «профнастила»/«профнастил» и
+    «трубы»/«труба» сходились."""
+    t = tok.lower().strip(' .,;:()[]{}"\'/\\-–—№#')
+    return t
+
+
+def _tokenize_for_match(text: str):
+    """Разбивает строку на значимые токены (без стоп-слов, длиной >= 3 символа,
+    либо содержащие цифры — например «с8», «20»). Возвращает set нормализованных
+    токенов и тот же текст в нижнем регистре для подстрочного поиска."""
+    import re as _re
+    low = (text or '').lower()
+    raw = _re.split(r'[^0-9a-zа-яё]+', low)
+    tokens = set()
+    for r in raw:
+        if not r:
+            continue
+        n = _normalize_token(r)
+        if not n or n in _CAT_STOPWORDS:
+            continue
+        has_digit = any(ch.isdigit() for ch in n)
+        if len(n) >= 4 or (has_digit and len(n) >= 2):
+            tokens.add(n)
+    return tokens, low
+
+
+def _load_category_index(cur, other_cat_id: int):
+    """Загружает все категории (кроме корневой «Прочее») в индекс для матчинга
+    по дереву. Возвращает список словарей с предвычисленными токенами и глубиной.
+    Глубина нужна, чтобы при прочих равных предпочесть более конкретную
+    (вложенную, листовую) категорию.
+    """
+    cur.execute(f"""
+        SELECT id, name, parent_id FROM {SCHEMA}.material_categories
+    """)
+    rows = cur.fetchall()
+    by_id = {r[0]: {"id": r[0], "name": r[1], "parent_id": r[2]} for r in rows}
+
+    # число прямых детей — чтобы понимать, листовая ли категория
+    child_count = {}
+    for r in rows:
+        pid = r[2]
+        if pid is not None:
+            child_count[pid] = child_count.get(pid, 0) + 1
+
+    def depth_of(cid):
+        d = 0
+        cur_id = cid
+        guard = 0
+        while cur_id is not None and guard < 50:
+            node = by_id.get(cur_id)
+            if not node:
+                break
+            cur_id = node["parent_id"]
+            d += 1
+            guard += 1
+        return d
+
+    index = []
+    for r in rows:
+        cid, cname, _pid = r
+        if cid == other_cat_id:
+            continue
+        low = (cname or '').lower().strip()
+        toks, _ = _tokenize_for_match(cname)
+        index.append({
+            "id": cid,
+            "name_low": low,
+            "tokens": toks,
+            "depth": depth_of(cid),
+            "is_leaf": child_count.get(cid, 0) == 0,
+        })
+    return index
+
+
+def _find_category_in_tree(material_name: str, cat_index: list):
+    """Подбирает category_id по СОВПАДЕНИЮ названия материала с названиями
+    категорий в дереве. Приоритет (по убыванию):
+      1) точное совпадение названия материала с названием категории;
+      2) название категории целиком входит в название материала (подстрока) —
+         выбираем самую длинную/конкретную категорию (глубже в дереве, листовую);
+      3) совпадение ключевых слов — категория с максимальным числом общих
+         значимых токенов (при равенстве — глубже/листовая).
+    Возвращает category_id или None.
+    """
+    if not material_name or not material_name.strip():
+        return None
+    name_low = material_name.lower().strip()
+    mat_tokens, _ = _tokenize_for_match(material_name)
+
+    # 1) Точное совпадение названия.
+    for c in cat_index:
+        if c["name_low"] and c["name_low"] == name_low:
+            return c["id"]
+
+    # 2) Подстрока: название категории входит в название материала.
+    #    Выбираем самое длинное имя категории (наиболее конкретное), при равной
+    #    длине — более глубокую/листовую категорию.
+    best_sub = None
+    best_sub_key = None
+    for c in cat_index:
+        cn = c["name_low"]
+        if len(cn) >= 4 and cn in name_low:
+            key = (len(cn), c["depth"], 1 if c["is_leaf"] else 0)
+            if best_sub_key is None or key > best_sub_key:
+                best_sub_key = key
+                best_sub = c
+    if best_sub:
+        return best_sub["id"]
+
+    # 3) Совпадение ключевых слов: максимальное число общих значимых токенов.
+    if mat_tokens:
+        best_kw = None
+        best_kw_key = None
+        for c in cat_index:
+            if not c["tokens"]:
+                continue
+            common = c["tokens"] & mat_tokens
+            if not common:
+                continue
+            # вес общих токенов — суммарная длина (длинные токены значимее)
+            weight = sum(len(t) for t in common)
+            key = (len(common), weight, c["depth"], 1 if c["is_leaf"] else 0)
+            if best_kw_key is None or key > best_kw_key:
+                best_kw_key = key
+                best_kw = c
+        if best_kw:
+            return best_kw["id"]
+
+    return None
+
+
 def recategorize_materials(cur, after_id: int = 0, batch_size: int = 200):
     """Ретроспективное присвоение категорий материалам без категории
     (category_id IS NULL или = «Прочее»). Обрабатывает пакет материалов
@@ -5103,6 +5249,9 @@ def recategorize_materials(cur, after_id: int = 0, batch_size: int = 200):
         )
         total = cur.fetchone()[0]
 
+    # Индекс категорий грузим один раз на пакет — матчинг по дереву идёт в памяти.
+    cat_index = _load_category_index(cur, other_cat_id)
+
     # Берём пакет материалов «без категории» с id > after_id по возрастанию id.
     cur.execute(
         f"""
@@ -5121,7 +5270,13 @@ def recategorize_materials(cur, after_id: int = 0, batch_size: int = 200):
     last_id = after_id
     for mid, mname in rows:
         last_id = mid
+        # 1) Сначала пытаемся унаследовать категорию от похожих УЖЕ
+        #    категоризированных материалов (точное имя -> подстрока -> популярность).
         new_cat = _find_category_for_name(cur, mname, other_cat_id, mid)
+        # 2) Если не нашли — ищем соответствие прямо в ДЕРЕВЕ категорий
+        #    (название категории -> подстрока -> ключевые слова).
+        if not new_cat:
+            new_cat = _find_category_in_tree(mname, cat_index)
         if new_cat:
             cur.execute(
                 f"UPDATE {SCHEMA}.materials SET category_id=%s, updated_at=now() WHERE id=%s",
