@@ -9,6 +9,7 @@ export default function AdminDiscounts() {
   const [loading, setLoading]       = useState(true);
   const [savingId, setSavingId]     = useState<number | null>(null);
   const [successId, setSuccessId]   = useState<number | null>(null);
+  const [errorMsg, setErrorMsg]     = useState("");
 
   // локальные правки скидок: cfg.id → { pct, until }
   const [discounts, setDiscounts] = useState<Record<number, { pct: string; until: string }>>({});
@@ -39,22 +40,32 @@ export default function AdminDiscounts() {
 
   useEffect(() => { load(); }, []);
 
+  // Авто-сброс уведомления об успехе с корректным cleanup таймера
+  useEffect(() => {
+    if (successId === null) return;
+    const t = setTimeout(() => setSuccessId(null), 3000);
+    return () => clearTimeout(t);
+  }, [successId]);
+
   const handleSaveDiscount = async (cfgId: number) => {
     setSavingId(cfgId);
+    setErrorMsg("");
     try {
       const pct   = parseFloat(discounts[cfgId]?.pct || "0") || 0;
       const until = discounts[cfgId]?.until || null;
       await api.configurations.update(cfgId, { discount_pct: pct, discount_until: until || "" });
       setSuccessId(cfgId);
-      setTimeout(() => setSuccessId(null), 3000);
       // Обновляем только данные проектов без сброса форм
       const projs = await api.serial_projects.list();
       setProjects(projs);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Не удалось сохранить скидку. Попробуйте ещё раз.");
     } finally { setSavingId(null); }
   };
 
   const handleTogglePopular = async (cfgId: number, projectId: number) => {
     setSavingId(cfgId);
+    setErrorMsg("");
     try {
       const currentPopular = popularMap[projectId];
       const isAlreadyPopular = currentPopular === cfgId;
@@ -74,6 +85,8 @@ export default function AdminDiscounts() {
       // Обновляем данные
       const projs = await api.serial_projects.list();
       setProjects(projs);
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Не удалось обновить настройку. Попробуйте ещё раз.");
     } finally { setSavingId(null); }
   };
 
@@ -85,6 +98,15 @@ export default function AdminDiscounts() {
 
   return (
     <div className="divide-y divide-border">
+      {errorMsg && (
+        <div className="px-5 py-3 bg-red-50 flex items-start gap-2">
+          <Icon name="AlertCircle" size={13} className="text-red-500 shrink-0 mt-0.5" />
+          <span className="text-[12px] text-red-700 flex-1">{errorMsg}</span>
+          <button onClick={() => setErrorMsg("")} className="text-red-400 hover:text-red-600">
+            <Icon name="X" size={13} />
+          </button>
+        </div>
+      )}
       <div className="px-5 py-3 bg-amber-50 flex items-start gap-2">
         <Icon name="Info" size={13} className="text-amber-600 shrink-0 mt-0.5" />
         <span className="text-[12px] text-amber-800">

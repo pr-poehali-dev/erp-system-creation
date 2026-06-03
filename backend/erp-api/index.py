@@ -216,6 +216,16 @@ def delete_slot(cur, slot_id: int):
     return {"deleted": slot_id}, None
 
 
+def clear_free_slots(cur):
+    """Массовая очистка: удаляет ВСЕ свободные слоты (status='free').
+    Занятые и забронированные слоты (busy / booked) не трогаем — они привязаны
+    к сделкам и проектам. Возвращает число удалённых слотов.
+    """
+    cur.execute(f"DELETE FROM {SCHEMA}.slots WHERE status = 'free' RETURNING id")
+    deleted = cur.fetchall()
+    return {"deleted_count": len(deleted)}, None
+
+
 def get_user_context(event: dict):
     """Извлекает (user_id, user_role) из заголовков запроса.
     Заголовки case-insensitive — нормализуем в lowercase.
@@ -1220,14 +1230,25 @@ def get_projects(cur, archived=False):
     cols = [desc[0] for desc in cur.description]
     projects = [dict(zip(cols, row)) for row in cur.fetchall()]
 
-    for proj in projects:
+    # Этапы всех проектов одним запросом (вместо N+1) — группируем по project_id
+    proj_ids = [p["id"] for p in projects]
+    stages_by_project: dict = {}
+    if proj_ids:
         cur.execute(f"""
-            SELECT id, name, order_num, duration_days, planned_start, planned_end,
+            SELECT project_id, id, name, order_num, duration_days, planned_start, planned_end,
                    actual_start, actual_end, status
-            FROM {SCHEMA}.project_stages WHERE project_id=%s ORDER BY order_num
-        """, (proj["id"],))
+            FROM {SCHEMA}.project_stages
+            WHERE project_id = ANY(%s)
+            ORDER BY project_id, order_num
+        """, (proj_ids,))
         scols = [desc[0] for desc in cur.description]
-        proj["stages"] = [dict(zip(scols, r)) for r in cur.fetchall()]
+        for r in cur.fetchall():
+            srow = dict(zip(scols, r))
+            pid_key = srow.pop("project_id")
+            stages_by_project.setdefault(pid_key, []).append(srow)
+
+    for proj in projects:
+        proj["stages"] = stages_by_project.get(proj["id"], [])
 
         total = proj["total_stages"] or 0
         done = proj["done_stages"] or 0
@@ -4868,6 +4889,7 @@ def get_suppliers(cur):
     cur.execute(f"""
         SELECT id, name, inn, category, contact, rating, is_active, created_at
         FROM {SCHEMA}.suppliers WHERE is_active=TRUE ORDER BY name
+        LIMIT 1000
     """)
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -4941,6 +4963,7 @@ def get_materials(cur):
     cur.execute(f"""
         SELECT id, name, unit, supplier_category, is_active, created_at
         FROM {SCHEMA}.materials WHERE is_active=TRUE ORDER BY name
+        LIMIT 5000
     """)
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -5090,19 +5113,26 @@ def get_purchase_requests(cur):
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
 
+    # Поставщики всех заявок одним запросом (вместо N+1) — группируем по request_id
+    req_ids = [r['id'] for r in rows]
+    suppliers_by_req: dict = {}
+    if req_ids:
+        cur.execute(f"""
+            SELECT prs.request_id, sup.id, sup.name, sup.category, sup.rating
+            FROM {SCHEMA}.purchase_request_suppliers prs
+            JOIN {SCHEMA}.suppliers sup ON sup.id = prs.supplier_id
+            WHERE prs.request_id = ANY(%s)
+        """, (req_ids,))
+        for rr in cur.fetchall():
+            suppliers_by_req.setdefault(rr[0], []).append(
+                {"id": rr[1], "name": rr[2], "category": rr[3], "rating": rr[4]}
+            )
+
     for r in rows:
         for k in ('created_at','needed_by'):
             if r.get(k): r[k] = r[k].isoformat()
         if r.get('quantity') is not None: r['quantity'] = float(r['quantity'])
-        # Загружаем связанных поставщиков
-        cur.execute(f"""
-            SELECT sup.id, sup.name, sup.category, sup.rating
-            FROM {SCHEMA}.purchase_request_suppliers prs
-            JOIN {SCHEMA}.suppliers sup ON sup.id = prs.supplier_id
-            WHERE prs.request_id = %s
-        """, (r['id'],))
-        r['suppliers'] = [{"id": rr[0], "name": rr[1], "category": rr[2], "rating": rr[3]}
-                          for rr in cur.fetchall()]
+        r['suppliers'] = suppliers_by_req.get(r['id'], [])
     return rows
 
 def create_purchase_request(cur, body):
@@ -5878,6 +5908,14 @@ def handler(event: dict, context) -> dict:
                 elif action == "delete_slot":
                     slot_id = int(body["slot_id"])
                     result, error = delete_slot(cur, slot_id)
+                    if error: return err(error)
+                    conn.commit()
+                    return ok(result)
+                elif action == "clear_free":
+                    # Массовая очистка всех свободных слотов — только директор/строит. директор
+                    require_role(cur, user_id, user_role,
+                                 {"director", "general_director", "construction_director"})
+                    result, error = clear_free_slots(cur)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)

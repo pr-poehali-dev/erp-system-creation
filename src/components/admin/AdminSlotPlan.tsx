@@ -33,6 +33,7 @@ export default function AdminSlotPlan({ readonly }: Props) {
     year: CURRENT_YEAR, month: CURRENT_MONTH, count: 4, monthly_limit: 4,
   });
   const [creating, setCreating]     = useState(false);
+  const [clearing, setClearing]     = useState(false);
   const [expandedMonth, setExpandedMonth] = useState<string | null>(null);
 
   const load = () => {
@@ -77,6 +78,18 @@ export default function AdminSlotPlan({ readonly }: Props) {
     } finally { setDeleting(null); }
   };
 
+  const handleClearFree = async () => {
+    if (!confirm("Удалить ВСЕ свободные слоты? Занятые и забронированные останутся.")) return;
+    setClearing(true);
+    try {
+      const res = await api.slots.clearFree();
+      load();
+      alert(`Удалено свободных слотов: ${res.deleted_count}`);
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : "Ошибка очистки слотов");
+    } finally { setClearing(false); }
+  };
+
   const getSlotsForMonth = (year: number, month: number) =>
     slots.filter(s => s.year === year && s.month === month);
 
@@ -100,6 +113,13 @@ export default function AdminSlotPlan({ readonly }: Props) {
             <button onClick={() => setShowCreate(v => !v)}
               className="flex items-center gap-1.5 px-3 py-1.5 bg-primary text-white rounded-lg text-[12px] font-medium hover:bg-primary/90 transition-colors">
               <Icon name="Plus" size={13} />Создать слоты
+            </button>
+          )}
+          {!readonly && (
+            <button onClick={handleClearFree} disabled={clearing}
+              className="flex items-center gap-1.5 px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-[12px] font-medium hover:bg-red-50 transition-colors disabled:opacity-50">
+              <Icon name={clearing ? "Loader" : "Trash2"} size={13} className={clearing ? "animate-spin" : ""} />
+              Очистить свободные
             </button>
           )}
           <button onClick={load} className="flex items-center gap-1.5 px-3 py-1.5 border border-border rounded-lg text-[12px] hover:bg-secondary transition-colors">

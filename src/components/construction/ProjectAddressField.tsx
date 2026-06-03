@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Icon from "@/components/ui/icon";
 import { api, Project } from "@/lib/api";
 
@@ -12,10 +12,16 @@ export default function ProjectAddressField({ project, onSaved }: Props) {
   const [val, setVal] = useState(project.address || "");
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Фокус на поле при входе в режим редактирования (с корректным cleanup таймера)
+  useEffect(() => {
+    if (!editing) return;
+    const t = setTimeout(() => inputRef.current?.focus(), 50);
+    return () => clearTimeout(t);
+  }, [editing]);
+
   const startEdit = () => {
     setVal(project.address || "");
     setEditing(true);
-    setTimeout(() => inputRef.current?.focus(), 50);
   };
 
   const save = async () => {

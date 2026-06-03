@@ -134,6 +134,8 @@ export const api = {
       request<any>("slots", "POST", { action: "create_slots", year, month, count, monthly_limit }),
     deleteSlot: (slot_id: number) =>
       request<any>("slots", "POST", { action: "delete_slot", slot_id }),
+    clearFree: () =>
+      request<{ deleted_count: number }>("slots", "POST", { action: "clear_free" }),
   },
 
   estimate: {
