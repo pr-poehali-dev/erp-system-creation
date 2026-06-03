@@ -203,6 +203,12 @@ export const api = {
       request<{ total?: number; batch: number; assigned: number; last_id: number; done: boolean }>(
         "material_categories", "POST", { action: "recategorize", after_id, batch_size }
       ),
+    uncategorized: () =>
+      request<UncategorizedMaterial[]>("material_categories", "GET", undefined, { uncategorized: "1" }),
+    assign: (material_ids: number[], category_id: number | null) =>
+      request<{ directly: number; inherited: number; total: number }>(
+        "material_categories", "POST", { action: "assign", material_ids, category_id }
+      ),
   },
 
   invoices: {
@@ -964,6 +970,13 @@ export interface MaterialCategory {
   parent_id: number | null;
   sort_order: number;
   materials_count: number;
+}
+
+export interface UncategorizedMaterial {
+  id: number;
+  name: string;
+  unit: MaterialUnit;
+  usage_count: number;
 }
 
 export interface Invoice {

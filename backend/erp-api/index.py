@@ -5020,16 +5020,16 @@ def get_or_create_other_category(cur):
 
 
 def _find_category_for_name(cur, name: str, other_cat_id: int, exclude_material_id: int):
-    """Подбирает category_id для материала по его имени, ориентируясь на ДРУГИЕ
-    материалы, у которых уже есть «настоящая» категория (не «Прочее» и не NULL).
-    Алгоритм совпадает с AI-матчингом: точное совпадение -> подстрока -> самый
-    популярный. Возвращает category_id или None, если ничего не подошло.
+    """Подбирает category_id для материала ТОЛЬКО по ТОЧНОМУ совпадению названия
+    с другим материалом, у которого уже есть «настоящая» категория (не «Прочее»
+    и не NULL). Никаких подстрок и ключевых слов — это исключает ошибки матчинга.
+    Возвращает category_id или None.
     """
     if not name or not name.strip() or name.strip() == '(не указан)':
         return None
     name = name.strip()
 
-    # 1) Точное совпадение по имени среди материалов с реальной категорией.
+    # Точное совпадение по имени среди материалов с реальной категорией.
     cur.execute(
         f"""
         SELECT m.category_id
@@ -5046,174 +5046,6 @@ def _find_category_for_name(cur, name: str, other_cat_id: int, exclude_material_
     row = cur.fetchone()
     if row:
         return row[0]
-
-    # 2) Совпадение по подстроке — берём самый популярный материал (по числу
-    #    использований в счетах), у которого есть реальная категория.
-    cur.execute(
-        f"""
-        SELECT m.category_id
-        FROM {SCHEMA}.materials m
-        LEFT JOIN {SCHEMA}.invoices i ON i.material_id = m.id
-        WHERE m.name ILIKE %s
-          AND m.id != %s
-          AND m.name != '(не указан)'
-          AND m.category_id IS NOT NULL
-          AND m.category_id != %s
-        GROUP BY m.id, m.category_id
-        ORDER BY COUNT(i.id) DESC, m.id ASC
-        LIMIT 1
-        """,
-        (f"%{name}%", exclude_material_id, other_cat_id)
-    )
-    row = cur.fetchone()
-    if row:
-        return row[0]
-    return None
-
-
-# Стоп-слова, которые НЕ должны давать совпадение по ключевым словам
-# (слишком общие/технические токены в названиях материалов и категорий).
-_CAT_STOPWORDS = {
-    'для', 'или', 'под', 'над', 'без', 'про', 'при', 'из', 'на', 'по', 'в', 'и', 'с', 'к',
-    'мм', 'см', 'м', 'м2', 'м3', 'кг', 'гр', 'г', 'шт', 'л', 'мл', 'тн', 'т',
-    'ral', 'гост', 'ту', 'd', 'd10', 'd12', 'd16', 'd20', 'd25', 'd32',
-    'материалы', 'материал', 'изделия', 'изделие', 'элементы', 'элемент',
-    'комплектующие', 'аксессуары', 'прочее', 'прочие', 'разные', 'товары',
-    'система', 'системы', 'оборудование', 'набор', 'наборы',
-}
-
-
-def _normalize_token(tok: str) -> str:
-    """Приводит токен к нормальной форме: нижний регистр, убираем хвостовые
-    знаки и грубо отбрасываем окончания, чтобы «профнастила»/«профнастил» и
-    «трубы»/«труба» сходились."""
-    t = tok.lower().strip(' .,;:()[]{}"\'/\\-–—№#')
-    return t
-
-
-def _tokenize_for_match(text: str):
-    """Разбивает строку на значимые токены (без стоп-слов, длиной >= 3 символа,
-    либо содержащие цифры — например «с8», «20»). Возвращает set нормализованных
-    токенов и тот же текст в нижнем регистре для подстрочного поиска."""
-    import re as _re
-    low = (text or '').lower()
-    raw = _re.split(r'[^0-9a-zа-яё]+', low)
-    tokens = set()
-    for r in raw:
-        if not r:
-            continue
-        n = _normalize_token(r)
-        if not n or n in _CAT_STOPWORDS:
-            continue
-        has_digit = any(ch.isdigit() for ch in n)
-        if len(n) >= 4 or (has_digit and len(n) >= 2):
-            tokens.add(n)
-    return tokens, low
-
-
-def _load_category_index(cur, other_cat_id: int):
-    """Загружает все категории (кроме корневой «Прочее») в индекс для матчинга
-    по дереву. Возвращает список словарей с предвычисленными токенами и глубиной.
-    Глубина нужна, чтобы при прочих равных предпочесть более конкретную
-    (вложенную, листовую) категорию.
-    """
-    cur.execute(f"""
-        SELECT id, name, parent_id FROM {SCHEMA}.material_categories
-    """)
-    rows = cur.fetchall()
-    by_id = {r[0]: {"id": r[0], "name": r[1], "parent_id": r[2]} for r in rows}
-
-    # число прямых детей — чтобы понимать, листовая ли категория
-    child_count = {}
-    for r in rows:
-        pid = r[2]
-        if pid is not None:
-            child_count[pid] = child_count.get(pid, 0) + 1
-
-    def depth_of(cid):
-        d = 0
-        cur_id = cid
-        guard = 0
-        while cur_id is not None and guard < 50:
-            node = by_id.get(cur_id)
-            if not node:
-                break
-            cur_id = node["parent_id"]
-            d += 1
-            guard += 1
-        return d
-
-    index = []
-    for r in rows:
-        cid, cname, _pid = r
-        if cid == other_cat_id:
-            continue
-        low = (cname or '').lower().strip()
-        toks, _ = _tokenize_for_match(cname)
-        index.append({
-            "id": cid,
-            "name_low": low,
-            "tokens": toks,
-            "depth": depth_of(cid),
-            "is_leaf": child_count.get(cid, 0) == 0,
-        })
-    return index
-
-
-def _find_category_in_tree(material_name: str, cat_index: list):
-    """Подбирает category_id по СОВПАДЕНИЮ названия материала с названиями
-    категорий в дереве. Приоритет (по убыванию):
-      1) точное совпадение названия материала с названием категории;
-      2) название категории целиком входит в название материала (подстрока) —
-         выбираем самую длинную/конкретную категорию (глубже в дереве, листовую);
-      3) совпадение ключевых слов — категория с максимальным числом общих
-         значимых токенов (при равенстве — глубже/листовая).
-    Возвращает category_id или None.
-    """
-    if not material_name or not material_name.strip():
-        return None
-    name_low = material_name.lower().strip()
-    mat_tokens, _ = _tokenize_for_match(material_name)
-
-    # 1) Точное совпадение названия.
-    for c in cat_index:
-        if c["name_low"] and c["name_low"] == name_low:
-            return c["id"]
-
-    # 2) Подстрока: название категории входит в название материала.
-    #    Выбираем самое длинное имя категории (наиболее конкретное), при равной
-    #    длине — более глубокую/листовую категорию.
-    best_sub = None
-    best_sub_key = None
-    for c in cat_index:
-        cn = c["name_low"]
-        if len(cn) >= 4 and cn in name_low:
-            key = (len(cn), c["depth"], 1 if c["is_leaf"] else 0)
-            if best_sub_key is None or key > best_sub_key:
-                best_sub_key = key
-                best_sub = c
-    if best_sub:
-        return best_sub["id"]
-
-    # 3) Совпадение ключевых слов: максимальное число общих значимых токенов.
-    if mat_tokens:
-        best_kw = None
-        best_kw_key = None
-        for c in cat_index:
-            if not c["tokens"]:
-                continue
-            common = c["tokens"] & mat_tokens
-            if not common:
-                continue
-            # вес общих токенов — суммарная длина (длинные токены значимее)
-            weight = sum(len(t) for t in common)
-            key = (len(common), weight, c["depth"], 1 if c["is_leaf"] else 0)
-            if best_kw_key is None or key > best_kw_key:
-                best_kw_key = key
-                best_kw = c
-        if best_kw:
-            return best_kw["id"]
-
     return None
 
 
@@ -5249,9 +5081,6 @@ def recategorize_materials(cur, after_id: int = 0, batch_size: int = 200):
         )
         total = cur.fetchone()[0]
 
-    # Индекс категорий грузим один раз на пакет — матчинг по дереву идёт в памяти.
-    cat_index = _load_category_index(cur, other_cat_id)
-
     # Берём пакет материалов «без категории» с id > after_id по возрастанию id.
     cur.execute(
         f"""
@@ -5270,13 +5099,9 @@ def recategorize_materials(cur, after_id: int = 0, batch_size: int = 200):
     last_id = after_id
     for mid, mname in rows:
         last_id = mid
-        # 1) Сначала пытаемся унаследовать категорию от похожих УЖЕ
-        #    категоризированных материалов (точное имя -> подстрока -> популярность).
+        # Наследуем категорию ТОЛЬКО от УЖЕ категоризированного материала с
+        # точно таким же названием. Никакого нечёткого матчинга — нулевые ошибки.
         new_cat = _find_category_for_name(cur, mname, other_cat_id, mid)
-        # 2) Если не нашли — ищем соответствие прямо в ДЕРЕВЕ категорий
-        #    (название категории -> подстрока -> ключевые слова).
-        if not new_cat:
-            new_cat = _find_category_in_tree(mname, cat_index)
         if new_cat:
             cur.execute(
                 f"UPDATE {SCHEMA}.materials SET category_id=%s, updated_at=now() WHERE id=%s",
@@ -5294,6 +5119,79 @@ def recategorize_materials(cur, after_id: int = 0, batch_size: int = 200):
     if total is not None:
         result["total"] = total
     return result
+
+
+def get_uncategorized_materials(cur):
+    """Список ВСЕХ материалов без категории (category_id IS NULL или «Прочее»).
+    Возвращает id, name, unit и число использований в счетах (для сортировки —
+    сначала самые ходовые, их полезнее разобрать первыми).
+    """
+    other_cat_id = get_or_create_other_category(cur)
+    cur.execute(
+        f"""
+        SELECT m.id, m.name, m.unit, COUNT(i.id) AS usage_count
+        FROM {SCHEMA}.materials m
+        LEFT JOIN {SCHEMA}.invoices i ON i.material_id = m.id
+        WHERE m.name != '(не указан)'
+          AND m.is_active = TRUE
+          AND (m.category_id IS NULL OR m.category_id = %s)
+        GROUP BY m.id, m.name, m.unit
+        ORDER BY usage_count DESC, m.name ASC
+        LIMIT 5000
+        """,
+        (other_cat_id,)
+    )
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def assign_category_to_materials(cur, material_ids, category_id):
+    """Назначает категорию списку материалов и АВТО-НАСЛЕДУЕТ её всем остальным
+    материалам с точно таким же названием (без учёта регистра).
+
+    Возвращает:
+      directly  — сколько материалов из переданного списка обновлено,
+      inherited — сколько ДОПОЛНИТЕЛЬНО получили категорию по совпадению имени,
+      total     — directly + inherited.
+    """
+    if not material_ids:
+        return {"directly": 0, "inherited": 0, "total": 0}
+    cat = int(category_id) if category_id else None
+
+    ids = [int(x) for x in material_ids]
+
+    # 1) Прямое назначение выбранным материалам.
+    cur.execute(
+        f"UPDATE {SCHEMA}.materials SET category_id=%s, updated_at=now() WHERE id = ANY(%s)",
+        (cat, ids)
+    )
+    directly = cur.rowcount
+
+    inherited = 0
+    if cat:
+        # 2) Авто-наследование: находим имена выбранных материалов и присваиваем
+        #    ту же категорию всем ОСТАЛЬНЫМ материалам с таким же названием,
+        #    у которых ещё нет этой категории.
+        cur.execute(
+            f"SELECT DISTINCT lower(name) FROM {SCHEMA}.materials WHERE id = ANY(%s)",
+            (ids,)
+        )
+        names = [r[0] for r in cur.fetchall() if r[0] and r[0] != '(не указан)']
+        if names:
+            cur.execute(
+                f"""
+                UPDATE {SCHEMA}.materials
+                SET category_id=%s, updated_at=now()
+                WHERE lower(name) = ANY(%s)
+                  AND name != '(не указан)'
+                  AND id != ALL(%s)
+                  AND (category_id IS DISTINCT FROM %s)
+                """,
+                (cat, names, ids, cat)
+            )
+            inherited = cur.rowcount
+
+    return {"directly": directly, "inherited": inherited, "total": directly + inherited}
 
 
 def create_material_category(cur, body):
@@ -6826,12 +6724,25 @@ def handler(event: dict, context) -> dict:
         # ── MATERIAL CATEGORIES ──────────────────────────────────────────────────
         elif resource == "material_categories":
             if method == "GET":
+                # ?uncategorized=1 — список материалов без категории для ручного разбора
+                if qs.get("uncategorized") == "1":
+                    return ok(get_uncategorized_materials(cur))
                 return ok(get_material_categories(cur))
             elif method == "POST":
                 action = body.get("action", "create")
-                # Управление категориями — только директор и директор по снабжению
+                # Структурные операции с деревом — только директор/директор по снабжению.
                 if action in ("create", "rename", "move", "delete", "seed", "recategorize"):
                     require_role(cur, user_id, user_role, {"director", "general_director", "supply_director"})
+                # Назначение категории материалам доступно ещё и снабженцу.
+                if action == "assign":
+                    require_role(cur, user_id, user_role, {"director", "general_director", "supply_director", "supplier"})
+                    material_ids = body.get("material_ids") or ([body["material_id"]] if body.get("material_id") else [])
+                    category_id  = body.get("category_id")
+                    if not material_ids:
+                        return err("Не выбраны материалы")
+                    result = assign_category_to_materials(cur, material_ids, category_id)
+                    conn.commit()
+                    return ok(result)
                 if action == "create":
                     try:
                         result = create_material_category(cur, body)

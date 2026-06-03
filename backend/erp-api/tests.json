@@ -139,6 +139,29 @@
       "method": "POST", "path": "/?r=extract_pdf_text",
       "body": {},
       "expectedStatus": 400,
+      "bodyMatcher": "partial" },
+
+    { "name": "GET material_categories — 200 ok",
+      "method": "GET", "path": "/?r=material_categories",
+      "expectedStatus": 200, "bodyMatcher": "partial" },
+
+    { "name": "GET material_categories uncategorized — 200 ok",
+      "method": "GET", "path": "/?r=material_categories&uncategorized=1",
+      "expectedStatus": 200, "bodyMatcher": "partial" },
+
+    { "name": "POST material_categories assign — no rights returns 403",
+      "method": "POST", "path": "/?r=material_categories",
+      "body": { "action": "assign", "material_ids": [1], "category_id": 1 },
+      "headers": { "X-User-Role": "client" },
+      "expectedStatus": 403,
+      "bodyMatcher": "partial" },
+
+    { "name": "POST material_categories assign — empty ids returns 400",
+      "method": "POST", "path": "/?r=material_categories",
+      "body": { "action": "assign", "material_ids": [], "category_id": 1 },
+      "headers": { "X-User-Role": "supplier" },
+      "expectedStatus": 400,
+      "expectedBody": { "error": "Не выбраны материалы" },
       "bodyMatcher": "partial" }
   ]
 }

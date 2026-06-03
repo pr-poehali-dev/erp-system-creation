@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { api, MaterialCategory } from "@/lib/api";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
+import UncategorizedMaterials from "./UncategorizedMaterials";
 
 const CAN_IMPORT_ROLES: Role[] = ["director", "supply_director"];
 
 export default function CategoriesTab({ role }: { role?: Role }) {
   const canImport = !role || CAN_IMPORT_ROLES.includes(role);
+  const [view, setView] = useState<"tree" | "uncategorized">("tree");
   const [cats, setCats] = useState<MaterialCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -75,7 +77,7 @@ export default function CategoriesTab({ role }: { role?: Role }) {
   // Идём пакетами по курсору after_id, накапливая прогресс.
   const handleRecategorize = async () => {
     if (recat.running) return;
-    if (!confirm("Назначить категории всем счетам без категории? Система подберёт категорию по названию материала.")) return;
+    if (!confirm("Распространить категории на все материалы с такими же названиями? Категория берётся только от уже категоризированных материалов с точно таким же названием — без ошибочного подбора.")) return;
     setError("");
     setRecat({ running: true, total: 0, processed: 0, assigned: 0, doneMsg: "" });
     let afterId = 0;
@@ -208,8 +210,40 @@ export default function CategoriesTab({ role }: { role?: Role }) {
 
   const roots = childrenMap.get(null) || [];
 
+  // Кол-во материалов без категории = сумма по корню «Прочее» + материалы без category_id.
+  // Для бейджа достаточно показать количество в категории «Прочее», если она есть.
+  const otherCat = cats.find(c => c.parent_id === null && c.name.toLowerCase() === "прочее");
+  const otherCount = otherCat?.materials_count ?? 0;
+
   return (
     <div className="space-y-4">
+      {/* Переключатель видов */}
+      <div className="flex items-center gap-1 border-b border-border">
+        <button onClick={() => setView("tree")}
+          className={`flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium border-b-2 -mb-px transition-colors ${
+            view === "tree" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}>
+          <Icon name="FolderTree" size={14} />
+          Дерево категорий
+        </button>
+        <button onClick={() => setView("uncategorized")}
+          className={`flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium border-b-2 -mb-px transition-colors ${
+            view === "uncategorized" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}>
+          <Icon name="Tags" size={14} />
+          Материалы без категории
+          {otherCount > 0 && (
+            <span className="text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">{otherCount}</span>
+          )}
+        </button>
+      </div>
+
+      {view === "uncategorized" && (
+        <UncategorizedMaterials categories={cats} onAssigned={load} />
+      )}
+
+      {view === "tree" && (
+      <div className="space-y-4">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="text-[13px] text-hint">
           Перетаскивайте категории мышью, чтобы изменить родителя. {cats.length} категорий.
@@ -305,6 +339,8 @@ export default function CategoriesTab({ role }: { role?: Role }) {
           </>
         )}
       </div>
+      </div>
+      )}
     </div>
   );
 }
