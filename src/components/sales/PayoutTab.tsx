@@ -33,6 +33,7 @@ export default function PayoutTab({ role, managerId, onReload }: Props) {
 
   const [files, setFiles]       = useState<Record<number, File | null>>({});
   const [successId, setSuccessId] = useState<number | null>(null);
+  const [errorMsg, setErrorMsg] = useState("");
 
   // Директор: комментарий при отклонении
   const [rejectId, setRejectId]     = useState<number | null>(null);
@@ -49,10 +50,18 @@ export default function PayoutTab({ role, managerId, onReload }: Props) {
 
   useEffect(() => { load(); }, [managerId]);
 
+  // Авто-сброс уведомления об успехе с корректным cleanup таймера
+  useEffect(() => {
+    if (successId === null) return;
+    const t = setTimeout(() => setSuccessId(null), 5000);
+    return () => clearTimeout(t);
+  }, [successId]);
+
   // Загрузка счёта менеджером
   const handleSubmitInvoice = async (deal: PayoutDeal) => {
     if (!managerId) return;
     setSubmitting(deal.id);
+    setErrorMsg("");
     try {
       const file = files[deal.id];
       let file_b64: string | undefined;
@@ -77,9 +86,10 @@ export default function PayoutTab({ role, managerId, onReload }: Props) {
         });
       }
       setSuccessId(deal.id);
-      setTimeout(() => setSuccessId(null), 5000);
       load();
       onReload?.();
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Не удалось отправить счёт. Попробуйте ещё раз.");
     } finally { setSubmitting(null); }
   };
 
@@ -87,10 +97,13 @@ export default function PayoutTab({ role, managerId, onReload }: Props) {
   const handleApprove = async (deal: PayoutDeal) => {
     if (!deal.payout_id) return;
     setSubmitting(deal.id);
+    setErrorMsg("");
     try {
       await api.payout_requests.update(deal.payout_id, "approved");
       load();
       onReload?.();
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Не удалось согласовать выплату. Попробуйте ещё раз.");
     } finally { setSubmitting(null); }
   };
 
@@ -98,12 +111,15 @@ export default function PayoutTab({ role, managerId, onReload }: Props) {
   const handleReject = async (deal: PayoutDeal) => {
     if (!deal.payout_id) return;
     setSubmitting(deal.id);
+    setErrorMsg("");
     try {
       await api.payout_requests.update(deal.payout_id, "rejected", rejectComment);
       setRejectId(null);
       setRejectComment("");
       load();
       onReload?.();
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Не удалось отклонить заявку. Попробуйте ещё раз.");
     } finally { setSubmitting(null); }
   };
 
@@ -127,6 +143,15 @@ export default function PayoutTab({ role, managerId, onReload }: Props) {
 
   return (
     <div className="space-y-3">
+      {errorMsg && (
+        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 flex items-start gap-2">
+          <Icon name="AlertCircle" size={14} className="text-red-500 shrink-0 mt-0.5" />
+          <span className="text-[12px] text-red-700 flex-1">{errorMsg}</span>
+          <button onClick={() => setErrorMsg("")} className="text-red-400 hover:text-red-600 shrink-0">
+            <Icon name="X" size={14} />
+          </button>
+        </div>
+      )}
       {!isDirector && (
         <div className="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 flex items-start gap-2">
           <Icon name="Info" size={14} className="text-blue-500 shrink-0 mt-0.5" />

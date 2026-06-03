@@ -231,6 +231,62 @@ def get_user_context(event: dict):
     return uid, (role or "").strip()
 
 
+def get_verified_role(cur, user_id, claimed_role=""):
+    """Возвращает РЕАЛЬНУЮ роль пользователя из БД по user_id.
+    Заголовок X-User-Role не является источником истины — его легко подделать.
+    Для критичных операций (деньги, смена статуса) роль берём ТОЛЬКО отсюда.
+    Если user_id не передан или сотрудник не найден — возвращаем "" (нет прав).
+    Демо-режим: если user_id отсутствует, но claimed_role задан — доверяем заголовку
+    (нужно для витрины без авторизации; критичные операции всё равно потребуют user_id).
+    """
+    if user_id is None:
+        return (claimed_role or "").strip()
+    cur.execute(
+        f"SELECT role FROM {SCHEMA}.staff WHERE id = %s AND is_active = TRUE",
+        (int(user_id),),
+    )
+    row = cur.fetchone()
+    return (row[0] if row else "").strip()
+
+
+def require_role(cur, user_id, claimed_role, allowed_roles):
+    """Проверяет, что РЕАЛЬНАЯ роль пользователя входит в allowed_roles.
+    Бросает PermissionError, если нет прав. Используется для критичных операций.
+    """
+    real_role = get_verified_role(cur, user_id, claimed_role)
+    if real_role not in allowed_roles:
+        raise PermissionError(
+            f"Недостаточно прав для этой операции (требуется одна из ролей: {', '.join(allowed_roles)})"
+        )
+    return real_role
+
+
+def require_deal_owner(cur, deal_id, user_id, claimed_role):
+    """Owner-check: менеджер/риэлтор может менять ТОЛЬКО свою сделку.
+    Директор / коммерческий / демо-режим (роль не определена) — любую.
+    Бросает PermissionError если пользователь пытается изменить чужую сделку.
+    """
+    real_role = get_verified_role(cur, user_id, claimed_role)
+    # Полный доступ — менять любую сделку
+    if real_role in DEALS_FULL_ACCESS or real_role == "":
+        return
+    if real_role not in ("crm_manager", "realtor"):
+        # Прочие роли к сделкам не имеют доступа
+        raise PermissionError("Недостаточно прав для изменения сделки")
+    # Менеджер/риэлтор — только свои
+    cur.execute(
+        f"SELECT manager_id, realtor_id FROM {SCHEMA}.deals WHERE id=%s",
+        (int(deal_id),),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError("Сделка не найдена")
+    manager_id, realtor_id = row
+    owner_id = manager_id if real_role == "crm_manager" else realtor_id
+    if user_id is None or owner_id != user_id:
+        raise PermissionError("Можно изменять только свои сделки")
+
+
 # Роли, которым видны все сделки без фильтра
 DEALS_FULL_ACCESS = {"director", "commercial", "general_director", "commercial_director"}
 # Роли, которым сделки в принципе не положены
@@ -879,6 +935,18 @@ def close_deal_with_commission(cur, deal_id):
 def update_deal_stage(cur, deal_id, new_stage, body=None):
     """Обобщённое изменение стадии (для lost и других простых переходов)."""
     body = body or {}
+
+    # Защита от обратного перехода из терминальных статусов.
+    # Закрытая/сданная сделка не может вернуться в активные стадии —
+    # иначе при повторном закрытии повторно начислится комиссия (двойной KPI).
+    cur.execute(f"SELECT stage FROM {SCHEMA}.deals WHERE id=%s", (deal_id,))
+    cur_row = cur.fetchone()
+    if not cur_row:
+        return None, "Сделка не найдена"
+    current_stage = cur_row[0]
+    TERMINAL = {"closed", "done"}
+    if current_stage in TERMINAL and new_stage != current_stage:
+        return None, "Сделка уже закрыта — изменение её статуса запрещено"
 
     if new_stage == "kp":
         return update_deal_kp(cur, deal_id, body)
@@ -5191,6 +5259,10 @@ def handler(event: dict, context) -> dict:
                 return ok(data)
             elif method == "POST":
                 action = body.get("action", "create")
+                # Owner-check: менеджер/риэлтор может менять только свою сделку.
+                # Применяем ко всем действиям, изменяющим конкретную сделку.
+                if action != "create" and body.get("deal_id"):
+                    require_deal_owner(cur, int(body["deal_id"]), user_id, user_role)
                 if action in ("update_stage", "kp", "contract", "lost", "planning", "closed"):
                     deal_id = int(body["deal_id"])
                     stage = body.get("stage") or action
@@ -5338,24 +5410,21 @@ def handler(event: dict, context) -> dict:
                         conn.commit()
                     return ok({"success": True})
                 elif action == "approve_project":
-                    if user_role not in ("director", "construction_director"):
-                        return err("Недостаточно прав. Только директор по строительству может перевести проект в производство.", 403)
+                    require_role(cur, user_id, user_role, {"director", "general_director", "construction_director"})
                     pid = int(body["project_id"])
                     result, error = approve_project(cur, pid)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
                 elif action == "cancel_project":
-                    if user_role not in ("director", "construction_director", "commercial"):
-                        return err("Недостаточно прав. Только директор может отменить проект.", 403)
+                    require_role(cur, user_id, user_role, {"director", "general_director", "construction_director", "commercial"})
                     pid = int(body["project_id"])
                     result, error = cancel_project(cur, pid)
                     if error: return err(error)
                     conn.commit()
                     return ok(result)
                 elif action == "complete_project":
-                    if user_role not in ("director", "construction_director", "foreman"):
-                        return err("Недостаточно прав для завершения проекта.", 403)
+                    require_role(cur, user_id, user_role, {"director", "general_director", "construction_director", "foreman"})
                     pid = int(body["project_id"])
                     result, error = complete_project(cur, pid)
                     if error: return err(error)
@@ -5712,6 +5781,9 @@ def handler(event: dict, context) -> dict:
                     data = get_payments(cur)
                 return ok(data)
             elif method == "POST":
+                # Создавать платежи могут только финансовые роли и директор
+                require_role(cur, user_id, user_role,
+                             {"director", "general_director", "finance_director", "accountant"})
                 result = create_payment(cur, body)
                 conn.commit()
                 return ok(result, 201)
@@ -6012,7 +6084,9 @@ def handler(event: dict, context) -> dict:
                     return ok(result)
 
                 elif action == "approve":
-                    # Директор подтверждает/отклоняет
+                    # Директор подтверждает/отклоняет — только директорские роли
+                    require_role(cur, user_id, user_role,
+                                 {"director", "general_director", "commercial", "commercial_director"})
                     approved = bool(body.get("approved", True))
                     reason   = body.get("reject_reason", "")
                     result, error = approve_docs(cur, deal_id, approved, reason)
@@ -6024,7 +6098,9 @@ def handler(event: dict, context) -> dict:
                     return ok(result)
 
                 elif action == "confirm_payment":
-                    # Директор подтверждает оплату
+                    # Директор подтверждает оплату — только директорские/финансовые роли
+                    require_role(cur, user_id, user_role,
+                                 {"director", "general_director", "finance_director", "accountant"})
                     result, error = confirm_payment(cur, deal_id)
                     if error: return err(error)
                     conn.commit()
@@ -6061,6 +6137,9 @@ def handler(event: dict, context) -> dict:
                     conn.commit()
                     return ok(result, 201)
                 elif action == "update":
+                    # Одобрять/отклонять выплаты может только директор
+                    require_role(cur, user_id, user_role,
+                                 {"director", "general_director", "finance_director"})
                     payout_id = int(body["payout_id"])
                     result, error = update_payout_request(cur, payout_id, body)
                     if error: return err(error)
@@ -6167,10 +6246,16 @@ def handler(event: dict, context) -> dict:
                 full_text = "\n\n".join(parts)
                 return ok({"text": full_text, "pages": len(reader.pages), "has_text": bool(full_text.strip())})
             except Exception as e:
-                return err(f"Ошибка чтения PDF: {e}", 500)
+                logger.error(f"PDF extract error: {type(e).__name__}: {e}")
+                return err("Не удалось прочитать PDF. Попробуйте сохранить файл как JPG.", 500)
 
         return err("Маршрут не найден", 404)
 
+    except PermissionError as pe:
+        # Недостаточно прав — 403, понятное сообщение пользователю
+        conn.rollback()
+        logger.warning(f"PermissionDenied: user_id={user_id} role={user_role} resource={resource}: {pe}")
+        return err(str(pe), 403)
     except ValueError as ve:
         # Бизнес-валидация — пользовательская ошибка, 400 + понятное сообщение
         conn.rollback()
