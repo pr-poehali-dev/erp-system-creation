@@ -1,17 +1,19 @@
 import { useEffect, useState } from "react";
-import { api, Material, MaterialUnit, SupplierCategory, MATERIAL_UNITS, SUPPLIER_CATEGORIES } from "@/lib/api";
+import { api, Material, MaterialCategory, MaterialUnit, SupplierCategory, MATERIAL_UNITS, SUPPLIER_CATEGORIES } from "@/lib/api";
 import Icon from "@/components/ui/icon";
 import { usePagination } from "@/hooks/usePagination";
+import CategoryTreeSelect, { buildCategoryPath } from "./CategoryTreeSelect";
 
 const CAT_LABELS: Record<SupplierCategory, string> = {
   бетон: "Бетон", пиломатериалы: "Пиломатериалы", металл: "Металл",
   кровля: "Кровля", инженерия: "Инженерия", отделка: "Отделка", прочее: "Прочее",
 };
 
-const EMPTY_FORM = { name: "", unit: "шт" as MaterialUnit, supplier_category: "" as SupplierCategory | "" };
+const EMPTY_FORM = { name: "", unit: "шт" as MaterialUnit, supplier_category: "" as SupplierCategory | "", category_id: null as number | null };
 
 export default function MaterialsTab() {
   const [materials, setMaterials] = useState<Material[]>([]);
+  const [categories, setCategories] = useState<MaterialCategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editItem, setEditItem] = useState<Material | null>(null);
@@ -20,13 +22,18 @@ export default function MaterialsTab() {
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
 
-  const load = () => { setLoading(true); api.materials.list().then(setMaterials).finally(() => setLoading(false)); };
+  const load = () => {
+    setLoading(true);
+    Promise.all([api.materials.list(), api.material_categories.list()])
+      .then(([mats, cats]) => { setMaterials(mats); setCategories(cats); })
+      .finally(() => setLoading(false));
+  };
   useEffect(() => { load(); }, []);
 
   const openCreate = () => { setEditItem(null); setForm({ ...EMPTY_FORM }); setError(""); setModalOpen(true); };
   const openEdit = (m: Material) => {
     setEditItem(m);
-    setForm({ name: m.name, unit: m.unit, supplier_category: m.supplier_category || "" });
+    setForm({ name: m.name, unit: m.unit, supplier_category: m.supplier_category || "", category_id: m.category_id ?? null });
     setError(""); setModalOpen(true);
   };
 
@@ -35,7 +42,7 @@ export default function MaterialsTab() {
     if (!form.name.trim()) { setError("Наименование обязательно"); return; }
     setSaving(true); setError("");
     try {
-      const body = { name: form.name.trim(), unit: form.unit, supplier_category: form.supplier_category || null };
+      const body = { name: form.name.trim(), unit: form.unit, supplier_category: form.supplier_category || null, category_id: form.category_id };
       if (editItem) await api.materials.update(editItem.id, body);
       else await api.materials.create(body);
       setModalOpen(false); load();
@@ -77,8 +84,8 @@ export default function MaterialsTab() {
             <table className="w-full">
               <thead>
                 <tr className="bg-secondary/50 text-left text-[11px] uppercase text-hint">
-                  {["Наименование","Ед. изм.","Категория поставщика",""].map(h => (
-                    <th key={h} className="px-4 py-2.5 font-medium">{h}</th>
+                  {["Наименование","Ед. изм.","Категория","Категория поставщика",""].map(h => (
+                    <th key={h} className="px-4 py-2.5 font-medium whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -88,6 +95,11 @@ export default function MaterialsTab() {
                     <td className="px-4 py-3 text-[13px] font-medium">{m.name}</td>
                     <td className="px-4 py-3">
                       <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 font-medium">{m.unit}</span>
+                    </td>
+                    <td className="px-4 py-3 text-[12px] text-muted-foreground max-w-[260px]">
+                      <span className="truncate block" title={m.category_id ? buildCategoryPath(categories, m.category_id) : ""}>
+                        {m.category_id ? buildCategoryPath(categories, m.category_id) : "—"}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-[13px] text-muted-foreground">
                       {m.supplier_category ? CAT_LABELS[m.supplier_category] : "—"}
@@ -136,6 +148,11 @@ export default function MaterialsTab() {
                     {SUPPLIER_CATEGORIES.map(c => <option key={c} value={c}>{CAT_LABELS[c]}</option>)}
                   </select>
                 </div>
+              </div>
+              <div>
+                <label className="block text-[13px] font-medium mb-1">Категория материала</label>
+                <CategoryTreeSelect categories={categories} value={form.category_id}
+                  onChange={id => setForm(p => ({ ...p, category_id: id }))} />
               </div>
               {error && <div className="text-red-500 text-[12px]">{error}</div>}
               <div className="flex gap-2 pt-1">

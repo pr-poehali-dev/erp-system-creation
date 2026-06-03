@@ -187,8 +187,26 @@ export const api = {
     update: (id: number, body: object) => request<any>("materials", "POST", { action: "update", id, ...body }),
   },
 
+  material_categories: {
+    list: () => request<MaterialCategory[]>("material_categories"),
+    create: (body: { name: string; parent_id?: number | null; sort_order?: number }) =>
+      request<{ id: number }>("material_categories", "POST", { action: "create", ...body }),
+    rename: (id: number, name: string) =>
+      request<any>("material_categories", "POST", { action: "rename", id, name }),
+    move: (id: number, parent_id: number | null, sort_order?: number) =>
+      request<any>("material_categories", "POST", { action: "move", id, parent_id, sort_order }),
+    remove: (id: number) =>
+      request<any>("material_categories", "POST", { action: "delete", id }),
+    seed: () =>
+      request<{ created: number; total_lines: number }>("material_categories", "POST", { action: "seed" }),
+  },
+
   invoices: {
-    list: () => request<Invoice[]>("invoices"),
+    list: (opts?: { category_id?: number; category_filter?: "none" | "other" }) =>
+      request<Invoice[]>("invoices", "GET", undefined,
+        opts?.category_id ? { category_id: String(opts.category_id) }
+        : opts?.category_filter ? { category_filter: opts.category_filter }
+        : {}),
     create: (body: object) => request<any>("invoices", "POST", body),
     update: (id: number, body: object) => request<any>("invoices", "POST", { action: "update", id, ...body }),
     uploadFile: (invoice_id: number, file_b64: string, file_name: string) =>
@@ -932,6 +950,16 @@ export interface Material {
   supplier_category: SupplierCategory | null;
   is_active: boolean;
   created_at: string;
+  category_id: number | null;
+  category_name: string | null;
+}
+
+export interface MaterialCategory {
+  id: number;
+  name: string;
+  parent_id: number | null;
+  sort_order: number;
+  materials_count: number;
 }
 
 export interface Invoice {
@@ -941,6 +969,8 @@ export interface Invoice {
   material_id: number;
   material_name: string;
   unit: MaterialUnit;
+  category_id: number | null;
+  category_name: string | null;
   invoice_date: string | null;
   invoice_number: string | null;
   unit_price: number | null;

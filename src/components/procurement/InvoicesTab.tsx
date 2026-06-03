@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { api, Invoice, Supplier, Material } from "@/lib/api";
+import { api, Invoice, Supplier, Material, MaterialCategory } from "@/lib/api";
 import { Role } from "@/App";
 import Icon from "@/components/ui/icon";
 import InvoiceModal from "./InvoiceModal";
 import BulkUploadModal from "./BulkUploadModal";
+import CategoryTreeSelect, { buildCategoryPath } from "./CategoryTreeSelect";
 import {
   AI_ROLES, EXT_ICON, STATUS_CFG, fmtMoney, fmtDate,
   prepareFileForUpload, InvoiceForm, UploadedFile, EMPTY_FORM, AiRecognizeResult, AiItem,
@@ -15,8 +16,11 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const [invoices,  setInvoices]  = useState<Invoice[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [materials, setMaterials] = useState<Material[]>([]);
+  const [categories, setCategories] = useState<MaterialCategory[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [filterSt,  setFilterSt]  = useState<Invoice["recognition_status"] | "">("");
+  // Фильтр по категории: id категории, либо спец-фильтр 'none'/'other'
+  const [catFilter, setCatFilter] = useState<{ kind: "all" | "id" | "none" | "other"; id: number | null }>({ kind: "all", id: null });
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editItem,  setEditItem]  = useState<Invoice | null>(null);
@@ -43,13 +47,31 @@ export default function InvoicesTab({ role }: { role?: Role }) {
   const canUseAI      = !role || AI_ROLES.includes(role);
   const canSeeRawData = canUseAI;
 
+  // Параметры запроса счетов в зависимости от фильтра категории
+  const invoiceListOpts = () => {
+    if (catFilter.kind === "id" && catFilter.id) return { category_id: catFilter.id };
+    if (catFilter.kind === "none") return { category_filter: "none" as const };
+    if (catFilter.kind === "other") return { category_filter: "other" as const };
+    return undefined;
+  };
+
+  // Перезагрузка только списка счетов (без сброса справочников и состояния модалок)
+  const reloadInvoices = () => {
+    setLoading(true);
+    api.invoices.list(invoiceListOpts())
+      .then(setInvoices)
+      .finally(() => setLoading(false));
+  };
+
   const load = () => {
     setLoading(true);
-    Promise.all([api.invoices.list(), api.suppliers.list(), api.materials.list()])
-      .then(([inv, sup, mat]) => { setInvoices(inv); setSuppliers(sup); setMaterials(mat); })
+    Promise.all([api.invoices.list(invoiceListOpts()), api.suppliers.list(), api.materials.list(), api.material_categories.list()])
+      .then(([inv, sup, mat, cats]) => { setInvoices(inv); setSuppliers(sup); setMaterials(mat); setCategories(cats); })
       .finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
+  // При смене фильтра категории — перезагружаем только счета (страница не перезагружается)
+  useEffect(() => { reloadInvoices();   }, [catFilter]);
 
   // ── Распознавание: Excel → DeepSeek, JPG/PDF → Gemini ────────────────────
   const runPolzaRecognize = async (b64: string, fileName: string) => {
@@ -331,6 +353,36 @@ export default function InvoicesTab({ role }: { role?: Role }) {
         </div>
       </div>
 
+      {/* Фильтр по категории материала (иерархический) + быстрые фильтры */}
+      <div className="flex items-center gap-2 flex-wrap bg-white border border-border rounded-xl px-3 py-2.5">
+        <div className="flex items-center gap-1.5 text-[13px] text-hint shrink-0">
+          <Icon name="FolderTree" size={14} />
+          Категория:
+        </div>
+        <div className="w-72 max-w-full">
+          <CategoryTreeSelect
+            categories={categories}
+            value={catFilter.kind === "id" ? catFilter.id : null}
+            placeholder="Все категории"
+            onChange={(id) => setCatFilter(id ? { kind: "id", id } : { kind: "all", id: null })}
+          />
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button onClick={() => setCatFilter({ kind: "all", id: null })}
+            className={`text-[12px] px-3 py-1.5 rounded-lg border transition-colors ${catFilter.kind === "all" ? "bg-primary/10 border-primary text-primary font-medium" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+            Все
+          </button>
+          <button onClick={() => setCatFilter({ kind: "none", id: null })}
+            className={`text-[12px] px-3 py-1.5 rounded-lg border transition-colors ${catFilter.kind === "none" ? "bg-amber-100 border-amber-300 text-amber-700 font-medium" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+            Без категории
+          </button>
+          <button onClick={() => setCatFilter({ kind: "other", id: null })}
+            className={`text-[12px] px-3 py-1.5 rounded-lg border transition-colors ${catFilter.kind === "other" ? "bg-primary/10 border-primary text-primary font-medium" : "border-border text-muted-foreground hover:bg-secondary"}`}>
+            Прочее
+          </button>
+        </div>
+      </div>
+
       {/* Таблица */}
       <div className="bg-white rounded-xl border border-border overflow-hidden">
         {loading ? (
@@ -351,6 +403,7 @@ export default function InvoicesTab({ role }: { role?: Role }) {
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">№ счёта</th>
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">Поставщик</th>
                   <th className="px-4 py-2.5 font-medium min-w-[240px]">Материал</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">Категория</th>
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">Дата</th>
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">Цена</th>
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">Кол-во</th>
@@ -381,6 +434,15 @@ export default function InvoicesTab({ role }: { role?: Role }) {
                               <span className="text-hint whitespace-nowrap">({inv.unit})</span>
                             </div>
                           : <span className="text-hint italic text-[12px]">не указан</span>
+                        }
+                      </td>
+                      <td className="px-4 py-3 text-[12px] max-w-[200px]">
+                        {inv.category_name
+                          ? <span className="inline-block px-2 py-0.5 rounded-md bg-secondary text-muted-foreground truncate max-w-full"
+                              title={buildCategoryPath(categories, inv.category_id)}>
+                              {inv.category_name}
+                            </span>
+                          : <span className="text-amber-600 text-[11px]">без категории</span>
                         }
                       </td>
                       <td className="px-4 py-3 text-[12px] text-muted-foreground whitespace-nowrap">{fmtDate(inv.invoice_date)}</td>

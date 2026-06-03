@@ -8,10 +8,11 @@ import InvoicesTab from "@/components/procurement/InvoicesTab";
 import PurchaseRequestsTab from "@/components/procurement/PurchaseRequestsTab";
 import PurchasePlanTab from "@/components/procurement/PurchasePlanTab";
 import TemplatesTab from "@/components/procurement/TemplatesTab";
+import CategoriesTab from "@/components/procurement/CategoriesTab";
 
 interface Props { role: Role; }
 
-type ProcTab = "requests" | "suppliers" | "materials" | "invoices" | "purchase_requests" | "plan" | "templates";
+type ProcTab = "requests" | "suppliers" | "materials" | "invoices" | "purchase_requests" | "plan" | "templates" | "categories";
 
 const STATUS_MAP: Record<string, { label: string; cls: string }> = {
   new:         { label: "Новая",     cls: "bg-amber-100 text-amber-700 border-amber-200" },
@@ -53,6 +54,8 @@ const TABS: { key: ProcTab; label: string; icon: string; roles?: Role[] }[] = [
   { key: "invoices",          label: "Счета",               icon: "FileText" },
   { key: "purchase_requests", label: "Заявки на закупку",   icon: "ShoppingCart" },
   { key: "plan",              label: "Плановые закупки",    icon: "CalendarRange" },
+  { key: "categories",        label: "Категории",           icon: "FolderTree",
+    roles: ["director", "supply_director"] },
   { key: "templates",         label: "Шаблоны",             icon: "BookOpen",
     roles: ["director", "supply_director", "supplier"] },
 ];
@@ -309,6 +312,7 @@ export default function Procurement({ role }: Props) {
       {activeTab === "invoices"          && <InvoicesTab role={role} />}
       {activeTab === "purchase_requests" && <PurchaseRequestsTab />}
       {activeTab === "plan"              && <PurchasePlanTab />}
+      {activeTab === "categories"        && <CategoriesTab />}
       {activeTab === "templates"         && <TemplatesTab />}
 
       {/* Модалка создания заявки на материал */}
