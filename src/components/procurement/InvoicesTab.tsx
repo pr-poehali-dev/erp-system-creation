@@ -47,6 +47,8 @@ export default function InvoicesTab({ role }: { role?: Role }) {
 
   const canUseAI      = !role || AI_ROLES.includes(role);
   const canSeeRawData = canUseAI;
+  // Менять категорию материала могут директор, директор по снабжению и снабженец
+  const canEditCategory = !role || ["director", "supply_director", "supplier"].includes(role);
 
   // Параметры запроса счетов в зависимости от фильтра категории
   const invoiceListOpts = () => {
@@ -319,6 +321,38 @@ export default function InvoicesTab({ role }: { role?: Role }) {
     }
   };
 
+  // Сменить категорию материала текущего счёта. Категория сохраняется в материал,
+  // поэтому все счета с этим материалом получают её автоматически.
+  const handleChangeCategory = async (categoryId: number | null) => {
+    if (!editItem?.material_id) return;
+    const matId = editItem.material_id;
+    await api.materials.update(matId, { category_id: categoryId });
+    // Имя категории для подписи берём из локального справочника
+    const catName = categoryId ? (categories.find(c => c.id === categoryId)?.name ?? null) : null;
+    // Обновляем открытый счёт
+    setEditItem(prev => prev ? { ...prev, category_id: categoryId, category_name: catName } : prev);
+    // Обновляем все счета с тем же материалом в таблице (без перезагрузки страницы)
+    setInvoices(prev => prev.map(inv =>
+      inv.material_id === matId ? { ...inv, category_id: categoryId, category_name: catName } : inv
+    ));
+    // Подтягиваем актуальные справочники (счётчики материалов в категориях и т.п.)
+    api.material_categories.list().then(setCategories);
+    api.materials.list().then(setMaterials);
+  };
+
+  // Создать новую корневую категорию из выпадающего списка и вернуть её id.
+  const handleCreateCategory = async (name: string): Promise<number | null> => {
+    try {
+      const res = await api.material_categories.create({ name, parent_id: null });
+      const fresh = await api.material_categories.list();
+      setCategories(fresh);
+      return res.id;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось создать категорию");
+      return null;
+    }
+  };
+
   const totalSum    = invoices.reduce((s, i) => s + (i.total_amount || 0), 0);
   const filtered    = filterSt ? invoices.filter(i => i.recognition_status === filterSt) : invoices;
   const { pageItems: visible, Pager } = usePagination(filtered);
@@ -373,6 +407,10 @@ export default function InvoicesTab({ role }: { role?: Role }) {
           canSeeRawData={canSeeRawData}
           suppliers={suppliers}
           materials={materials}
+          categories={categories}
+          canEditCategory={canEditCategory}
+          onChangeCategory={handleChangeCategory}
+          onCreateCategory={handleCreateCategory}
           onClose={closeModal}
           onSave={handleSave}
           onFileSelect={handleFileSelect}

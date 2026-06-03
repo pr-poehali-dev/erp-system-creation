@@ -199,6 +199,10 @@ export const api = {
       request<any>("material_categories", "POST", { action: "delete", id }),
     seed: () =>
       request<{ created: number; total_lines: number }>("material_categories", "POST", { action: "seed" }),
+    recategorize: (after_id: number, batch_size = 200) =>
+      request<{ total?: number; batch: number; assigned: number; last_id: number; done: boolean }>(
+        "material_categories", "POST", { action: "recategorize", after_id, batch_size }
+      ),
   },
 
   invoices: {

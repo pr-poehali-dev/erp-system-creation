@@ -1,7 +1,8 @@
-import { useRef } from "react";
-import { Invoice, Supplier, Material } from "@/lib/api";
+import { useRef, useState } from "react";
+import { Invoice, Supplier, Material, MaterialCategory } from "@/lib/api";
 import Icon from "@/components/ui/icon";
 import InvoiceAiPanel from "./InvoiceAiPanel";
+import CategoryTreeSelect, { buildCategoryPath } from "./CategoryTreeSelect";
 import {
   InvoiceForm, UploadedFile, AiRecognizeResult, AiItem,
   EXT_ICON, ACCEPT_TYPES, ACCEPT_HINT,
@@ -27,6 +28,13 @@ interface Props {
   canSeeRawData: boolean;
   suppliers: Supplier[];
   materials: Material[];
+  categories: MaterialCategory[];
+  /** Может ли пользователь менять категорию материала (director/supply_director/supplier) */
+  canEditCategory: boolean;
+  /** Сохранить выбранную категорию в материал счёта. Возвращает Promise. */
+  onChangeCategory: (categoryId: number | null) => Promise<void>;
+  /** Создать новую корневую категорию, вернуть её id (или null). */
+  onCreateCategory: (name: string) => Promise<number | null>;
   onClose: () => void;
   onSave: (e: React.FormEvent) => void;
   onFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
@@ -42,14 +50,24 @@ export default function InvoiceModal({
   localFile, uploadedFile,
   saving, procStage, polzaStatus, autoRecognize, error,
   recognizing, applying, aiResult, aiError, canRecognize, canSeeRawData,
-  suppliers, materials,
+  suppliers, materials, categories, canEditCategory, onChangeCategory, onCreateCategory,
   onClose, onSave, onFileSelect, onRemoveFile,
   onRecognize, onApplyAI, onDismissAI, onRetryPolza,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const [catSaving, setCatSaving] = useState(false);
 
   const hasFile     = !!(localFile || uploadedFile);
   const displayName = localFile?.name || uploadedFile?.name || "";
+
+  // Категория показывается для существующего счёта с привязанным материалом.
+  const showCategory = !!(editItem && editItem.material_id && canEditCategory);
+
+  const handleCategoryChange = async (categoryId: number | null) => {
+    setCatSaving(true);
+    try { await onChangeCategory(categoryId); }
+    finally { setCatSaving(false); }
+  };
 
   return (
     <div
@@ -123,6 +141,35 @@ export default function InvoiceModal({
               </label>
             )}
           </div>
+
+          {/* ── Категория материала ── */}
+          {showCategory && (
+            <div>
+              <label className="block text-[13px] font-medium mb-1.5 flex items-center gap-1.5">
+                Категория материала
+                {catSaving && <Icon name="Loader" size={12} className="animate-spin text-primary" />}
+              </label>
+              <CategoryTreeSelect
+                categories={categories}
+                value={editItem?.category_id ?? null}
+                onChange={handleCategoryChange}
+                onCreate={onCreateCategory}
+                placeholder="Без категории"
+              />
+              <div className="text-[11px] text-hint mt-1">
+                {editItem?.material_name ? (
+                  <>Категория сохранится для материала «{editItem.material_name}». Все будущие счета с ним получат её автоматически.</>
+                ) : (
+                  <>Категория сохранится для материала счёта.</>
+                )}
+              </div>
+              {editItem?.category_id && (
+                <div className="text-[11px] text-muted-foreground mt-0.5">
+                  Текущая: {buildCategoryPath(categories, editItem.category_id) || "—"}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* ── AI кнопка ── */}
           {canRecognize && (

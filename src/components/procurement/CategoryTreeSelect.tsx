@@ -8,6 +8,10 @@ interface Props {
   onChange: (id: number | null) => void;
   placeholder?: string;
   allowEmpty?: boolean;
+  /** Если задан — показывается пункт «+ Добавить категорию».
+   *  Колбэк создаёт категорию (например через API) и возвращает её id,
+   *  который компонент сразу выбирает. Вернуть null — отмена. */
+  onCreate?: (name: string) => Promise<number | null>;
 }
 
 /** Строит путь категории вида "Металлопрокат / Арматура рифленная" */
@@ -25,10 +29,11 @@ export function buildCategoryPath(categories: MaterialCategory[], id: number | n
   return parts.join(" / ");
 }
 
-export default function CategoryTreeSelect({ categories, value, onChange, placeholder = "Выберите категорию", allowEmpty = true }: Props) {
+export default function CategoryTreeSelect({ categories, value, onChange, placeholder = "Выберите категорию", allowEmpty = true, onCreate }: Props) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [creating, setCreating] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -69,6 +74,20 @@ export default function CategoryTreeSelect({ categories, value, onChange, placeh
   };
 
   const pick = (id: number | null) => { onChange(id); setOpen(false); setSearch(""); };
+
+  const handleCreate = async () => {
+    if (!onCreate || creating) return;
+    const suggested = search.trim();
+    const name = (window.prompt("Название новой категории (корневой):", suggested) || "").trim();
+    if (!name) return;
+    setCreating(true);
+    try {
+      const newId = await onCreate(name);
+      if (newId) pick(newId);
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const renderNode = (cat: MaterialCategory, depth: number) => {
     const kids = childrenMap.get(cat.id) || [];
@@ -129,6 +148,15 @@ export default function CategoryTreeSelect({ categories, value, onChange, placeh
               roots.map(r => renderNode(r, 0))
             )}
           </div>
+          {onCreate && (
+            <div className="border-t border-border p-1">
+              <button type="button" onClick={handleCreate} disabled={creating}
+                className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded text-[13px] text-primary hover:bg-primary/5 transition-colors disabled:opacity-50">
+                <Icon name={creating ? "Loader" : "Plus"} size={13} className={creating ? "animate-spin" : ""} />
+                Добавить категорию{search.trim() ? ` «${search.trim()}»` : ""}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

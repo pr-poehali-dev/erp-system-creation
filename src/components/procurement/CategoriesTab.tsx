@@ -14,6 +14,10 @@ export default function CategoriesTab({ role }: { role?: Role }) {
   const [busy, setBusy] = useState(false);
   const [dragId, setDragId] = useState<number | null>(null);
   const [dropTarget, setDropTarget] = useState<number | "root" | null>(null);
+  // Ретроспективное назначение категорий
+  const [recat, setRecat] = useState<{ running: boolean; total: number; processed: number; assigned: number; doneMsg: string }>({
+    running: false, total: 0, processed: 0, assigned: 0, doneMsg: "",
+  });
 
   const load = () => {
     setLoading(true);
@@ -65,6 +69,43 @@ export default function CategoriesTab({ role }: { role?: Role }) {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Ошибка импорта");
     } finally { setBusy(false); }
+  };
+
+  // Ретроспективно назначить категории всем материалам без категории.
+  // Идём пакетами по курсору after_id, накапливая прогресс.
+  const handleRecategorize = async () => {
+    if (recat.running) return;
+    if (!confirm("Назначить категории всем счетам без категории? Система подберёт категорию по названию материала.")) return;
+    setError("");
+    setRecat({ running: true, total: 0, processed: 0, assigned: 0, doneMsg: "" });
+    let afterId = 0;
+    let total = 0;
+    let processed = 0;
+    let assigned = 0;
+    let guard = 0;
+    try {
+       
+      while (true) {
+        guard++;
+        if (guard > 100000) break; // страховка от бесконечного цикла
+        const res = await api.material_categories.recategorize(afterId, 200);
+        if (afterId === 0 && typeof res.total === "number") total = res.total;
+        processed += res.batch;
+        assigned  += res.assigned;
+        afterId    = res.last_id;
+        setRecat({ running: true, total, processed, assigned, doneMsg: "" });
+        if (res.done || res.batch === 0) break;
+      }
+      const remaining = Math.max(0, total - assigned);
+      setRecat({
+        running: false, total, processed, assigned,
+        doneMsg: `Категории обновлены. Назначено: ${assigned}, без категории осталось: ${remaining}.`,
+      });
+      load();
+    } catch (e) {
+      setRecat(prev => ({ ...prev, running: false }));
+      setError(e instanceof Error ? e.message : "Ошибка назначения категорий");
+    }
   };
 
   const handleAdd = async (parentId: number | null) => {
@@ -173,12 +214,19 @@ export default function CategoriesTab({ role }: { role?: Role }) {
         <div className="text-[13px] text-hint">
           Перетаскивайте категории мышью, чтобы изменить родителя. {cats.length} категорий.
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {canImport && (
-            <button onClick={handleImport} disabled={busy}
+            <button onClick={handleImport} disabled={busy || recat.running}
               className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-lg text-[13px] hover:bg-secondary transition-colors disabled:opacity-50">
               <Icon name={busy ? "Loader" : "Download"} size={14} className={busy ? "animate-spin" : ""} />
               Импортировать дерево
+            </button>
+          )}
+          {canImport && (
+            <button onClick={handleRecategorize} disabled={recat.running || busy}
+              className="flex items-center gap-1.5 px-3 py-2 border border-border rounded-lg text-[13px] hover:bg-secondary transition-colors disabled:opacity-50">
+              <Icon name={recat.running ? "Loader" : "Wand2"} size={14} className={recat.running ? "animate-spin" : ""} />
+              Назначить категории всем счетам
             </button>
           )}
           <button onClick={() => handleAdd(null)}
@@ -188,6 +236,36 @@ export default function CategoriesTab({ role }: { role?: Role }) {
           </button>
         </div>
       </div>
+
+      {/* Прогресс ретроспективного назначения категорий */}
+      {(recat.running || recat.doneMsg) && (
+        <div className="px-4 py-3 bg-primary/5 border border-primary/20 rounded-lg space-y-2">
+          {recat.running ? (
+            <>
+              <div className="flex items-center gap-2 text-[13px] text-foreground">
+                <Icon name="Loader" size={14} className="animate-spin text-primary shrink-0" />
+                <span>
+                  Обработано {recat.processed}{recat.total ? ` из ${recat.total}` : ""} материалов · назначено {recat.assigned}
+                </span>
+              </div>
+              {recat.total > 0 && (
+                <div className="h-2 bg-secondary rounded-full overflow-hidden">
+                  <div className="h-full bg-primary transition-all"
+                    style={{ width: `${Math.min(100, Math.round((recat.processed / recat.total) * 100))}%` }} />
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="flex items-start gap-2 text-[13px] text-emerald-700">
+              <Icon name="CheckCircle2" size={14} className="text-emerald-600 shrink-0 mt-0.5" />
+              <span className="flex-1">{recat.doneMsg}</span>
+              <button onClick={() => setRecat(p => ({ ...p, doneMsg: "" }))} className="text-emerald-400 hover:text-emerald-700">
+                <Icon name="X" size={13} />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="px-4 py-2.5 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">

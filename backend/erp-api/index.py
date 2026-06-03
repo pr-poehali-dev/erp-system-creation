@@ -5019,6 +5019,128 @@ def get_or_create_other_category(cur):
     return cur.fetchone()[0]
 
 
+def _find_category_for_name(cur, name: str, other_cat_id: int, exclude_material_id: int):
+    """Подбирает category_id для материала по его имени, ориентируясь на ДРУГИЕ
+    материалы, у которых уже есть «настоящая» категория (не «Прочее» и не NULL).
+    Алгоритм совпадает с AI-матчингом: точное совпадение -> подстрока -> самый
+    популярный. Возвращает category_id или None, если ничего не подошло.
+    """
+    if not name or not name.strip() or name.strip() == '(не указан)':
+        return None
+    name = name.strip()
+
+    # 1) Точное совпадение по имени среди материалов с реальной категорией.
+    cur.execute(
+        f"""
+        SELECT m.category_id
+        FROM {SCHEMA}.materials m
+        WHERE lower(m.name) = lower(%s)
+          AND m.id != %s
+          AND m.name != '(не указан)'
+          AND m.category_id IS NOT NULL
+          AND m.category_id != %s
+        LIMIT 1
+        """,
+        (name, exclude_material_id, other_cat_id)
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    # 2) Совпадение по подстроке — берём самый популярный материал (по числу
+    #    использований в счетах), у которого есть реальная категория.
+    cur.execute(
+        f"""
+        SELECT m.category_id
+        FROM {SCHEMA}.materials m
+        LEFT JOIN {SCHEMA}.invoices i ON i.material_id = m.id
+        WHERE m.name ILIKE %s
+          AND m.id != %s
+          AND m.name != '(не указан)'
+          AND m.category_id IS NOT NULL
+          AND m.category_id != %s
+        GROUP BY m.id, m.category_id
+        ORDER BY COUNT(i.id) DESC, m.id ASC
+        LIMIT 1
+        """,
+        (f"%{name}%", exclude_material_id, other_cat_id)
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    return None
+
+
+def recategorize_materials(cur, after_id: int = 0, batch_size: int = 200):
+    """Ретроспективное присвоение категорий материалам без категории
+    (category_id IS NULL или = «Прочее»). Обрабатывает пакет материалов
+    с id > after_id, чтобы фронт мог показывать прогресс-бар и не зацикливаться.
+
+    Курсор по id (а не offset) корректен: назначенные материалы выпадают из
+    выборки «без категории», но мы всё равно двигаемся вперёд по id, поэтому
+    пропущенные (без подходящей категории) не обрабатываются повторно.
+
+    Возвращает:
+      total       — всего материалов «без категории» НА СТАРТЕ (after_id=0),
+                    для отображения прогресс-бара,
+      batch       — сколько материалов взято в этот пакет,
+      assigned    — сколько материалов получили категорию в этом пакете,
+      last_id     — максимальный обработанный id (курсор для следующего вызова),
+      done        — True если достигли конца списка.
+    """
+    other_cat_id = get_or_create_other_category(cur)
+
+    # Общее число «без категории» считаем только на старте (для прогресс-бара).
+    total = None
+    if after_id == 0:
+        cur.execute(
+            f"""
+            SELECT COUNT(*) FROM {SCHEMA}.materials
+            WHERE name != '(не указан)'
+              AND (category_id IS NULL OR category_id = %s)
+            """,
+            (other_cat_id,)
+        )
+        total = cur.fetchone()[0]
+
+    # Берём пакет материалов «без категории» с id > after_id по возрастанию id.
+    cur.execute(
+        f"""
+        SELECT id, name FROM {SCHEMA}.materials
+        WHERE name != '(не указан)'
+          AND id > %s
+          AND (category_id IS NULL OR category_id = %s)
+        ORDER BY id ASC
+        LIMIT %s
+        """,
+        (after_id, other_cat_id, batch_size)
+    )
+    rows = cur.fetchall()
+
+    assigned = 0
+    last_id = after_id
+    for mid, mname in rows:
+        last_id = mid
+        new_cat = _find_category_for_name(cur, mname, other_cat_id, mid)
+        if new_cat:
+            cur.execute(
+                f"UPDATE {SCHEMA}.materials SET category_id=%s, updated_at=now() WHERE id=%s",
+                (new_cat, mid)
+            )
+            assigned += 1
+
+    done = len(rows) < batch_size
+    result = {
+        "batch":    len(rows),
+        "assigned": assigned,
+        "last_id":  last_id,
+        "done":     done,
+    }
+    if total is not None:
+        result["total"] = total
+    return result
+
+
 def create_material_category(cur, body):
     """Создать категорию."""
     name = (body.get('name') or '').strip()
@@ -6004,7 +6126,7 @@ def get_invoices(cur, category_id=None, category_filter=None):
         LEFT JOIN {SCHEMA}.materials m ON m.id = i.material_id
         LEFT JOIN {SCHEMA}.material_categories mc ON mc.id = m.category_id
         {where}
-        ORDER BY i.created_at DESC LIMIT 500
+        ORDER BY i.created_at DESC LIMIT 10000
     """, params)
     cols = [d[0] for d in cur.description]
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -6553,7 +6675,7 @@ def handler(event: dict, context) -> dict:
             elif method == "POST":
                 action = body.get("action", "create")
                 # Управление категориями — только директор и директор по снабжению
-                if action in ("create", "rename", "move", "delete", "seed"):
+                if action in ("create", "rename", "move", "delete", "seed", "recategorize"):
                     require_role(cur, user_id, user_role, {"director", "general_director", "supply_director"})
                 if action == "create":
                     try:
@@ -6581,6 +6703,14 @@ def handler(event: dict, context) -> dict:
                     return ok({"ok": ok_res})
                 elif action == "seed":
                     result = seed_material_categories(cur, body.get("tree_text", ""))
+                    conn.commit()
+                    return ok(result)
+                elif action == "recategorize":
+                    after_id   = int(body.get("after_id") or 0)
+                    batch_size = int(body.get("batch_size") or 200)
+                    if batch_size < 1 or batch_size > 1000:
+                        batch_size = 200
+                    result = recategorize_materials(cur, after_id, batch_size)
                     conn.commit()
                     return ok(result)
 
